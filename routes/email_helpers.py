@@ -264,6 +264,101 @@ def _extract_reply(text: str) -> str:
     return _strip_think(t).strip()
 
 
+def _extract_summary_text(text: str) -> str:
+    """Extract a concise summary from a model response.
+
+    Summary prompts use the same fenced final-output convention as replies.
+    When a weaker model ignores the fence, keep the old behavior: strip
+    thinking text first, then prefer bullet-looking lines.
+    """
+    cleaned = _extract_reply(text or "")
+    if not cleaned:
+        return ""
+    bullet_lines = [
+        line.strip()
+        for line in cleaned.splitlines()
+        if re.match(r"^[-•*]\s+|^\d+[.)]\s+", line.strip())
+    ]
+    return "\n".join(bullet_lines) if bullet_lines else cleaned.strip()
+
+
+def _email_llm_candidates(
+    owner: Optional[str] = None,
+    primary: tuple[str | None, str | None, dict | None] | None = None,
+) -> list[tuple[str, str, dict | None]]:
+    """Build the email feature's LLM candidate chain.
+
+    Email actions are background/utility work, so they should use Utility first,
+    then Default, then the configured fallback chains. This keeps Codex/ChatGPT
+    subscription endpoints on the shared llm_core path instead of ad hoc HTTP.
+    """
+    from src.endpoint_resolver import (
+        resolve_endpoint,
+        resolve_utility_fallback_candidates,
+        resolve_chat_fallback_candidates,
+    )
+
+    seen: set[tuple[str, str]] = set()
+    candidates: list[tuple[str, str, dict | None]] = []
+
+    def add(url: str | None, model: str | None, headers: dict | None) -> None:
+        key = (url or "", model or "")
+        if not url or not model or key in seen:
+            return
+        seen.add(key)
+        candidates.append((url, model, headers))
+
+    if primary:
+        add(*primary)
+    for prefix in ("utility", "default"):
+        try:
+            add(*resolve_endpoint(prefix, owner=owner))
+        except Exception as exc:
+            logger.debug("Could not resolve %s email LLM endpoint: %s", prefix, exc)
+    for cand in resolve_utility_fallback_candidates(owner=owner) or []:
+        add(*cand)
+    for cand in resolve_chat_fallback_candidates(owner=owner) or []:
+        add(*cand)
+    return candidates
+
+
+async def _email_llm_call_with_fallback(
+    *,
+    owner: Optional[str],
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    timeout: int,
+    primary: tuple[str | None, str | None, dict | None] | None = None,
+) -> tuple[str, str]:
+    """Call the configured email LLM and return `(text, model_used)`."""
+    from fastapi import HTTPException
+    from src.llm_core import llm_call_async
+
+    candidates = _email_llm_candidates(owner=owner, primary=primary)
+    if not candidates:
+        raise HTTPException(503, "No model endpoint configured")
+
+    last_err: Exception | None = None
+    for index, (url, model, headers) in enumerate(candidates):
+        try:
+            text = await llm_call_async(
+                url=url,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                headers=headers,
+                timeout=timeout,
+            )
+            return text, model
+        except Exception as exc:
+            last_err = exc
+            tag = "primary" if index == 0 else "candidate"
+            logger.warning("[email-llm] %s %s failed (%s); trying next", tag, model, type(exc).__name__)
+    raise last_err if last_err else HTTPException(503, "All email LLM endpoints failed")
+
+
 def _apply_email_style_mechanics(text: str) -> str:
     """Enforce deterministic writing-style mechanics that models often miss."""
     if not text:

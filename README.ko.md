@@ -9,7 +9,7 @@
 <p align="center">
   <a href="#빠른-시작">빠른 시작</a> ·
   <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="integrations/codex/README.md">Codex 연동</a> ·
+  <a href="docs/codex-cli-ko.md">Codex CLI 사용 방향</a> ·
   <a href="README.md">English</a>
 </p>
 
@@ -63,7 +63,19 @@ native 설치, GPU 설정, Windows/macOS 실행, HTTPS, 환경변수는 원본 [
 
 ## Codex CLI 연동
 
-Odysseus는 Codex plugin/skill bundle을 제공합니다. 기준 문서는 [integrations/codex/README.md](integrations/codex/README.md)입니다.
+Odysseus의 Codex 관련 기능은 두 방향을 구분해야 합니다. 자세한 정리는 [docs/codex-cli-ko.md](docs/codex-cli-ko.md)를 확인하세요.
+
+| 목적 | 현재 상태 |
+|---|---|
+| Codex CLI가 Odysseus의 todo, memory, documents, email draft, calendar, cookbook 도구를 사용 | 지원됨. Codex Agent plugin을 설치합니다. |
+| Odysseus가 ChatGPT/Codex backend를 모델로 사용 | 지원됨. ChatGPT Subscription provider와 Codex CLI 로그인 가져오기를 사용할 수 있습니다. |
+| Odysseus의 Add Models 화면에 Codex CLI path를 endpoint처럼 입력 | 직접 실행 방식은 아님. Codex CLI는 HTTP endpoint가 아니므로, 이 fork는 기존 Codex CLI 로그인 세션을 provider로 가져옵니다. |
+
+API 키 없이 기존 Codex CLI 로그인을 재사용하려면 `Settings > Add Models > Add API Models`에서 `Import Codex CLI login`을 누르세요. Odysseus가 `~/.codex/auth.json`의 ChatGPT 로그인 세션을 읽어 `ChatGPT Subscription - Codex CLI` endpoint를 만들고 기본 모델을 설정합니다. 실제 토큰 값은 UI, README, Obsidian 노트에 남기지 않습니다.
+
+채팅 입력창의 모델 선택 옆 `추론` 드롭다운에서 모델별 reasoning effort를 지정할 수 있습니다. 기본값 `자동`은 기존 동작처럼 별도 파라미터를 보내지 않으며, 선택값은 모델별로 브라우저에 저장됩니다. Codex/ChatGPT Subscription 경로는 Responses API 형식의 `reasoning.effort`를 사용하고, 일반 OpenAI 호환 API 경로는 지원 가능한 경우 `reasoning_effort`를 사용합니다.
+
+Odysseus는 Codex plugin/skill bundle을 제공합니다. 원본 기준 문서는 [integrations/codex/README.md](integrations/codex/README.md)입니다.
 
 기본 흐름은 다음과 같습니다.
 
@@ -86,6 +98,12 @@ Odysseus는 Codex plugin/skill bundle을 제공합니다. 기준 문서는 [inte
 - [SECURITY.md](SECURITY.md)
 
 UI 변경은 실제 앱에서 확인하고 screenshot 또는 짧은 recording을 첨부해야 합니다. 자동화 에이전트로 큰 변경을 만들 때는 PR보다 먼저 issue로 문제와 접근 방식을 설명하는 흐름이 권장됩니다.
+
+한국어 UI와 모델 선택 화면의 최소 E2E 검증은 아래 명령으로 실행합니다.
+
+```bash
+ODYSSEUS_E2E_URL=http://127.0.0.1:7860 npm run e2e:ko
+```
 
 ## 보안
 

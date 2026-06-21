@@ -99,6 +99,17 @@ DEFAULT_SETTINGS = {
     "research_planning_timeout_seconds": 90,
     "research_query_timeout_seconds": 90,
     "research_extraction_concurrency": 3,
+    # Optional local knowledge base root. When set to an Obsidian vault path,
+    # Deep Research can use selected vault folders as a private evidence source
+    # in addition to, or instead of, web search.
+    "knowledge_vault_root": "",
+    "knowledge_excluded_dirs": [
+        ".obsidian", ".trash", ".git", ".omx", ".codexian",
+        "node_modules", "__pycache__",
+    ],
+    "research_source_mode": "web",  # "web" | "hybrid" | "knowledge"
+    "research_knowledge_max_chunks": 12,
+    "research_knowledge_auto_index": True,
     # Hard wall-clock cap on a single deep-research run. The previous 600s
     # (10 min) default cut off slow local / edge LLMs mid-synthesis; 1800s
     # (30 min) is comfortable for most local setups while still bounding

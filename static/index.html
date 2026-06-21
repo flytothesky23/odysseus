@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="UTF-8" />
   <title>Odysseus Chat</title>
@@ -923,7 +923,7 @@
     <div class="sidebar-user-bar" id="sidebar-user-bar">
       <div class="user-bar-left" id="user-bar-profile">
         <div class="user-bar-avatar" id="user-bar-avatar"></div>
-        <span class="user-bar-name" id="user-bar-name">User</span>
+        <span class="user-bar-name" id="user-bar-name">사용자</span>
       </div>
       <div class="user-bar-actions">
         <button type="button" class="user-bar-btn" id="user-bar-settings" title="Settings">
@@ -1013,6 +1013,16 @@
             <div class="model-picker-list" id="model-picker-list"></div>
           </div>
         </div>
+        <label class="reasoning-effort-wrap" id="reasoning-effort-wrap" title="모델별 추론 정도">
+          <span class="reasoning-effort-label">추론</span>
+          <select id="reasoning-effort-select" class="reasoning-effort-select" aria-label="모델별 추론 정도">
+            <option value="">자동</option>
+            <option value="low">낮음</option>
+            <option value="medium">보통</option>
+            <option value="high">높음</option>
+            <option value="xhigh">매우 높음</option>
+          </select>
+        </label>
       </div>
       <div id="pinned-tools-bar"></div>
       <div class="chat-input-bottom" style="visibility:hidden">
@@ -1689,6 +1699,34 @@
               </div>
             </div>
           </div>
+
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 2a7 7 0 0 0-7 7c0 2.8 1.6 5.2 4 6.3V22h6v-6.7a7 7 0 0 0-3-13.3Z"/><path d="M9 22h6"/><path d="M10 18h4"/></svg>지식 기반</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Obsidian Vault를 심층 조사의 개인 지식 소스로 사용합니다.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Vault 루트</label>
+                <input id="set-knowledgeVaultRoot" type="text" placeholder="/Users/.../Obsidian" class="settings-select" style="width:382.5px;flex:0 0 auto;margin-left:auto;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">기본 소스</label>
+                <select id="set-researchSourceMode" class="settings-select" style="width:382.5px;flex:0 0 auto;margin-left:auto;">
+                  <option value="web">웹 검색만</option>
+                  <option value="hybrid">웹 + Obsidian</option>
+                  <option value="knowledge">Obsidian만</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">노트 조각 수</label>
+                <input id="set-researchKnowledgeMaxChunks" type="text" inputmode="numeric" placeholder="12" class="settings-select" style="width:382.5px;flex:0 0 auto;margin-left:auto;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">자동 색인</label>
+                <label class="admin-switch" title="심층 조사 시작 전에 선택한 Vault 폴더를 RAG 색인에 반영합니다."><input type="checkbox" id="set-researchKnowledgeAutoIndex" checked><span class="admin-slider"></span></label>
+              </div>
+              <div id="set-knowledgeMsg" class="admin-toggle-sub"></div>
+            </div>
+          </div>
         </div>
 
         <!-- ═══ APPEARANCE TAB ═══ -->
@@ -2183,6 +2221,13 @@
                 </div>
                 <div id="adm-epApiMsg" class="adm-ep-inline-msg"></div>
                 <div id="adm-deviceAuthStatus" class="adm-ep-inline-msg" style="min-height:0;margin-top:0;"></div>
+                <div class="admin-model-form-row" id="adm-codexCliImport-row" style="align-items:center;gap:8px;margin-top:4px;">
+                  <button class="admin-btn-sm" id="adm-codexCliImportBtn" type="button" style="display:inline-flex;align-items:center;gap:6px;">
+                    <span class="adm-provider-logo" style="width:14px;height:14px;display:inline-flex;"></span>
+                    <span>Import Codex CLI login</span>
+                  </button>
+                  <span id="adm-codexCliStatus" class="adm-ep-inline-msg" style="margin:0;min-height:0;"></span>
+                </div>
               </div>
             </div>
           </div>
@@ -2457,6 +2502,7 @@
 <script type="module" src="/static/app.js"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
+  <script type="module" src="/static/js/ko-locale.js?v=20260618-ko3"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>
 </body>
 </html>

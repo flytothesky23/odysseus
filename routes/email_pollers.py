@@ -33,6 +33,7 @@ from src.llm_core import llm_call_async
 
 from routes.email_helpers import (
     _strip_think, _extract_reply, _apply_email_style_mechanics, _load_settings, _save_settings, _get_email_config,
+    _extract_summary_text, _email_llm_call_with_fallback,
     _send_smtp_message,
     _imap_connect, _imap, _decode_header,
     _detect_sent_folder, _detect_spam_folder, _imap_move,
@@ -175,9 +176,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     Reads current settings flags."""
     import asyncio
     import sqlite3 as _sql3
-    import requests as _req
     from src.endpoint_resolver import resolve_endpoint
-    from src.llm_core import _uses_max_completion_tokens, _restricts_temperature
 
     settings = _load_settings()
     auto_sum = settings.get("email_auto_summarize", False)
@@ -395,48 +394,33 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     req_headers.update(headers)
 
                 if need_sum:
-                    tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                    payload = {
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
-                            {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
-                        ],
-                        tok_key: 16384,
-                        "temperature": 0.3,
-                        "stream": False,
-                    }
-                    # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.
-                    if _restricts_temperature(model):
-                        payload.pop("temperature", None)
+                    messages = [
+                        {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
+                        {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
+                    ]
                     try:
-                        # Use to_thread so this sync HTTP call doesn't freeze
-                        # the entire event loop while the LLM thinks (240s).
-                        resp = await asyncio.to_thread(
-                            _req.post, url, json=payload, headers=req_headers, timeout=240
+                        raw_summary, summary_model = await _email_llm_call_with_fallback(
+                            owner=account_owner,
+                            primary=(url, model, headers),
+                            messages=messages,
+                            temperature=0.3,
+                            max_tokens=16384,
+                            timeout=240,
                         )
-                        if resp.ok:
-                            rdata = resp.json()
-                            m = (rdata.get("choices") or [{}])[0].get("message", {})
-                            summary = (m.get("content") or "").strip()
-                            summary = _extract_reply(summary)
-                            if not summary:
-                                rc = (m.get("reasoning_content") or "").strip()
-                                bullets = [ln.strip() for ln in rc.split("\n") if re.match(r"^[-•*]\s+|^\d+[.)]\s+", ln.strip())]
-                                summary = "\n".join(bullets) if bullets else ""
-                            if summary:
-                                _c = _sql3.connect(SCHEDULED_DB)
-                                _c.execute("""
-                                    INSERT OR REPLACE INTO email_summaries
-                                    (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
-                                _c.commit()
-                                _c.close()
-                                _sum_existing.add(message_id)
-                                _summaries_created += 1
-                                _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
-                                _detail_lines.append(f"summary · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
+                        summary = _extract_summary_text(raw_summary)
+                        if summary:
+                            _c = _sql3.connect(SCHEDULED_DB)
+                            _c.execute("""
+                                INSERT OR REPLACE INTO email_summaries
+                                (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, summary_model, datetime.utcnow().isoformat()))
+                            _c.commit()
+                            _c.close()
+                            _sum_existing.add(message_id)
+                            _summaries_created += 1
+                            _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
+                            _detail_lines.append(f"summary · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
                     except Exception as e:
                         _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
                         _detail_lines.append(f"summary failed · {_folder}#{_uid_text} · {subject or '(no subject)'} — {sender or '(unknown sender)'}")
@@ -715,21 +699,14 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "and phishing-style fake urgency. Real urgency comes from people the user "
                             "actually does business with. Be strict — only mark critical/high when genuinely needed."
                         )
-                        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                        payload = {
-                            "model": model,
-                            "messages": [
+                        urg_raw = await llm_call_async(
+                            url=url, model=model, messages=[
                                 {"role": "system", "content": urg_sys},
                                 {"role": "user", "content": (
                                     f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date','')}\n\n"
                                     f"{body[:3000]}"
                                 )},
                             ],
-                            "temperature": 0,
-                            tok_key: 200,
-                        }
-                        urg_raw = await llm_call_async(
-                            url=url, model=model, messages=payload["messages"],
                             temperature=0, max_tokens=200, headers=req_headers, timeout=60,
                         )
                         urg_raw = _strip_think(urg_raw or "")
@@ -849,70 +826,58 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             "If it's a mass-mailed generic update with no personal CTA, mark spam=true even if from a legitimate service. "
                             "Reason should be 5-10 words."
                         )
-                        tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-                        payload = {
-                            "model": model,
-                            "messages": [
-                                {"role": "system", "content": class_sys},
-                                {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:4000]}"},
-                            ],
-                            tok_key: 512,
-                            "temperature": 0.1,
-                            "stream": False,
-                        }
-                        # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.
-                        if _restricts_temperature(model):
-                            payload.pop("temperature", None)
-                        # to_thread keeps the event loop responsive during the LLM call
-                        resp = await asyncio.to_thread(
-                            _req.post, url, json=payload, headers=req_headers, timeout=120
+                        messages = [
+                            {"role": "system", "content": class_sys},
+                            {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body[:4000]}"},
+                        ]
+                        raw_out, class_model = await _email_llm_call_with_fallback(
+                            owner=account_owner,
+                            primary=(url, model, headers),
+                            messages=messages,
+                            temperature=0.1,
+                            max_tokens=512,
+                            timeout=120,
                         )
-                        if not resp.ok:
-                            logger.warning(f"Auto-classify {uid.decode() if isinstance(uid, bytes) else str(uid)} HTTP {resp.status_code}: {resp.text[:200]}")
-                        else:
-                            rdata = resp.json()
-                            m = (rdata.get("choices") or [{}])[0].get("message", {})
-                            raw_out = (m.get("content") or "").strip()
-                            raw_out = _strip_think(raw_out)
-                            raw_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_out, flags=re.MULTILINE).strip()
-                            jm = re.search(r'\{.*\}', raw_out, re.DOTALL)
-                            parsed = None
-                            if jm:
-                                try:
-                                    parsed = json.loads(jm.group(0))
-                                except Exception:
-                                    parsed = None
-                            if parsed is not None:
-                                _ALLOWED_TAGS = {"work","personal","finance","bills","receipt","travel",
-                                                 "newsletter","marketing","notification","security","social",
-                                                 "shopping","calendar"}
-                                raw_tags = parsed.get("tags") or []
-                                if isinstance(raw_tags, str):
-                                    raw_tags = [raw_tags]
-                                tags = [t.strip().lower().replace("_", "-") for t in raw_tags if isinstance(t, str)]
-                                tags = ["marketing" if t == "promo" else t for t in tags]
-                                tags = [t for t in tags if t in _ALLOWED_TAGS][:2]
-                                is_spam = bool(parsed.get("spam"))
-                                spam_reason = str(parsed.get("reason") or "")[:200]
+                        raw_out = _strip_think(raw_out)
+                        raw_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_out, flags=re.MULTILINE).strip()
+                        jm = re.search(r'\{.*\}', raw_out, re.DOTALL)
+                        parsed = None
+                        if jm:
+                            try:
+                                parsed = json.loads(jm.group(0))
+                            except Exception:
+                                parsed = None
+                        if parsed is not None:
+                            _ALLOWED_TAGS = {"work","personal","finance","bills","receipt","travel",
+                                             "newsletter","marketing","notification","security","social",
+                                             "shopping","calendar"}
+                            raw_tags = parsed.get("tags") or []
+                            if isinstance(raw_tags, str):
+                                raw_tags = [raw_tags]
+                            tags = [t.strip().lower().replace("_", "-") for t in raw_tags if isinstance(t, str)]
+                            tags = ["marketing" if t == "promo" else t for t in tags]
+                            tags = [t for t in tags if t in _ALLOWED_TAGS][:2]
+                            is_spam = bool(parsed.get("spam"))
+                            spam_reason = str(parsed.get("reason") or "")[:200]
 
-                                moved_to = ""
-                                if is_spam and auto_spam and spam_folder:
-                                    if _imap_move(uid, spam_folder, account_id=account_id, owner=account_owner):
-                                        moved_to = spam_folder
-                                        logger.info(f"Auto-spam moved uid={uid.decode() if isinstance(uid, bytes) else str(uid)} to {spam_folder}: {spam_reason}")
+                            moved_to = ""
+                            if is_spam and auto_spam and spam_folder:
+                                if _imap_move(uid, spam_folder, account_id=account_id, owner=account_owner):
+                                    moved_to = spam_folder
+                                    logger.info(f"Auto-spam moved uid={uid.decode() if isinstance(uid, bytes) else str(uid)} to {spam_folder}: {spam_reason}")
 
-                                _c = _sql3.connect(SCHEDULED_DB)
-                                _c.execute("""
-                                    INSERT OR REPLACE INTO email_tags
-                                    (message_id, owner, uid, folder, subject, sender, tags, spam_verdict,
-                                     spam_reason, moved_to, model_used, created_at)
-                                    VALUES (?, ?, ?, 'INBOX', ?, ?, ?, ?, ?, ?, ?, ?)
-                                """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), subject, sender,
-                                      json.dumps(tags), 1 if is_spam else 0,
-                                      spam_reason, moved_to, model, datetime.utcnow().isoformat()))
-                                _c.commit()
-                                _c.close()
-                                _tag_existing.add(message_id)
+                            _c = _sql3.connect(SCHEDULED_DB)
+                            _c.execute("""
+                                INSERT OR REPLACE INTO email_tags
+                                (message_id, owner, uid, folder, subject, sender, tags, spam_verdict,
+                                 spam_reason, moved_to, model_used, created_at)
+                                VALUES (?, ?, ?, 'INBOX', ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), subject, sender,
+                                  json.dumps(tags), 1 if is_spam else 0,
+                                  spam_reason, moved_to, class_model, datetime.utcnow().isoformat()))
+                            _c.commit()
+                            _c.close()
+                            _tag_existing.add(message_id)
                     except Exception as e:
                         logger.warning(f"Auto-classify {uid} failed: {e}")
 

@@ -14,10 +14,21 @@ const API_BASE = window.location.origin;
 // favorite toggled here shows up there and vice-versa.
 const RECENT_KEY = 'odysseus-model-recent';
 const FAVORITES_KEY = 'odysseus-model-favorites';
+const REASONING_EFFORT_KEY = 'odysseus-model-reasoning-effort';
 const RECENT_MAX = 5;
 // Catalogs at or below this size are small enough that hiding everything
 // behind search would be a regression — keep listing them in browse mode.
 const BROWSE_ALL_LIMIT = 12;
+const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const REASONING_EFFORT_LABELS = {
+  '': '자동',
+  none: '없음',
+  minimal: '최소',
+  low: '낮음',
+  medium: '보통',
+  high: '높음',
+  xhigh: '매우 높음',
+};
 
 function _loadList(key) {
   try {
@@ -36,6 +47,74 @@ function _pushRecent(mid) {
   _saveList(RECENT_KEY, next.slice(0, RECENT_MAX));
 }
 function _loadFavorites() { return _loadList(FAVORITES_KEY); }
+function _loadReasoningMap() {
+  try {
+    const value = JSON.parse(localStorage.getItem(REASONING_EFFORT_KEY) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch { return {}; }
+}
+function _saveReasoningMap(map) {
+  try { localStorage.setItem(REASONING_EFFORT_KEY, JSON.stringify(map || {})); } catch { /* quota / private mode */ }
+}
+function _normalizeReasoningEffort(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return REASONING_EFFORTS.has(v) ? v : '';
+}
+function _reasoningKey(selection) {
+  if (!selection || !selection.modelId) return '';
+  const endpointPart = selection.endpointId || selection.url || 'default';
+  return `${endpointPart}::${selection.modelId}`;
+}
+function _getCurrentModelSelection() {
+  if (!_deps) return null;
+  const currentSessionId = _deps.getCurrentSessionId();
+  const sessions = _deps.getSessions();
+  const pending = _deps.getPendingChat();
+  const session = sessions.find(x => x.id === currentSessionId);
+  if (session && session.model) {
+    return {
+      modelId: session.model,
+      url: session.endpoint_url || '',
+      endpointId: session.endpoint_id || '',
+    };
+  }
+  if (pending && pending.modelId) {
+    return {
+      modelId: pending.modelId,
+      url: pending.url || '',
+      endpointId: pending.endpointId || '',
+    };
+  }
+  return null;
+}
+function _getReasoningEffort(selection = _getCurrentModelSelection()) {
+  const key = _reasoningKey(selection);
+  if (!key) return '';
+  return _normalizeReasoningEffort(_loadReasoningMap()[key]);
+}
+function _syncReasoningEffortControl() {
+  const wrap = document.getElementById('reasoning-effort-wrap');
+  const select = document.getElementById('reasoning-effort-select');
+  if (!select) return;
+  if (window.groupModule && window.groupModule.isActive()) {
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  if (wrap) wrap.style.display = '';
+  const selection = _getCurrentModelSelection();
+  const hasModel = !!(selection && selection.modelId);
+  select.disabled = !hasModel;
+  select.value = hasModel ? _getReasoningEffort(selection) : '';
+  const label = REASONING_EFFORT_LABELS[select.value] || REASONING_EFFORT_LABELS[''];
+  const title = hasModel
+    ? `${selection.modelId} 추론 정도: ${label}`
+    : '모델을 선택하면 추론 정도를 지정할 수 있습니다';
+  select.title = title;
+  if (wrap) wrap.title = title;
+}
+export function getCurrentReasoningEffort() {
+  return _getReasoningEffort();
+}
 function _toggleFavorite(mid) {
   const favs = _loadFavorites();
   const i = favs.indexOf(mid);
@@ -103,6 +182,7 @@ function _modelExists(modelId, url) {
 export function initModelPicker(deps) {
   _deps = deps;
   _initModelPickerDropdown();
+  _syncReasoningEffortControl();
 }
 
 function _initModelPickerDropdown() {
@@ -111,8 +191,35 @@ function _initModelPickerDropdown() {
   const menu = document.getElementById('model-picker-menu');
   const search = document.getElementById('model-picker-search');
   const listEl = document.getElementById('model-picker-list');
+  const effortSelect = document.getElementById('reasoning-effort-select');
   const searchRow = menu ? menu.querySelector('.model-picker-search-row') : null;
   if (!wrap || !btn || !menu || !search || !listEl) return;
+  if (effortSelect && effortSelect.dataset.bound !== 'true') {
+    effortSelect.dataset.bound = 'true';
+    effortSelect.addEventListener('change', () => {
+      const selection = _getCurrentModelSelection();
+      const key = _reasoningKey(selection);
+      if (!key) {
+        effortSelect.value = '';
+        _syncReasoningEffortControl();
+        return;
+      }
+      const effort = _normalizeReasoningEffort(effortSelect.value);
+      const map = _loadReasoningMap();
+      if (effort) map[key] = effort;
+      else delete map[key];
+      _saveReasoningMap(map);
+      _syncReasoningEffortControl();
+      try {
+        document.dispatchEvent(new CustomEvent('odysseus:reasoning-effort-changed', {
+          detail: { ...selection, reasoningEffort: effort },
+        }));
+      } catch {}
+      if (uiModule && uiModule.showToast) {
+        uiModule.showToast(`추론 정도: ${REASONING_EFFORT_LABELS[effort] || REASONING_EFFORT_LABELS['']}`);
+      }
+    });
+  }
 
   function _close() {
     if (menu.classList.contains('hidden')) return;
@@ -521,7 +628,7 @@ function _initModelPickerDropdown() {
         }
         const sessions = _deps.getSessions();
         const s = sessions.find(x => x.id === currentSessionId);
-        if (s) { s.model = m.mid; s.endpoint_url = m.url; }
+        if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || s.endpoint_id || ''; }
         // Header stays as session name — model info shown in picker only
       } catch (e) {
         uiModule.showError('Failed to set model: ' + e);
@@ -619,7 +726,12 @@ function _initModelPickerDropdown() {
     });
   }
   document.addEventListener('click', (e) => {
-    if (!menu.classList.contains('hidden') && !menu.contains(e.target) && e.target !== btn) {
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target) && !btn.contains(e.target)) {
+      _close();
+    }
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.classList.contains('hidden')) {
       _close();
     }
   });
@@ -638,6 +750,7 @@ export function updateModelPicker() {
   const wrap = document.getElementById('model-picker-wrap');
   if (window.groupModule && window.groupModule.isActive()) {
     if (wrap) { wrap.style.display = 'none'; }
+    _syncReasoningEffortControl();
     return;
   }
   // Reset inline visibility (may have been hidden by typing in previous session)
@@ -697,7 +810,7 @@ export function updateModelPicker() {
       if (!currentSessionId) {
         _deps.setPendingChat({ url: first.url, modelId, endpointId: first.endpoint_id });
       } else {
-        if (s) { s.model = modelId; s.endpoint_url = first.url; }
+        if (s) { s.model = modelId; s.endpoint_url = first.url; s.endpoint_id = first.endpoint_id || s.endpoint_id || ''; }
         _autoSelectingDefault = true;
         const fd = new FormData();
         fd.append('model', modelId);
@@ -720,4 +833,5 @@ export function updateModelPicker() {
   } else {
     label.textContent = displayName;
   }
+  _syncReasoningEffortControl();
 }

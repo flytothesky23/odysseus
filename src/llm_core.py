@@ -45,7 +45,8 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 # Cache for LLM responses
 def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+                   temperature: float, max_tokens: int,
+                   reasoning_effort: Optional[str] = None) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
@@ -57,11 +58,45 @@ def _get_cache_key(url: str, model: str, messages: List[Dict],
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
-        'max_tokens': max_tokens
+        'max_tokens': max_tokens,
+        'reasoning_effort': reasoning_effort or ''
     }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
 _response_cache = {}
+_VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def _normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
+    """Return a supported reasoning-effort value, or None for automatic/default."""
+    if value is None:
+        return None
+    effort = str(value).strip().lower()
+    return effort if effort in _VALID_REASONING_EFFORTS else None
+
+
+def _apply_chat_reasoning_effort(payload: Dict, provider: str, url: str, effort: Optional[str]) -> None:
+    """Attach OpenAI-compatible Chat Completions reasoning effort when safe."""
+    normalized = _normalize_reasoning_effort(effort)
+    if not normalized:
+        return
+    if provider in {"anthropic", "ollama", "chatgpt-subscription", "copilot"}:
+        return
+    if _is_self_hosted_openai_compatible(url):
+        return
+    payload["reasoning_effort"] = normalized
+
+
+def _apply_responses_reasoning_effort(payload: Dict, effort: Optional[str]) -> None:
+    """Attach Responses API reasoning effort without disturbing other reasoning options."""
+    normalized = _normalize_reasoning_effort(effort)
+    if not normalized:
+        return
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, dict):
+        reasoning = {}
+    reasoning["effort"] = normalized
+    payload["reasoning"] = reasoning
 
 # Dead-host cooldown: maps host (scheme://host:port) -> unix ts when cooldown expires.
 # When a connect to a host fails, we mark it dead for DEAD_HOST_COOLDOWN seconds so
@@ -765,6 +800,7 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    reasoning_effort: Optional[str] = None,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input
 
@@ -781,6 +817,7 @@ def _build_chatgpt_responses_payload(
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
+    _apply_responses_reasoning_effort(payload, reasoning_effort)
     return payload
 
 
@@ -1373,7 +1410,8 @@ def normalize_model_id(
 
 def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None, 
-             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None) -> str:
+             timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
+             reasoning_effort: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
     h = _provider_headers(_detect_provider(url))
     # Tolerate headers that arrive as a JSON string (some sessions stored them
@@ -1403,7 +1441,8 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         messages_copy = non_sys
 
     provider = _detect_provider(url)
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, normalized_reasoning_effort)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1434,6 +1473,7 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        _apply_chat_reasoning_effort(payload, provider, target_url, normalized_reasoning_effort)
     try:
         note_model_activity(target_url, model)
         r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
@@ -1532,6 +1572,7 @@ async def llm_call_async(
     max_retries: int = LLMConfig.MAX_RETRIES,
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -1550,7 +1591,8 @@ async def llm_call_async(
     else:
         messages_copy = non_sys
 
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens, normalized_reasoning_effort)
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -1569,6 +1611,7 @@ async def llm_call_async(
             max_tokens=max_tokens,
             headers=headers,
             timeout=timeout,
+            reasoning_effort=normalized_reasoning_effort,
         ):
             event_is_error = False
             for line in str(chunk).splitlines():
@@ -1628,6 +1671,7 @@ async def llm_call_async(
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        _apply_chat_reasoning_effort(payload, provider, target_url, normalized_reasoning_effort)
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
@@ -1689,7 +1733,8 @@ async def llm_call_async(
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
-                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None):
+                     tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
+                     reasoning_effort: Optional[str] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -1699,6 +1744,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
       - data: [DONE]                       — end of stream
     """
     provider = _detect_provider(url)
+    normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
     messages_copy = _sanitize_llm_messages(messages)
 
     # Consolidate multiple system messages into one at the start.
@@ -1731,7 +1777,10 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=True, reasoning_effort=normalized_reasoning_effort,
+        )
     else:
         target_url = url
         payload = {
@@ -1747,6 +1796,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        _apply_chat_reasoning_effort(payload, provider, target_url, normalized_reasoning_effort)
         if tools:
             payload["tools"] = tools
         # For Ollama's OpenAI-compat /v1 endpoint with thinking models (qwen3,

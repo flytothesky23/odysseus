@@ -1668,6 +1668,68 @@ async function initResearchSearchSettings() {
   searchSel.addEventListener('change', function() { updateSearchLogo(); saveResearchSearch(); });
 }
 
+/* ── Knowledge Base (Search tab) ── */
+async function initKnowledgeBaseSettings() {
+  var rootInput = el('set-knowledgeVaultRoot');
+  var modeSel = el('set-researchSourceMode');
+  var maxChunksInput = el('set-researchKnowledgeMaxChunks');
+  var autoIndexInput = el('set-researchKnowledgeAutoIndex');
+  var msg = el('set-knowledgeMsg');
+  if (!rootInput || !modeSel || !maxChunksInput || !autoIndexInput) return;
+
+  function showStatus(settings) {
+    var root = (rootInput.value || '').trim();
+    var chunks = parseInt(maxChunksInput.value || '12', 10) || 12;
+    var modeLabel = modeSel.options[modeSel.selectedIndex]?.textContent || '웹 검색만';
+    if (!root) {
+      msg.textContent = 'Vault 루트를 설정하면 심층 조사에서 Obsidian 폴더를 선택할 수 있습니다.';
+      msg.style.color = 'var(--fg)';
+      return;
+    }
+    msg.textContent = modeLabel + ' · 최대 ' + chunks + '개 노트 조각 · ' + (autoIndexInput.checked ? '자동 색인' : '색인된 내용만 사용');
+    msg.style.color = 'var(--fg)';
+  }
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.knowledge_vault_root) rootInput.value = settings.knowledge_vault_root;
+    if (settings.research_source_mode) modeSel.value = settings.research_source_mode;
+    if (settings.research_knowledge_max_chunks) maxChunksInput.value = settings.research_knowledge_max_chunks;
+    autoIndexInput.checked = settings.research_knowledge_auto_index !== false;
+    showStatus(settings);
+  } catch (e) {
+    console.warn('Failed to load knowledge base settings', e);
+  }
+
+  async function saveKnowledgeSettings() {
+    var payload = {
+      knowledge_vault_root: (rootInput.value || '').trim(),
+      research_source_mode: modeSel.value || 'web',
+      research_knowledge_auto_index: !!autoIndexInput.checked,
+    };
+    var chunks = parseInt(maxChunksInput.value, 10);
+    if (!isNaN(chunks)) payload.research_knowledge_max_chunks = Math.max(1, Math.min(50, chunks));
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      msg.textContent = '저장됨';
+      msg.style.color = 'var(--fg)';
+      setTimeout(function() { showStatus(payload); }, 1200);
+    } catch (e) {
+      msg.textContent = '저장 실패';
+      msg.style.color = 'var(--red)';
+    }
+  }
+
+  rootInput.addEventListener('change', saveKnowledgeSettings);
+  modeSel.addEventListener('change', saveKnowledgeSettings);
+  maxChunksInput.addEventListener('change', saveKnowledgeSettings);
+  autoIndexInput.addEventListener('change', saveKnowledgeSettings);
+}
+
 /* ── Agent Settings (AI tab) ── */
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
@@ -2349,6 +2411,7 @@ function initAll() {
   initSearchSettings();
   initResearchSettings();
   initResearchSearchSettings();
+  initKnowledgeBaseSettings();
   initAgentSettings();
   initAppearance();
   initShortcuts();

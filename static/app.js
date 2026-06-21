@@ -296,7 +296,7 @@ function initializeEventListeners() {
         const isUser = child.classList.contains('msg-user');
         let label;
         if (isUser) {
-          label = 'User';
+          label = '사용자';
         } else {
           const roleEl = child.querySelector('.role');
           const ts = roleEl?.querySelector('.role-timestamp');

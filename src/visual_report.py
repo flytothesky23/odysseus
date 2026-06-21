@@ -13,16 +13,19 @@ and wraps them in an editorial-quality HTML document with:
 - Print/Share toolbar
 """
 import html
+import base64
 import json
 import logging
+import mimetypes
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
 from src.research_utils import strip_thinking
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import markdown
 import nh3
@@ -179,8 +182,75 @@ _IMG_OVERLAY_BTNS = (
     '</button>'
 )
 
+_MAX_EMBEDDED_VAULT_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_REPORT_IMAGES = 18
 
-def _inject_images(report_html: str, images: List[str]) -> Tuple[str, int]:
+
+def _is_vault_image_url(url: str) -> bool:
+    return str(url or "").startswith("vault-image://")
+
+
+def _vault_image_url_to_data_src(url: str) -> Optional[str]:
+    """Convert a vault-image:// URL into a browser-safe data image URL.
+
+    The URL is only honored when it resolves under the configured Obsidian
+    vault root. This keeps local filesystem paths private and prevents the
+    report page from becoming a generic local-file reader.
+    """
+    if not _is_vault_image_url(url):
+        return None
+    try:
+        from src.knowledge_base import IMAGE_EXTENSIONS, configured_vault_root
+
+        root = configured_vault_root()
+        if root is None:
+            return None
+        rel = unquote(url.removeprefix("vault-image://")).strip().lstrip("/")
+        if not rel:
+            return None
+        path = (root / rel).resolve()
+        path.relative_to(root.resolve())
+        if not path.exists() or not path.is_file():
+            return None
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            return None
+        if path.stat().st_size > _MAX_EMBEDDED_VAULT_IMAGE_BYTES:
+            logger.info("Skipping oversized vault image in visual report: %s", rel)
+            return None
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        if not mime.startswith("image/"):
+            return None
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+    except Exception as exc:
+        logger.debug("Could not embed vault image %r: %s", url, exc)
+        return None
+
+
+def _image_url_from_source(value) -> str:
+    if isinstance(value, dict):
+        return str(value.get("url") or value.get("src") or value.get("image") or "").strip()
+    return str(value or "").strip()
+
+
+def _normalize_report_image(value, *, hidden_images_set: set, blocklist: set) -> Optional[Dict[str, str]]:
+    raw = _image_url_from_source(value)
+    if not raw or raw in hidden_images_set:
+        return None
+    if _is_vault_image_url(raw):
+        src = _vault_image_url_to_data_src(raw)
+        if not src:
+            return None
+        return {"id": raw, "src": src}
+    if (raw.startswith("https://")
+        and raw not in blocklist
+        and not raw.endswith((".svg", ".ico", ".gif"))
+        and not _is_icon_or_logo_url(raw)):
+        return {"id": raw, "src": raw}
+    return None
+
+
+def _inject_images(report_html: str, images: List[Dict[str, str]]) -> Tuple[str, int]:
     """Insert OG images between h2 sections as figures.
 
     Returns (html, consumed) where ``consumed`` is how many of ``images``
@@ -201,12 +271,15 @@ def _inject_images(report_html: str, images: List[str]) -> Tuple[str, int]:
     for pos in reversed(insert_after):
         if img_idx >= len(images):
             break
-        img_url = images[img_idx]
+        image = images[img_idx]
         img_idx += 1
-        url_esc = html.escape(img_url)
+        img_id = html.escape(image.get("id", ""))
+        img_src = html.escape(image.get("src", ""))
+        if not img_id or not img_src:
+            continue
         figure = (
-            f'\n<figure class="section-image" data-img-url="{url_esc}">'
-            f'<img src="{url_esc}" alt="" loading="lazy" '
+            f'\n<figure class="section-image" data-img-url="{img_id}">'
+            f'<img src="{img_src}" alt="" loading="lazy" '
             f'onerror="this.parentElement.style.display=\'none\'">'
             f'{_IMG_OVERLAY_BTNS}'
             f'</figure>\n'
@@ -914,8 +987,17 @@ body::after {{
   // no-op if there's no session_id (e.g. the report was opened from a
   // saved-HTML download where the backend isn't reachable).
   var __sessionId = {session_id_js};
-  // Unused scraped images — the reroll pool. Each is used at most once.
+  // Unused report images — the reroll pool. Each is used at most once.
+  // Items can be plain URL strings (legacy) or {{id, src}}; vault images use a
+  // short vault-image:// id for persistence and a data:image src for display.
   var __spareImages = {spare_images_js};
+
+  function __imageItemId(item) {{
+    return (item && typeof item === 'object') ? (item.id || item.src || '') : String(item || '');
+  }}
+  function __imageItemSrc(item) {{
+    return (item && typeof item === 'object') ? (item.src || item.id || '') : String(item || '');
+  }}
 
   // Persist a rejected URL so future renders skip it.
   function __persistHide(url) {{
@@ -963,7 +1045,10 @@ body::after {{
       if (!img) return;
       btn.dataset._busy = '1';
       var oldUrl = wrap.dataset.imgUrl;
-      var newUrl = __spareImages.shift();
+      var nextItem = __spareImages.shift();
+      var newUrl = __imageItemId(nextItem);
+      var newSrc = __imageItemSrc(nextItem);
+      if (!newUrl || !newSrc) {{ __syncRerollAvailability(); return; }}
       btn.classList.add('spinning');
       // Swap once the new image has loaded (or failed) to avoid a flash of empty.
       var probe = new Image();
@@ -973,7 +1058,7 @@ body::after {{
         btn.classList.remove('spinning');
         delete btn.dataset._busy;
         if (ok) {{
-          img.src = newUrl;
+          img.src = newSrc;
           wrap.dataset.imgUrl = newUrl;
           __persistHide(oldUrl);
         }} else {{
@@ -987,7 +1072,7 @@ body::after {{
       }};
       probe.onload = function() {{ finish(true); }};
       probe.onerror = function() {{ finish(false); }};
-      probe.src = newUrl;
+      probe.src = newSrc;
     }});
   }});
   __syncRerollAvailability();
@@ -1745,31 +1830,47 @@ def generate_visual_report(
     headings = _extract_headings(report_markdown)
     report_html = _apply_heading_ids(report_html, headings)
 
-    # Collect all OG images from sources (skip icons, tiny images, known junk)
+    # Collect report images from sources. Web reports provide OpenGraph image
+    # URLs; Obsidian-only reports can provide vault-image:// references that
+    # are validated and embedded as data URLs above.
     _IMAGE_BLOCKLIST = {
         "cdn.shopify.com/s/files/1/0179/4388/7926/files/icon.png",
     }
     _seen_images = set()
     all_images = []
     for s in sources:
-        img = s.get("image", "")
-        if (img and img.startswith("https://")
-            and img not in _seen_images
-            and img not in hidden_images_set
-            and not img.endswith((".svg", ".ico", ".gif"))
-            and not any(b in img for b in _IMAGE_BLOCKLIST)
-            and not _is_icon_or_logo_url(img)):
-            _seen_images.add(img)
-            all_images.append(img)
+        candidates = []
+        if s.get("image"):
+            candidates.append(s.get("image"))
+        if isinstance(s.get("images"), list):
+            candidates.extend(s.get("images") or [])
+        for candidate in candidates:
+            image = _normalize_report_image(
+                candidate,
+                hidden_images_set=hidden_images_set,
+                blocklist=_IMAGE_BLOCKLIST,
+            )
+            if not image:
+                continue
+            image_id = image.get("id", "")
+            if not image_id or image_id in _seen_images:
+                continue
+            _seen_images.add(image_id)
+            all_images.append(image)
+            if len(all_images) >= _MAX_REPORT_IMAGES:
+                break
+        if len(all_images) >= _MAX_REPORT_IMAGES:
+            break
 
     # Hero image = first available. data-img-url drives the per-image hide
     # button rendered by the script at the bottom of the page.
     hero_image_html = ""
     if all_images:
-        hero_url = html.escape(all_images[0])
+        hero_id = html.escape(all_images[0]["id"])
+        hero_src = html.escape(all_images[0]["src"])
         hero_image_html = (
-            f'<div class="hero-image" data-img-url="{hero_url}">'
-            f'<img src="{hero_url}" alt="" loading="lazy" '
+            f'<div class="hero-image" data-img-url="{hero_id}">'
+            f'<img src="{hero_src}" alt="" loading="lazy" '
             f'onerror="this.parentElement.style.display=\'none\'">'
             f'{_IMG_OVERLAY_BTNS}'
             f'</div>'
@@ -1819,12 +1920,15 @@ def generate_visual_report(
             url = s.get("url", "")
             title = html.escape(s.get("title", "") or url)
             domain = ""
-            try:
-                domain = urlparse(url).hostname or ""
-                if domain.startswith("www."):
-                    domain = domain[4:]
-            except Exception:
-                domain = url
+            if s.get("source_type") == "obsidian" or str(url).startswith("vault://"):
+                domain = "Obsidian"
+            else:
+                try:
+                    domain = urlparse(url).hostname or ""
+                    if domain.startswith("www."):
+                        domain = domain[4:]
+                except Exception:
+                    domain = url
             items.append(
                 f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
                 f'<span class="snum">{i}.</span>'
@@ -1846,8 +1950,9 @@ def generate_visual_report(
     # Build description for OG/meta tags (first 160 chars of plain text)
     desc_text = re.sub(r'[#*_\[\]()]', '', report_markdown)[:160].strip()
     og_image_meta = ""
-    if all_images:
-        og_image_meta = f'<meta property="og:image" content="{html.escape(all_images[0])}">'
+    first_remote_image = next((img.get("src", "") for img in all_images if img.get("src", "").startswith("https://")), "")
+    if first_remote_image:
+        og_image_meta = f'<meta property="og:image" content="{html.escape(first_remote_image)}">'
 
     chat_cta_html = ""
     if session_id:

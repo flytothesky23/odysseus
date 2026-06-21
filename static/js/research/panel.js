@@ -62,6 +62,7 @@ let _expandedJobId = null;
 let _markdownModule = null;
 let _sessionModule = null;
 let _settingsCollapsed = false;
+let _knowledgeConfig = { configured: false, folders: [] };
 const _SETTINGS_KEY = 'odysseus-research-settings';
 const _COLLAPSE_KEY = 'odysseus-research-settings-collapsed';
 
@@ -75,6 +76,8 @@ function _saveSettingsToStorage() {
       endpoint_id: document.getElementById('research-endpoint')?.value || '',
       model: document.getElementById('research-model')?.value || '',
       category: document.getElementById('research-category')?.value || '',
+      source_mode: document.getElementById('research-source-mode')?.value || '',
+      knowledge_folders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map(o => o.value).filter(Boolean),
     }));
   } catch {}
 }
@@ -258,16 +261,16 @@ export function openPanel(focusJobId) {
   overlay.id = 'research-overlay';
   overlay.className = 'modal research-overlay';
 
-  // Match doclib/gallery/calendar modal sizing exactly so research feels like
-  // the rest of the modal family (centered, ~640px, 85vh).
+  // Research has dense runtime controls, so desktop gets a little more width
+  // than the simpler doclib/gallery/calendar modal family.
   const pane = document.createElement('div');
   pane.id = 'research-pane';
   pane.className = 'modal-content doclib-modal-content research-pane';
   // Mobile: full-screen so the content has room and the jobs list can scroll
-  // inside it. Desktop: centered ~640px / 85vh modal like the rest.
+  // inside it. Desktop: centered modal with room for long source paths.
   pane.style.cssText = (window.innerWidth <= 768)
     ? 'width:100vw;max-width:100vw;height:90dvh;max-height:90dvh;border-radius:14px 14px 0 0;background:var(--bg);'
-    : 'width:min(640px, 92vw);max-height:85vh;background:var(--bg);';
+    : 'width:min(820px, 94vw);max-height:85vh;background:var(--bg);';
   pane.innerHTML = _buildPanelHTML();
 
   overlay.appendChild(pane);
@@ -295,6 +298,10 @@ export function openPanel(focusJobId) {
 
   _wireEvents(pane);
   _loadEndpoints().then(_restoreSavedSettings);
+  _loadKnowledgeOptions().then(() => {
+    _restoreSavedSettings();
+    _syncKnowledgeControls();
+  });
   _clearBadge();
   _updateResearchCount();
 
@@ -346,6 +353,12 @@ function _buildPanelHTML() {
   const providerOpts = searchProviders.map(p =>
     `<option value="${p}">${p || 'Default'}</option>`
   ).join('');
+  const sourceModeOpts = [
+    ['', 'Default'],
+    ['web', 'Web only'],
+    ['hybrid', 'Web + Obsidian'],
+    ['knowledge', 'Obsidian only'],
+  ].map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
 
   let roundOpts = '<option value="0" selected>Auto</option>';
   for (let i = 1; i <= 20; i++) {
@@ -384,31 +397,42 @@ function _buildPanelHTML() {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings<span class="research-settings-chevron">${_chevronIcon}</span>
         </button>
         <div id="research-settings-body" class="research-settings-row"${settingsHidden}>
-          <label class="research-setting">
-            <span class="research-setting-label">Rounds <span class="hwfit-help-chip hwfit-help-chip-inline" title="How many search → read → reflect rounds the agent runs. More rounds = deeper coverage, longer wait, more tokens.">?</span></span>
-            <select id="research-rounds">${roundOpts}</select>
+          <div class="research-settings-grid">
+            <label class="research-setting">
+              <span class="research-setting-label">Rounds <span class="hwfit-help-chip hwfit-help-chip-inline" title="How many search → read → reflect rounds the agent runs. More rounds = deeper coverage, longer wait, more tokens.">?</span></span>
+              <select id="research-rounds">${roundOpts}</select>
+            </label>
+            <label class="research-setting">
+              <span class="research-setting-label">Format <span class="hwfit-help-chip hwfit-help-chip-inline" title="Auto lets the LLM pick the output shape. Override when you specifically want a Compare table, How-to, Product, or Fact-check.">?</span></span>
+              <select id="research-category">
+                <option value="" selected>Auto</option>
+                <option value="product">Product</option>
+                <option value="comparison">Compare</option>
+                <option value="howto">How-to</option>
+                <option value="factcheck">Fact-check</option>
+              </select>
+            </label>
+            <label class="research-setting">
+              <span class="research-setting-label">Search engine</span>
+              <select id="research-search-provider">${providerOpts}</select>
+            </label>
+            <label class="research-setting">
+              <span class="research-setting-label">Source</span>
+              <select id="research-source-mode">${sourceModeOpts}</select>
+            </label>
+            <label class="research-setting">
+              <span class="research-setting-label">Endpoint</span>
+              <select id="research-endpoint"><option value="">Default</option></select>
+            </label>
+          </div>
+          <label class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
+            <span class="research-setting-label">Obsidian folders</span>
+            <select id="research-knowledge-folders" class="research-folder-select" multiple size="6"><option value="">Loading...</option></select>
+            <span class="research-setting-hint">선택하지 않으면 설정된 Vault 전체를 사용합니다. 여러 폴더는 Command 키를 누른 채 선택하세요.</span>
           </label>
-          <label class="research-setting">
-            <span class="research-setting-label">Format <span class="hwfit-help-chip hwfit-help-chip-inline" title="Auto lets the LLM pick the output shape. Override when you specifically want a Compare table, How-to, Product, or Fact-check.">?</span></span>
-            <select id="research-category">
-              <option value="" selected>Auto</option>
-              <option value="product">Product</option>
-              <option value="comparison">Compare</option>
-              <option value="howto">How-to</option>
-              <option value="factcheck">Fact-check</option>
-            </select>
-          </label>
-          <label class="research-setting">
-            <span class="research-setting-label">Search engine</span>
-            <select id="research-search-provider">${providerOpts}</select>
-          </label>
-          <label class="research-setting">
-            <span class="research-setting-label">Endpoint</span>
-            <select id="research-endpoint"><option value="">Default</option></select>
-          </label>
-          <label class="research-setting">
+          <label class="research-setting research-setting-wide">
             <span class="research-setting-label">Model</span>
-            <select id="research-model"><option value="">Default</option></select>
+            <select id="research-model" class="research-model-select"><option value="">Default</option></select>
           </label>
         </div>
         <div class="research-controls-row">
@@ -481,19 +505,26 @@ function _wireEvents(pane) {
 
   const endpointSelect = pane.querySelector('#research-endpoint');
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
+  pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
 
   _renderJobs();
 }
 
 function _readSettings() {
   const category = document.getElementById('research-category')?.value || undefined;
+  const sourceMode = document.getElementById('research-source-mode')?.value || undefined;
+  const knowledgeFolders = Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || [])
+    .map(o => o.value)
+    .filter(Boolean);
   const settings = {
     max_rounds: parseInt(document.getElementById('research-rounds')?.value || '0', 10),
     search_provider: document.getElementById('research-search-provider')?.value || undefined,
     endpoint_id: document.getElementById('research-endpoint')?.value || undefined,
     model: document.getElementById('research-model')?.value || undefined,
     category: category || undefined,
+    source_mode: sourceMode || undefined,
   };
+  if (knowledgeFolders.length && sourceMode !== 'web') settings.knowledge_folders = knowledgeFolders;
   const epSel = document.getElementById('research-endpoint');
   if (epSel && epSel.value) {
     const opt = epSel.options[epSel.selectedIndex];
@@ -533,6 +564,13 @@ function _editJob(job) {
   if (roundsEl && s.max_rounds) roundsEl.value = s.max_rounds;
   const spEl = document.getElementById('research-search-provider');
   if (spEl && s.search_provider) spEl.value = s.search_provider;
+  const sourceEl = document.getElementById('research-source-mode');
+  if (sourceEl && s.source_mode) sourceEl.value = s.source_mode;
+  const folderEl = document.getElementById('research-knowledge-folders');
+  if (folderEl && Array.isArray(s.knowledge_folders)) {
+    Array.from(folderEl.options).forEach(opt => { opt.selected = s.knowledge_folders.includes(opt.value); });
+  }
+  _syncKnowledgeControls();
   const epEl = document.getElementById('research-endpoint');
   if (epEl && s.endpoint_id) epEl.value = s.endpoint_id;
   const mEl = document.getElementById('research-model');
@@ -620,6 +658,15 @@ function _restoreSavedSettings() {
   // Users can pick a specific cap each time if needed.
   const search = document.getElementById('research-search-provider');
   if (search && saved.search_provider !== undefined) search.value = saved.search_provider;
+  const source = document.getElementById('research-source-mode');
+  if (source && saved.source_mode !== undefined) source.value = saved.source_mode;
+  const folders = document.getElementById('research-knowledge-folders');
+  if (folders && Array.isArray(saved.knowledge_folders)) {
+    Array.from(folders.options).forEach(opt => {
+      opt.selected = saved.knowledge_folders.includes(opt.value);
+    });
+  }
+  _syncKnowledgeControls();
   const ep = document.getElementById('research-endpoint');
   if (ep && saved.endpoint_id) {
     ep.value = saved.endpoint_id;
@@ -647,6 +694,48 @@ async function _loadEndpoints() {
       sel.appendChild(opt);
     });
   } catch {}
+}
+
+async function _loadKnowledgeOptions() {
+  const sourceSel = document.getElementById('research-source-mode');
+  const folderSel = document.getElementById('research-knowledge-folders');
+  if (!sourceSel || !folderSel) return;
+  try {
+    const settingsRes = await fetch(`${_apiBase}/api/research/knowledge/settings`, { credentials: 'same-origin' });
+    const settings = settingsRes.ok ? await settingsRes.json() : {};
+    _knowledgeConfig.configured = !!settings.configured;
+    if (settings.source_mode && !sourceSel.value) sourceSel.value = settings.source_mode;
+    if (!_knowledgeConfig.configured) {
+      folderSel.innerHTML = '<option value="">Set vault root in Settings</option>';
+      folderSel.disabled = true;
+      return;
+    }
+    const folderRes = await fetch(`${_apiBase}/api/research/knowledge/folders?recursive=true&max_depth=3`, { credentials: 'same-origin' });
+    const data = folderRes.ok ? await folderRes.json() : { folders: [] };
+    _knowledgeConfig.folders = Array.isArray(data.folders) ? data.folders : [];
+    folderSel.disabled = false;
+    folderSel.innerHTML = _knowledgeConfig.folders.length
+      ? _knowledgeConfig.folders.map(f => {
+          const indent = '&nbsp;'.repeat(Math.max(0, (f.depth || 1) - 1) * 2);
+          return `<option value="${_esc(f.path)}" title="${_esc(f.path)}">${indent}${_esc(f.path)}</option>`;
+        }).join('')
+      : '<option value="">No folders found</option>';
+  } catch {
+    _knowledgeConfig = { configured: false, folders: [] };
+    folderSel.innerHTML = '<option value="">Could not load folders</option>';
+    folderSel.disabled = true;
+  }
+}
+
+function _syncKnowledgeControls() {
+  const sourceSel = document.getElementById('research-source-mode');
+  const row = document.getElementById('research-knowledge-setting');
+  const folderSel = document.getElementById('research-knowledge-folders');
+  if (!sourceSel || !row) return;
+  const mode = sourceSel.value || '';
+  const usesKnowledge = mode === 'hybrid' || mode === 'knowledge';
+  row.style.display = usesKnowledge ? '' : 'none';
+  if (folderSel) folderSel.disabled = usesKnowledge && !_knowledgeConfig.configured;
 }
 
 function _populateModels(endpointId) {

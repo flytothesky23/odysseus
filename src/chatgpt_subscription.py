@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
@@ -61,6 +62,10 @@ class ChatGPTSubscriptionAuthNotFound(ChatGPTSubscriptionError):
     """No matching owner-scoped auth session exists."""
 
 
+class CodexCliAuthNotFound(ChatGPTSubscriptionError):
+    """No usable Codex CLI ChatGPT login was found on this machine."""
+
+
 def is_chatgpt_subscription_base(url: str) -> bool:
     try:
         from urllib.parse import urlparse
@@ -73,6 +78,120 @@ def is_chatgpt_subscription_base(url: str) -> bool:
     return host == "chatgpt.com" and (
         path == "/backend-api/codex" or path.startswith("/backend-api/codex/")
     )
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    out: list[Path] = []
+    for path in paths:
+        try:
+            key = str(path.expanduser())
+        except Exception:
+            continue
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(Path(key))
+    return out
+
+
+def codex_cli_auth_candidates(explicit_path: Optional[str] = None) -> list[Path]:
+    """Return likely Codex CLI auth.json locations without reading secrets."""
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path))
+    env_auth = os.getenv("CODEX_AUTH_FILE", "").strip()
+    if env_auth:
+        candidates.append(Path(env_auth))
+    codex_home = os.getenv("CODEX_HOME", "").strip()
+    if codex_home:
+        candidates.append(Path(codex_home) / "auth.json")
+    candidates.extend([
+        Path("~/.codex/auth.json"),
+        Path("~/Library/Application Support/Codex/auth.json"),
+        Path("~/.config/codex/auth.json"),
+    ])
+    return _dedupe_paths(candidates)
+
+
+def find_codex_cli_auth_file(explicit_path: Optional[str] = None) -> Optional[Path]:
+    for candidate in codex_cli_auth_candidates(explicit_path):
+        path = candidate.expanduser()
+        if path.is_file():
+            return path
+    return None
+
+
+def codex_cli_auth_status(explicit_path: Optional[str] = None) -> Dict[str, Any]:
+    """Return a redacted status object for UI diagnostics."""
+    path = find_codex_cli_auth_file(explicit_path)
+    if not path:
+        return {
+            "found": False,
+            "path": str(codex_cli_auth_candidates(explicit_path)[0].expanduser())
+            if codex_cli_auth_candidates(explicit_path) else "",
+            "auth_mode": "",
+            "has_chatgpt_tokens": False,
+        }
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "found": True,
+            "path": str(path),
+            "auth_mode": "",
+            "has_chatgpt_tokens": False,
+            "error": "Codex CLI auth file is not readable JSON.",
+        }
+    tokens = data.get("tokens") if isinstance(data, dict) else {}
+    tokens = tokens if isinstance(tokens, dict) else {}
+    has_chatgpt_tokens = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    return {
+        "found": True,
+        "path": str(path),
+        "auth_mode": str(data.get("auth_mode") or ""),
+        "has_chatgpt_tokens": has_chatgpt_tokens,
+        "has_api_key": bool(data.get("OPENAI_API_KEY")),
+        "account_hint": str(tokens.get("account_id") or "")[:8] if tokens.get("account_id") else "",
+    }
+
+
+def read_codex_cli_chatgpt_tokens(explicit_path: Optional[str] = None) -> Dict[str, Any]:
+    """Read ChatGPT OAuth tokens from the local Codex CLI auth file.
+
+    The returned dict is suitable for the existing ChatGPT Subscription
+    provisioning path. Callers must not log token values.
+    """
+    path = find_codex_cli_auth_file(explicit_path)
+    if not path:
+        raise CodexCliAuthNotFound(
+            "Codex CLI auth.json was not found. Run `codex login` first, then import again."
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CodexCliAuthNotFound(f"Codex CLI auth file could not be read: {path}") from exc
+    if not isinstance(data, dict):
+        raise CodexCliAuthNotFound("Codex CLI auth file has an unexpected format.")
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        raise CodexCliAuthNotFound(
+            "Codex CLI is present, but no ChatGPT login tokens were found. Run `codex login` instead of API-key-only auth."
+        )
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    if not access_token or not refresh_token:
+        raise CodexCliAuthNotFound(
+            "Codex CLI auth exists, but it does not contain a ChatGPT access/refresh token pair."
+        )
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": tokens.get("id_token"),
+        "account_id": tokens.get("account_id"),
+        "auth_mode": data.get("auth_mode") or "chatgpt",
+        "source_path": str(path),
+    }
 
 
 def chatgpt_headers(access_token: Optional[str]) -> Dict[str, str]:
@@ -292,6 +411,8 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
 
 
 def to_http_exception(exc: Exception) -> HTTPException:
+    if isinstance(exc, CodexCliAuthNotFound):
+        return HTTPException(404, str(exc))
     if isinstance(exc, ChatGPTSubscriptionRateLimited):
         return HTTPException(429, str(exc))
     if isinstance(exc, (ChatGPTSubscriptionReauthRequired, ChatGPTSubscriptionAuthNotFound)):

@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     use_research: Optional[bool] = Field(default=False, description="Enable deep research")
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
+    reasoning_effort: Optional[str] = Field(default=None, description="Reasoning effort for reasoning-capable models")
     
     @field_validator('message')
     @classmethod
@@ -24,6 +25,14 @@ class ChatRequest(BaseModel):
         if v is not None and v not in ['day', 'week', 'month', 'year']:
             return None  # Just set to None if invalid rather than raising error
         return v
+
+    @field_validator('reasoning_effort')
+    @classmethod
+    def validate_reasoning_effort(cls, v):
+        if v is None:
+            return None
+        value = str(v).strip().lower()
+        return value if value in ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] else None
 
 
 class SessionCreateRequest(BaseModel):

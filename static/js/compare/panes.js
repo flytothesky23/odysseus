@@ -90,7 +90,7 @@ async function rerollPane(paneIdx, overrideTimeout) {
   hist.innerHTML = '';
   const userMsg = document.createElement('div');
   userMsg.className = 'msg msg-user';
-  userMsg.innerHTML = '<div class="role">You</div><div class="body">' + escapeHtml(firstUserText) + '</div>';
+  userMsg.innerHTML = '<div class="role">나</div><div class="body">' + escapeHtml(firstUserText) + '</div>';
   hist.appendChild(userMsg);
 
   // Reset badge and timer

@@ -253,6 +253,8 @@ class ResearchHandler:
         max_rounds: int = 20,
         search_provider: str = None,
         category: str = None,
+        source_mode: str = None,
+        knowledge_folders: list = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
         owner: str = "",
@@ -302,6 +304,8 @@ class ResearchHandler:
             "result": None,
             "started_at": time.time(),
             "category": category,
+            "source_mode": source_mode,
+            "knowledge_folders": list(knowledge_folders or []),
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -337,6 +341,8 @@ class ResearchHandler:
                         max_rounds=max_rounds,
                         search_provider=search_provider,
                         category=category,
+                        source_mode=source_mode,
+                        knowledge_folders=knowledge_folders,
                         extraction_timeout=extraction_timeout,
                         extraction_concurrency=extraction_concurrency,
                     ),
@@ -538,6 +544,18 @@ class ResearchHandler:
                 og_img = f.get("og_image", "")
                 if og_img:
                     entry["image"] = og_img
+                images = f.get("images")
+                if isinstance(images, list) and images:
+                    entry["images"] = images
+                    if not og_img:
+                        first = images[0] if isinstance(images[0], dict) else {}
+                        first_url = first.get("url") if isinstance(first, dict) else ""
+                        if first_url:
+                            entry["image"] = first_url
+                if f.get("source_type"):
+                    entry["source_type"] = f.get("source_type")
+                if f.get("source_path"):
+                    entry["source_path"] = f.get("source_path")
                 sources.append(entry)
         return sources
 
@@ -555,7 +573,12 @@ class ResearchHandler:
                 evidence = f.get("evidence", "")
                 content = summary if summary else (evidence[:2000] if evidence else "")
                 if url and content and not is_low_quality(content):
-                    items.append({"url": url, "title": title, "summary": content})
+                    item = {"url": url, "title": title, "summary": content}
+                    if f.get("source_type"):
+                        item["source_type"] = f.get("source_type")
+                    if f.get("source_path"):
+                        item["source_path"] = f.get("source_path")
+                    items.append(item)
             return items
         except Exception as e:
             logger.warning(f"Failed to extract raw findings: {e}")
@@ -623,6 +646,8 @@ class ResearchHandler:
                 "raw_findings": raw_findings,
                 "stats": entry.get("stats"),
                 "category": entry.get("category"),
+                "source_mode": entry.get("source_mode"),
+                "knowledge_folders": entry.get("knowledge_folders") or [],
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
                 # SECURITY: stamp owner so route handlers can filter by user.
@@ -752,6 +777,8 @@ class ResearchHandler:
         max_rounds: int = 20,
         search_provider: str = None,
         category: str = None,
+        source_mode: str = None,
+        knowledge_folders: list = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
     ) -> str:
@@ -787,8 +814,16 @@ class ResearchHandler:
         try:
             from src.deep_research import DeepResearcher
 
+            from src.knowledge_base import normalize_source_mode, search_knowledge_sources
             from src.settings import get_setting
             _max_report_tokens = int(get_setting("research_max_tokens", 16384))
+            _source_mode = normalize_source_mode(source_mode or get_setting("research_source_mode", "web"))
+            _knowledge_max_chunks = _bounded_int(
+                get_setting("research_knowledge_max_chunks", 12),
+                default=12,
+                minimum=1,
+                maximum=50,
+            )
             _extraction_timeout = _bounded_int(
                 extraction_timeout if extraction_timeout is not None else get_setting("research_extraction_timeout_seconds", 90),
                 default=90,
@@ -813,6 +848,30 @@ class ResearchHandler:
                 minimum=15,
                 maximum=3600,
             )
+            _knowledge_indexed = False
+            _knowledge_lock = asyncio.Lock()
+
+            async def _knowledge_search(query_text: str):
+                nonlocal _knowledge_indexed
+                async with _knowledge_lock:
+                    if not _knowledge_indexed:
+                        _knowledge_indexed = True
+                        return await asyncio.to_thread(
+                            search_knowledge_sources,
+                            query_text,
+                            owner=(_task_entry or {}).get("owner", ""),
+                            folders=knowledge_folders or [],
+                            limit=max(2, min(6, _knowledge_max_chunks)),
+                            auto_index=True,
+                        )
+                return await asyncio.to_thread(
+                    search_knowledge_sources,
+                    query_text,
+                    owner=(_task_entry or {}).get("owner", ""),
+                    folders=knowledge_folders or [],
+                    limit=max(2, min(6, _knowledge_max_chunks)),
+                    auto_index=auto_index,
+                )
 
             researcher = DeepResearcher(
                 llm_endpoint=llm_endpoint,
@@ -829,6 +888,9 @@ class ResearchHandler:
                 progress_callback=progress_callback,
                 search_provider=search_provider,
                 category=category,
+                source_mode=_source_mode,
+                knowledge_folders=knowledge_folders or [],
+                knowledge_searcher=_knowledge_search if _source_mode in {"hybrid", "knowledge"} else None,
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher

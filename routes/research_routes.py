@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -366,6 +366,38 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             deleted = True
         return {"deleted": deleted}
 
+    @router.get("/api/research/knowledge/settings")
+    async def research_knowledge_settings(request: Request):
+        """Return configured Obsidian knowledge-base status for the research UI."""
+        _require_user(request)
+        from src.knowledge_base import configured_vault_root, normalize_source_mode
+        from src.settings import get_setting
+
+        root = configured_vault_root()
+        return {
+            "configured": root is not None,
+            "root": str(root) if root else "",
+            "source_mode": normalize_source_mode(get_setting("research_source_mode", "web")),
+            "max_chunks": int(get_setting("research_knowledge_max_chunks", 12) or 12),
+            "auto_index": bool(get_setting("research_knowledge_auto_index", True)),
+        }
+
+    @router.get("/api/research/knowledge/folders")
+    async def research_knowledge_folders(
+        request: Request,
+        parent: str = Query(""),
+        recursive: bool = Query(True),
+        max_depth: int = Query(3, ge=1, le=6),
+    ):
+        """List selectable folders under the configured Obsidian vault root."""
+        _require_user(request)
+        from src.knowledge_base import KnowledgeBaseError, list_vault_folders
+
+        try:
+            return list_vault_folders(parent, recursive=recursive, max_depth=max_depth)
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
     # ------------------------------------------------------------------
     # Panel endpoints — launch research without a chat session
     # ------------------------------------------------------------------
@@ -381,6 +413,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         extraction_timeout: Optional[int] = Field(default=None, ge=15, le=3600)
         extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
         category: Optional[str] = None
+        source_mode: Optional[str] = None
+        knowledge_folders: List[str] = Field(default_factory=list)
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -463,6 +497,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,
+            source_mode=body.source_mode,
+            knowledge_folders=body.knowledge_folders,
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
             owner=user,

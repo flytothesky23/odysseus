@@ -839,6 +839,71 @@ function initEndpointForm() {
       if (!deviceAuthPolling && status) status.textContent = '';
     }
   }
+
+  function _setCodexCliStatus(text, className = '') {
+    const status = el('adm-codexCliStatus');
+    if (!status) return;
+    status.textContent = text || '';
+    status.className = 'adm-ep-inline-msg' + (className ? ' ' + className : '');
+  }
+
+  async function _refreshCodexCliStatus() {
+    const btn = el('adm-codexCliImportBtn');
+    const logo = btn ? btn.querySelector('.adm-provider-logo') : null;
+    if (logo) logo.innerHTML = providerLogo('openai') || '';
+    try {
+      const res = await fetch('/api/chatgpt-subscription/codex-cli/status', { credentials: 'same-origin' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.detail || 'Codex CLI status unavailable');
+      if (d.found && d.has_chatgpt_tokens) {
+        _setCodexCliStatus('Codex CLI login found', 'admin-success');
+      } else if (d.found) {
+        _setCodexCliStatus('Run codex login first', 'admin-error');
+      } else {
+        _setCodexCliStatus('Codex CLI login not found', '');
+      }
+    } catch (_) {
+      _setCodexCliStatus('');
+    }
+  }
+
+  async function _importCodexCliAuth() {
+    const btn = el('adm-codexCliImportBtn');
+    if (!btn || btn.disabled) return;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'Importing...';
+    _setCodexCliStatus('Reading local Codex CLI login...');
+    try {
+      const fd = new FormData();
+      fd.append('set_default', 'true');
+      const res = await fetch('/api/chatgpt-subscription/codex-cli/import', {
+        method: 'POST',
+        body: fd,
+        credentials: 'same-origin',
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.detail || 'Import failed');
+      _setCodexCliStatus('Codex CLI login imported', 'admin-success');
+      if (d.id) _recentlyAddedEpId = String(d.id);
+      await loadEndpoints();
+      await _selectAddedModelInChat(d || {});
+      if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
+        settingsModule.refreshAiModelEndpoints();
+      }
+    } catch (err) {
+      _setCodexCliStatus(err && err.message ? err.message : 'Import failed', 'admin-error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml || 'Import Codex CLI login';
+      const logo = btn.querySelector('.adm-provider-logo');
+      if (logo) logo.innerHTML = providerLogo('openai') || '';
+    }
+  }
+
+  el('adm-codexCliImportBtn')?.addEventListener('click', _importCodexCliAuth);
+  _refreshCodexCliStatus();
+
   function _renderPickerMenu() {
     if (!pickerMenu) return;
     pickerMenu.innerHTML = Array.from(provider.options).map(o => {
