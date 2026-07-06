@@ -16,6 +16,24 @@ _CODENAV_SKIP_DIRS = frozenset({
 _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
 
+def _parse_write_payload(content: str) -> Tuple[str, str]:
+    raw = content or ""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            args = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            args = None
+        if isinstance(args, dict):
+            body = args.get("content", args.get("body", ""))
+            if body is None:
+                body = ""
+            elif not isinstance(body, str):
+                body = json.dumps(body, ensure_ascii=False)
+            return str(args.get("path") or args.get("file_path") or "").strip(), body
+    lines = raw.split("\n", 1)
+    return lines[0].strip(), lines[1] if len(lines) > 1 else ""
+
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
         return None
@@ -157,9 +175,7 @@ class ReadFileTool:
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
-        lines = content.split("\n", 1)
-        raw_path = lines[0].strip()
-        body = lines[1] if len(lines) > 1 else ""
+        raw_path, body = _parse_write_payload(content)
         try:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:

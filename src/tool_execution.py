@@ -374,7 +374,24 @@ def _parse_manage_memory(content: str) -> Dict:
 
 
 def _parse_write_file(content: str) -> Dict:
-    lines = content.split("\n", 1)
+    raw = content or ""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            args = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            args = None
+        if isinstance(args, dict):
+            body = args.get("content", args.get("body", ""))
+            if body is None:
+                body = ""
+            elif not isinstance(body, str):
+                body = json.dumps(body, ensure_ascii=False)
+            return {
+                "path": str(args.get("path") or args.get("file_path") or "").strip(),
+                "content": body,
+            }
+    lines = raw.split("\n", 1)
     return {"path": lines[0].strip(), "content": lines[1] if len(lines) > 1 else ""}
 
 
