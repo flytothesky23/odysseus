@@ -152,6 +152,38 @@ def test_report_rejects_null_owner_before_generating_html(tmp_path, monkeypatch)
     handler.get_report_html.assert_not_called()
 
 
+def test_markdown_export_rejects_cross_owner_before_generation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "bob-report", owner="bob", result="bob secret")
+
+    handler = _research_handler()
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/report/{session_id}/markdown", "GET")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(session_id="bob-report", request=_request("alice"), download=False))
+
+    assert exc.value.status_code == 404
+    handler.get_report_markdown.assert_not_called()
+
+
+def test_session_json_export_rejects_cross_owner_before_generation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "bob-report", owner="bob", result="bob secret")
+
+    handler = _research_handler()
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/report/{session_id}/session.json", "GET")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(session_id="bob-report", request=_request("alice"), download=False))
+
+    assert exc.value.status_code == 404
+    handler.get_report_session_export.assert_not_called()
+
+
 def test_archive_rejects_cross_owner_without_mutating_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"

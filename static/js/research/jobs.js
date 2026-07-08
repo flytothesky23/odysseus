@@ -61,6 +61,7 @@ async function _reconnectActive() {
           elapsed: task.started_at ? Date.now() - task.started_at * 1000 : 0,
           result: null, sources: null, findings: null,
           errorMsg: null, avgDuration: null, modelName: null,
+          artifact_formats: task.artifact_formats || ['html'],
           settings: {}, _es: null, _timerInterval: null,
         };
         _jobs.push(job);
@@ -84,6 +85,7 @@ async function _reconnectActive() {
           elapsed, result: null, sources: null, findings: null,
           sourceCount: item.source_count || 0,
           category: item.category || '',
+          artifact_formats: item.artifact_formats || ['html'],
           errorMsg: null, avgDuration: null, modelName: null,
           settings: { max_rounds: item.rounds || 8 },
           _es: null, _timerInterval: null, _fromLibrary: true,
@@ -216,6 +218,7 @@ function _makeJob(query, settings) {
     progress: {}, startedAt: null, elapsed: 0,
     result: null, sources: null, findings: null,
     category: settings?.category || '',
+    artifact_formats: settings?.artifact_formats || ['html'],
     errorMsg: null, avgDuration: null,
     modelName: null, endpointName: null,
     _es: null, _timerInterval: null,
@@ -248,6 +251,7 @@ async function _launchJob(job) {
   job.id = data.session_id;
   job.status = 'running';
   job.startedAt = Date.now();
+  if (data.artifact_formats) job.artifact_formats = data.artifact_formats;
   _connectStream(job);
   _notify();
 }
@@ -328,6 +332,7 @@ async function _fetchResult(job) {
     job.sources = d.sources;
     job.findings = d.raw_findings;
     if (d.category && !job.category) job.category = d.category;
+    if (d.artifact_formats) job.artifact_formats = d.artifact_formats;
     _notify();
   } catch {}
 }

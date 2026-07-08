@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from core.middleware import INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
 from src.constants import DEEP_RESEARCH_DIR
+from src.research_handler import normalize_artifact_formats
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 
@@ -176,6 +177,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "status": "running",
                     "progress": entry.get("progress", {}),
                     "started_at": entry.get("started_at", 0),
+                    "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 })
         return {"active": active}
 
@@ -226,6 +228,12 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if owner != user:
             raise HTTPException(404, "Research not found")
 
+    def _download_headers(session_id: str, suffix: str, download: bool) -> dict:
+        if not download:
+            return {}
+        safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", session_id)
+        return {"Content-Disposition": f'attachment; filename="odysseus-research-{safe}{suffix}"'}
+
     @router.get("/api/research/report/{session_id}")
     async def research_report(session_id: str, request: Request):
         """Serve the visual HTML report for a completed research session."""
@@ -242,6 +250,51 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             logger.warning(f"No report data found for session {session_id}")
             raise HTTPException(404, "No visual report available for this session")
         return HTMLResponse(content=html_content)
+
+    @router.get("/api/research/report/{session_id}/markdown")
+    async def research_report_markdown(
+        session_id: str,
+        request: Request,
+        download: bool = Query(False),
+    ):
+        """Serve an Obsidian-friendly Markdown export for a completed research session."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        try:
+            markdown = research_handler.get_report_markdown(session_id)
+        except Exception as e:
+            logger.error(f"Markdown report generation error: {e}", exc_info=True)
+            raise HTTPException(500, f"Markdown report generation failed: {e}")
+        if markdown is None:
+            raise HTTPException(404, "No markdown report available for this session")
+        return Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers=_download_headers(session_id, ".md", download),
+        )
+
+    @router.get("/api/research/report/{session_id}/session.json")
+    async def research_report_session_json(
+        session_id: str,
+        request: Request,
+        download: bool = Query(False),
+    ):
+        """Serve a structured JSON export for a completed research session."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        try:
+            data = research_handler.get_report_session_export(session_id)
+        except Exception as e:
+            logger.error(f"Research session JSON export error: {e}", exc_info=True)
+            raise HTTPException(500, f"Session JSON export failed: {e}")
+        if data is None:
+            raise HTTPException(404, "No session JSON available for this session")
+        return JSONResponse(
+            content=data,
+            headers=_download_headers(session_id, ".odysseus-session.json", download),
+        )
 
     class HideImageRequest(BaseModel):
         url: str
@@ -304,6 +357,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "status": d.get("status", "done"),
                     "duration": d.get("stats", {}).get("Duration", ""),
                     "rounds": d.get("stats", {}).get("Rounds", ""),
+                    "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                     "started_at": d.get("started_at", 0),
                     "completed_at": d.get("completed_at", 0),
                     "archived": bool(d.get("archived")),
@@ -495,6 +549,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         category: Optional[str] = None
         source_mode: Optional[str] = None
         knowledge_folders: List[str] = Field(default_factory=list)
+        artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -579,6 +634,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             )
         except KnowledgeBaseError as e:
             raise HTTPException(400, str(e))
+        artifact_formats = normalize_artifact_formats(body.artifact_formats)
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
@@ -596,9 +652,15 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             knowledge_folders=resolved_knowledge_folders,
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
+            artifact_formats=artifact_formats,
             owner=user,
         )
-        return {"session_id": session_id, "status": "running", "query": body.query}
+        return {
+            "session_id": session_id,
+            "status": "running",
+            "query": body.query,
+            "artifact_formats": artifact_formats,
+        }
 
     @router.get("/api/research/stream/{session_id}")
     async def research_stream(session_id: str, request: Request):
@@ -651,11 +713,19 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "sources": d.get("sources", []),
                     "raw_findings": d.get("raw_findings", []),
                     "category": d.get("category") or "",
+                    "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                 }
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
         raw_findings = research_handler.get_raw_findings(session_id) or []
-        return {"result": result, "sources": sources, "raw_findings": raw_findings, "category": ""}
+        task = research_handler._active_tasks.get(session_id, {})
+        return {
+            "result": result,
+            "sources": sources,
+            "raw_findings": raw_findings,
+            "category": "",
+            "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
+        }
 
     @router.post("/api/research/spinoff/{session_id}")
     async def research_spinoff(session_id: str, request: Request):

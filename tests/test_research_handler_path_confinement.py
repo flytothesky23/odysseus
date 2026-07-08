@@ -57,6 +57,8 @@ def test_handler_disk_read_methods_reject_invalid_ids(tmp_path, monkeypatch):
     assert handler.get_raw_findings("../escape") is None
     assert handler._get_session_json("../escape") is None
     assert handler.get_report_html("../escape") is None
+    assert handler.get_report_markdown("../escape") is None
+    assert handler.get_report_session_export("../escape") is None
 
 
 def test_handler_mutations_reject_invalid_ids_without_touching_outside_files(tmp_path, monkeypatch):

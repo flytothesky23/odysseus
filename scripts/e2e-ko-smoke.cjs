@@ -126,6 +126,24 @@ async function clickFirstVisible(locator, description) {
 
     await clickFirstVisible(page.locator('#rail-research, #tool-research-btn'), 'research button');
     await page.waitForSelector('#research-pane', { timeout: 5000 });
+    const outputFormats = await page.evaluate(() => {
+      const checks = Array.from(document.querySelectorAll('input[name="research-output-format"]'));
+      return checks.map((el) => ({
+        id: el.id,
+        value: el.value,
+        checked: el.checked,
+        label: el.closest('label')?.textContent?.trim() || '',
+      }));
+    });
+    assertOk(outputFormats.some((item) => item.value === 'html' && item.checked), 'Research output selector should default to HTML.', { outputFormats });
+    assertOk(outputFormats.some((item) => item.value === 'md_json'), 'Research output selector is missing MD+JSON.', { outputFormats });
+    await page.locator('#research-output-md-json').check();
+    await page.locator('#research-output-html').uncheck();
+    await page.locator('#research-output-md-json').click();
+    const outputGuard = await page.evaluate(() => ({
+      checked: Array.from(document.querySelectorAll('input[name="research-output-format"]:checked')).map((el) => el.value),
+    }));
+    assertOk(outputGuard.checked.length === 1 && outputGuard.checked.includes('md_json'), 'Research output selector allowed all formats to be unchecked.', outputGuard);
     const sourceOptions = await page.locator('#research-source-mode option').evaluateAll((options) =>
       options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
     );

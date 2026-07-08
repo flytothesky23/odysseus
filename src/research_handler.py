@@ -22,6 +22,33 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_DATA_DIR = Path(DEEP_RESEARCH_DIR)
 _RESEARCH_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+_ARTIFACT_FORMATS = ("html", "md_json")
+_ARTIFACT_ALIASES = {
+    "html": "html",
+    "visual": "html",
+    "visual_report": "html",
+    "md": "md_json",
+    "markdown": "md_json",
+    "json": "md_json",
+    "md_json": "md_json",
+    "markdown_json": "md_json",
+    "obsidian": "md_json",
+}
+
+
+def normalize_artifact_formats(formats) -> list:
+    """Return the supported research artifact formats, preserving order."""
+    if isinstance(formats, str):
+        candidates = [formats]
+    else:
+        candidates = list(formats or [])
+    out = []
+    for item in candidates:
+        key = str(item or "").strip().lower().replace("-", "_").replace("+", "_")
+        mapped = _ARTIFACT_ALIASES.get(key)
+        if mapped in _ARTIFACT_FORMATS and mapped not in out:
+            out.append(mapped)
+    return out or ["html"]
 
 
 def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
@@ -60,6 +87,27 @@ def _research_json_path(session_id: str) -> Optional[Path]:
     except ValueError:
         return None
     return path
+
+
+def _iso_from_timestamp(value) -> str:
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        ts = time.time()
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _frontmatter_string(value) -> str:
+    return json.dumps(str(value or ""), ensure_ascii=False)
+
+
+def _md_escape_link_text(value) -> str:
+    text = str(value or "").strip()
+    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _md_url(value) -> str:
+    return str(value or "").strip().replace(")", "%29")
 
 
 class ResearchHandler:
@@ -257,6 +305,7 @@ class ResearchHandler:
         knowledge_folders: list = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
+        artifact_formats: list = None,
         owner: str = "",
     ) -> dict:
         """Start research as a background task. Returns task info dict.
@@ -306,6 +355,7 @@ class ResearchHandler:
             "category": category,
             "source_mode": source_mode,
             "knowledge_folders": list(knowledge_folders or []),
+            "artifact_formats": normalize_artifact_formats(artifact_formats),
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -408,7 +458,12 @@ class ResearchHandler:
 
         task = asyncio.create_task(_run())
         entry["task"] = task
-        return {"session_id": session_id, "status": "running", "query": query}
+        return {
+            "session_id": session_id,
+            "status": "running",
+            "query": query,
+            "artifact_formats": entry["artifact_formats"],
+        }
 
     def get_status(self, session_id: str) -> Optional[dict]:
         """Get current research status for a session."""
@@ -419,6 +474,7 @@ class ResearchHandler:
                 "progress": entry["progress"],
                 "query": entry["query"],
                 "started_at": entry["started_at"],
+                "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
             }
             # avg_duration is a historical figure over completed reports on
             # disk; get_avg_duration() globs and JSON-parses the whole research
@@ -445,6 +501,7 @@ class ResearchHandler:
                     "progress": {},
                     "query": data.get("query", ""),
                     "started_at": data.get("started_at", 0),
+                    "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
                 }
             except Exception:
                 pass
@@ -648,6 +705,7 @@ class ResearchHandler:
                 "category": entry.get("category"),
                 "source_mode": entry.get("source_mode"),
                 "knowledge_folders": entry.get("knowledge_folders") or [],
+                "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
                 # SECURITY: stamp owner so route handlers can filter by user.
@@ -703,6 +761,124 @@ class ResearchHandler:
         except Exception as e:
             logger.error(f"Failed to generate visual report: {e}")
             return None
+
+    def get_report_session_export(self, session_id: str) -> Optional[dict]:
+        """Return a stable JSON export for a completed research session."""
+        data = self._get_session_json(session_id)
+        if not data:
+            return None
+        artifact_urls = {
+            "html": f"/api/research/report/{session_id}",
+            "markdown": f"/api/research/report/{session_id}/markdown",
+            "json": f"/api/research/report/{session_id}/session.json",
+        }
+        return {
+            "session_id": session_id,
+            "exported_at": _iso_from_timestamp(time.time()),
+            "query": data.get("query", ""),
+            "status": data.get("status", "done"),
+            "result": data.get("result", ""),
+            "raw_report": data.get("raw_report", ""),
+            "sources": data.get("sources", []) or [],
+            "raw_findings": data.get("raw_findings", []) or [],
+            "stats": data.get("stats") or {},
+            "category": data.get("category") or "",
+            "source_mode": data.get("source_mode") or "",
+            "knowledge_folders": data.get("knowledge_folders") or [],
+            "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
+            "started_at": data.get("started_at", 0),
+            "completed_at": data.get("completed_at", 0),
+            "artifact_urls": artifact_urls,
+        }
+
+    def get_report_markdown(self, session_id: str) -> Optional[str]:
+        """Generate an Obsidian-friendly Markdown export for a research session."""
+        data = self.get_report_session_export(session_id)
+        if not data:
+            return None
+
+        query = str(data.get("query") or "Odysseus Research").strip()
+        stats = data.get("stats") or {}
+        sources = data.get("sources") or []
+        raw_findings = data.get("raw_findings") or []
+        artifact_formats = normalize_artifact_formats(data.get("artifact_formats"))
+        completed_at = data.get("completed_at") or time.time()
+
+        frontmatter = [
+            "---",
+            "codexian_provider: odysseus-local",
+            f"odysseus_session_id: {_frontmatter_string(session_id)}",
+            f"created: {_frontmatter_string(_iso_from_timestamp(completed_at))}",
+            f"source_mode: {_frontmatter_string(data.get('source_mode') or '')}",
+            "artifact_formats:",
+        ]
+        frontmatter.extend(f"  - {fmt}" for fmt in artifact_formats)
+        frontmatter.extend(["source_mutation: false", "---"])
+
+        lines = [
+            "\n".join(frontmatter),
+            "",
+            f"# {query}",
+            "",
+            "## 실행 메타데이터",
+            "",
+            "- 실행 경로: 로컬 Odysseus HTTP API",
+            f"- 세션 ID: `{session_id}`",
+            f"- 상태: `{data.get('status') or 'done'}`",
+            f"- 소스 모드: `{data.get('source_mode') or 'default'}`",
+            f"- 결과물 형식: {', '.join(artifact_formats)}",
+            f"- HTML 리포트: `{data['artifact_urls']['html']}`",
+            f"- Markdown 리포트: `{data['artifact_urls']['markdown']}`",
+            f"- 세션 JSON: `{data['artifact_urls']['json']}`",
+            f"- 출처 수: {len(sources)}",
+            f"- Raw findings: {len(raw_findings)}",
+        ]
+
+        if data.get("knowledge_folders"):
+            lines.append(f"- 지식 소스 폴더: {', '.join(map(str, data.get('knowledge_folders') or []))}")
+        if stats:
+            stats_text = " | ".join(f"**{k}:** {v}" for k, v in stats.items())
+            lines.extend(["", "## 통계", "", stats_text])
+
+        report = str(data.get("result") or data.get("raw_report") or "").strip()
+        if report:
+            lines.extend(["", report])
+
+        if sources:
+            lines.extend(["", "---", "", "## Sources", ""])
+            for idx, source in enumerate(sources, start=1):
+                if not isinstance(source, dict):
+                    continue
+                title = _md_escape_link_text(source.get("title") or source.get("url") or f"Source {idx}")
+                url = _md_url(source.get("url"))
+                source_type = source.get("source_type") or ""
+                path = source.get("source_path") or ""
+                suffix = " ".join(f"`{part}`" for part in (source_type, path) if part)
+                if url:
+                    lines.append(f"{idx}. [{title}]({url}) {suffix}".rstrip())
+                else:
+                    lines.append(f"{idx}. {title} {suffix}".rstrip())
+
+        if raw_findings:
+            lines.extend(["", "---", "", "## Raw Findings", ""])
+            for idx, finding in enumerate(raw_findings, start=1):
+                if not isinstance(finding, dict):
+                    continue
+                title = str(finding.get("title") or f"Finding {idx}").strip()
+                url = str(finding.get("url") or "").strip()
+                summary = str(finding.get("summary") or "").strip()
+                lines.append(f"### {idx}. {title}")
+                if url:
+                    lines.append(f"- Source: {url}")
+                if finding.get("source_type"):
+                    lines.append(f"- Type: {finding.get('source_type')}")
+                if finding.get("source_path"):
+                    lines.append(f"- Path: {finding.get('source_path')}")
+                if summary:
+                    lines.extend(["", summary])
+                lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"
 
     def hide_image(self, session_id: str, image_url: str) -> bool:
         """Add image_url to the persisted hidden_images list for a research."""

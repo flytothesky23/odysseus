@@ -36037,6 +36037,50 @@ body.research-panel-view #research-divider { display:none; }
   gap:8px;
   min-width:0;
 }
+.research-output-setting {
+  gap: 4px;
+}
+.research-output-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  min-width:0;
+}
+.research-output-formats {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  min-width:0;
+}
+.research-output-choice {
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  min-height:24px;
+  padding:3px 8px;
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:var(--bg);
+  color:var(--fg);
+  font-size:10px;
+  font-weight:650;
+  line-height:1;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.research-output-choice:hover {
+  border-color:var(--accent-primary, var(--red));
+  color:var(--accent-primary, var(--red));
+}
+.research-output-choice input {
+  width:12px;
+  height:12px;
+  margin:0;
+  accent-color:var(--accent-primary, var(--red));
+}
 .research-setting-label {
   font-size:9px; text-transform:uppercase; letter-spacing:0.5px;
   opacity:0.5; margin-bottom:2px;
@@ -37171,7 +37215,14 @@ body.theme-frosted .modal {
   color: var(--cat-color, var(--accent, var(--red)));
   border-color: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 45%, var(--border));
 }
-.research-job-action.research-job-action-report:hover {
+.research-job-action.research-job-action-markdown,
+.research-job-action.research-job-action-json {
+  color: var(--cat-color, var(--accent, var(--red)));
+  border-color: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 35%, var(--border));
+}
+.research-job-action.research-job-action-report:hover,
+.research-job-action.research-job-action-markdown:hover,
+.research-job-action.research-job-action-json:hover {
   color: var(--cat-color, var(--accent, var(--red)));
   border-color: var(--cat-color, var(--accent, var(--red)));
   background: color-mix(in srgb, var(--cat-color, var(--accent, var(--red))) 10%, transparent);

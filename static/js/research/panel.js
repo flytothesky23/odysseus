@@ -78,6 +78,7 @@ function _saveSettingsToStorage() {
       category: document.getElementById('research-category')?.value || '',
       source_mode: document.getElementById('research-source-mode')?.value || '',
       knowledge_folders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map(o => o.value).filter(Boolean),
+      artifact_formats: _selectedArtifactFormats(),
     }));
   } catch {}
 }
@@ -87,6 +88,63 @@ function _loadSettingsFromStorage() {
     const raw = localStorage.getItem(_SETTINGS_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
+}
+
+function _normalizeArtifactFormats(formats) {
+  const raw = Array.isArray(formats) ? formats : [formats].filter(Boolean);
+  const out = [];
+  raw.forEach((fmt) => {
+    const key = String(fmt || '').trim().toLowerCase().replace(/[-+]/g, '_');
+    const mapped = (key === 'md' || key === 'markdown' || key === 'json' || key === 'markdown_json' || key === 'md_json')
+      ? 'md_json'
+      : (key === 'html' || key === 'visual' || key === 'visual_report')
+        ? 'html'
+        : '';
+    if (mapped && !out.includes(mapped)) out.push(mapped);
+  });
+  return out.length ? out : ['html'];
+}
+
+function _selectedArtifactFormats() {
+  const checked = Array.from(document.querySelectorAll('input[name="research-output-format"]:checked'))
+    .map(el => el.value)
+    .filter(Boolean);
+  return _normalizeArtifactFormats(checked);
+}
+
+function _applyArtifactFormats(formats) {
+  const normalized = _normalizeArtifactFormats(formats);
+  document.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
+    el.checked = normalized.includes(el.value);
+  });
+}
+
+function _ensureArtifactFormatSelection(changedEl) {
+  const checked = Array.from(document.querySelectorAll('input[name="research-output-format"]:checked'));
+  if (checked.length) return;
+  if (changedEl) changedEl.checked = true;
+  else {
+    const html = document.getElementById('research-output-html');
+    if (html) html.checked = true;
+  }
+}
+
+function _jobArtifactFormats(job) {
+  return _normalizeArtifactFormats(job?.artifact_formats || job?.settings?.artifact_formats || ['html']);
+}
+
+function _artifactUrl(jobId, kind, download = false) {
+  const suffix = kind === 'json' ? 'session.json' : 'markdown';
+  return `${_apiBase}/api/research/report/${jobId}/${suffix}${download ? '?download=1' : ''}`;
+}
+
+function _openPreferredArtifact(job) {
+  const formats = _jobArtifactFormats(job);
+  if (formats.includes('html')) {
+    window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+  } else if (formats.includes('md_json')) {
+    window.open(_artifactUrl(job.id, 'markdown', true), '_blank');
+  }
 }
 
 function _showBadge() {
@@ -428,6 +486,22 @@ function _buildPanelHTML() {
               <select id="research-endpoint"><option value="">Default</option></select>
             </label>
           </div>
+          <div class="research-setting research-setting-wide research-output-setting" id="research-output-setting">
+            <div class="research-output-header">
+              <span class="research-setting-label">결과물</span>
+              <div class="research-output-formats" id="research-output-formats">
+                <label class="research-output-choice" title="기존 시각화 HTML 리포트">
+                  <input id="research-output-html" type="checkbox" name="research-output-format" value="html" checked>
+                  <span>HTML</span>
+                </label>
+                <label class="research-output-choice" title="Obsidian용 Markdown과 재현 가능한 세션 JSON">
+                  <input id="research-output-md-json" type="checkbox" name="research-output-format" value="md_json">
+                  <span>MD+JSON</span>
+                </label>
+              </div>
+            </div>
+            <span class="research-setting-hint">텍스트형 보고서는 Markdown과 세션 JSON을 함께 내려받을 수 있습니다. 최소 하나의 결과물은 선택되어야 합니다.</span>
+          </div>
           <div class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
             <div class="research-knowledge-source-header">
               <span class="research-setting-label">지식 소스 폴더</span>
@@ -513,6 +587,12 @@ function _wireEvents(pane) {
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
   pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
   pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
+  pane.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      _ensureArtifactFormatSelection(el);
+      _saveSettingsToStorage();
+    });
+  });
 
   _renderJobs();
 }
@@ -530,6 +610,7 @@ function _readSettings() {
     model: document.getElementById('research-model')?.value || undefined,
     category: category || undefined,
     source_mode: sourceMode || undefined,
+    artifact_formats: _selectedArtifactFormats(),
   };
   if (knowledgeFolders.length && sourceMode !== 'web') settings.knowledge_folders = knowledgeFolders;
   const epSel = document.getElementById('research-endpoint');
@@ -577,6 +658,7 @@ function _editJob(job) {
   if (folderEl && Array.isArray(s.knowledge_folders)) {
     Array.from(folderEl.options).forEach(opt => { opt.selected = s.knowledge_folders.includes(opt.value); });
   }
+  if (s.artifact_formats) _applyArtifactFormats(s.artifact_formats);
   _syncKnowledgeControls();
   const epEl = document.getElementById('research-endpoint');
   if (epEl && s.endpoint_id) epEl.value = s.endpoint_id;
@@ -673,6 +755,7 @@ function _restoreSavedSettings() {
       opt.selected = saved.knowledge_folders.includes(opt.value);
     });
   }
+  if (saved.artifact_formats) _applyArtifactFormats(saved.artifact_formats);
   _syncKnowledgeControls();
   const ep = document.getElementById('research-endpoint');
   if (ep && saved.endpoint_id) {
@@ -1154,6 +1237,22 @@ function _buildJobCard(job) {
     const failNote = failed
       ? `<div class="research-job-failnote">Couldn't extract anything — try rephrasing the question, or switch the search engine in Settings.</div>`
       : '';
+    const artifactFormats = _jobArtifactFormats(job);
+    const artifactButtons = [
+      `<button class="research-job-action" data-action="copy" title="Copy report to clipboard">${_copyIcon}</button>`,
+      `<button class="research-job-action" data-action="chat" title="Open follow-up chat with this research as context">${_chatIcon} Discuss</button>`,
+      artifactFormats.includes('html')
+        ? `<button class="research-job-action research-job-action-report" data-action="report" title="Visual report">${_externalIcon} Visual Report</button>`
+        : '',
+      artifactFormats.includes('md_json')
+        ? `<button class="research-job-action research-job-action-markdown" data-action="markdown" title="Markdown 내려받기">${_externalIcon} Markdown</button>`
+        : '',
+      artifactFormats.includes('md_json')
+        ? `<button class="research-job-action research-job-action-json" data-action="json" title="세션 JSON 내려받기">${_externalIcon} JSON</button>`
+        : '',
+      `<button class="research-job-action research-job-action-dim" data-action="dismiss" title="Clear from list">${_cancelIcon}</button>`,
+      `<button class="research-job-action research-job-action-dim" data-action="delete" title="Delete from disk">${_trashIcon} Delete</button>`,
+    ].filter(Boolean).join('');
     card.innerHTML = `
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${doneBadge}
@@ -1162,19 +1261,15 @@ function _buildJobCard(job) {
       </div>
       ${failNote}
       <div class="research-job-actions">
-        <button class="research-job-action" data-action="copy" title="Copy report to clipboard">${_copyIcon}</button>
-        <button class="research-job-action" data-action="chat" title="Open follow-up chat with this research as context">${_chatIcon} Discuss</button>
-        <button class="research-job-action research-job-action-report" data-action="report" title="Visual report">${_externalIcon} Visual Report</button>
-        <button class="research-job-action research-job-action-dim" data-action="dismiss" title="Clear from list">${_cancelIcon}</button>
-        <button class="research-job-action research-job-action-dim" data-action="delete" title="Delete from disk">${_trashIcon} Delete</button>
+        ${artifactButtons}
       </div>
       ${isExpanded ? `<div class="research-job-result">${_renderResult(job)}</div>` : ''}
     `;
     // Clicking anywhere on the card (except the action buttons, which
-    // stopPropagation) opens the visual report — same as the Visual Report btn.
+    // stopPropagation) opens the preferred selected artifact.
     card.style.cursor = 'pointer';
     card.addEventListener('click', () => {
-      window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+      _openPreferredArtifact(job);
     });
     card.querySelector('[data-action="copy"]').addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -1182,9 +1277,17 @@ function _buildJobCard(job) {
       if (!job.result) await _ensureResult(job);
       _copyResult(job, btn);
     });
-    card.querySelector('[data-action="report"]').addEventListener('click', (e) => {
+    card.querySelector('[data-action="report"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
       window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+    });
+    card.querySelector('[data-action="markdown"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(_artifactUrl(job.id, 'markdown', true), '_blank');
+    });
+    card.querySelector('[data-action="json"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(_artifactUrl(job.id, 'json', true), '_blank');
     });
     card.querySelector('[data-action="chat"]').addEventListener('click', (e) => {
       e.stopPropagation();
