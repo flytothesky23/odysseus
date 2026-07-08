@@ -507,6 +507,7 @@ function _buildPanelHTML() {
               <span class="research-setting-label">지식 소스 폴더</span>
               <button id="research-add-local-folder" class="research-local-folder-btn" type="button" title="Finder에서 로컬 폴더를 지식 소스로 추가">Finder 폴더 추가</button>
             </div>
+            <div id="research-local-folder-list" class="research-local-folder-list" aria-live="polite"></div>
             <select id="research-knowledge-folders" class="research-folder-select" multiple size="6"><option value="">Loading...</option></select>
             <span class="research-setting-hint">선택하지 않으면 설정된 Obsidian Vault와 추가한 로컬 폴더 전체를 사용합니다. 여러 폴더는 Command 키를 누른 채 선택하세요.</span>
           </div>
@@ -587,6 +588,12 @@ function _wireEvents(pane) {
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
   pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
   pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
+  pane.querySelector('#research-local-folder-list')?.addEventListener('click', (e) => {
+    const btn = e.target.closest?.('[data-remove-local-root]');
+    if (!btn) return;
+    e.preventDefault();
+    _handleRemoveLocalFolder(btn.getAttribute('data-remove-local-root'), btn);
+  });
   pane.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
     el.addEventListener('change', () => {
       _ensureArtifactFormatSelection(el);
@@ -811,11 +818,44 @@ async function _loadKnowledgeOptions() {
           return `<option value="${_esc(token)}" title="${_esc(title)}">${indent}${_esc(prefix + display)}</option>`;
         }).join('')
       : '<option value="">Finder 폴더 추가 또는 설정에서 Vault 루트를 지정하세요</option>';
+    _renderLocalRootList();
   } catch {
     _knowledgeConfig = { configured: false, folders: [] };
     folderSel.innerHTML = '<option value="">폴더 목록을 불러오지 못했습니다</option>';
     folderSel.disabled = true;
+    _renderLocalRootList();
   }
+}
+
+function _renderLocalRootList() {
+  const list = document.getElementById('research-local-folder-list');
+  if (!list) return;
+  const roots = Array.isArray(_knowledgeConfig.local_roots) ? _knowledgeConfig.local_roots : [];
+  const localRoots = roots.filter(root => root && root.id && root.path);
+  if (!localRoots.length) {
+    list.innerHTML = '';
+    list.style.display = 'none';
+    return;
+  }
+  list.style.display = '';
+  list.innerHTML = localRoots.map(root => {
+    const label = root.label || root.path || root.id;
+    const title = root.path || label;
+    return `
+      <div class="research-local-root-row" title="${_esc(title)}">
+        <span class="research-local-root-meta">
+          <span class="research-local-root-label">로컬 · ${_esc(label)}</span>
+          <span class="research-local-root-path">${_esc(root.path || '')}</span>
+        </span>
+        <button
+          type="button"
+          class="research-local-folder-remove"
+          data-remove-local-root="${_esc(root.id)}"
+          aria-label="${_esc(label)} 로컬 지식 소스 삭제"
+          title="목록에서 삭제합니다. 실제 폴더나 파일은 삭제하지 않습니다."
+        >삭제</button>
+      </div>`;
+  }).join('');
 }
 
 async function _handleAddLocalFolder() {
@@ -863,6 +903,64 @@ async function _handleAddLocalFolder() {
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+}
+
+async function _handleRemoveLocalFolder(rootId, btn) {
+  rootId = String(rootId || '').trim();
+  if (!rootId) return;
+  const root = (_knowledgeConfig.local_roots || []).find(item => item.id === rootId) || {};
+  const label = root.label || root.path || rootId;
+  const ok = window.confirm
+    ? window.confirm(`'${label}' 로컬 지식 소스 폴더를 목록에서 삭제할까요?\n\n실제 폴더와 파일은 삭제하지 않습니다.`)
+    : true;
+  if (!ok) return;
+
+  const folderSel = document.getElementById('research-knowledge-folders');
+  const removedPrefix = `local:${rootId}`;
+  const keepSelected = Array.from(folderSel?.selectedOptions || [])
+    .map(opt => opt.value)
+    .filter(value => value && value !== removedPrefix && !value.startsWith(`${removedPrefix}:`));
+  const original = btn?.textContent || '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '삭제 중...';
+  }
+  try {
+    const res = await fetch(`${_apiBase}/api/research/knowledge/local-folders/${encodeURIComponent(rootId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      let detail = data.detail || data.error || '로컬 지식 소스 폴더를 삭제하지 못했습니다';
+      if (res.status === 401) {
+        detail = '로그인 세션이 만료되었습니다. 다시 로그인한 뒤 삭제해 주세요.';
+      } else if (res.status === 403) {
+        detail = '이 기능은 관리자 또는 로컬 단일 사용자 모드에서 사용할 수 있습니다.';
+      } else if (res.status === 404) {
+        detail = '이미 삭제되었거나 찾을 수 없는 로컬 지식 소스입니다.';
+      }
+      throw new Error(detail);
+    }
+    await _loadKnowledgeOptions();
+    const refreshed = document.getElementById('research-knowledge-folders');
+    if (refreshed && keepSelected.length) {
+      Array.from(refreshed.options).forEach(opt => {
+        opt.selected = keepSelected.includes(opt.value);
+      });
+    }
+    _saveSettingsToStorage();
+    if (window.uiModule?.showToast) window.uiModule.showToast('로컬 지식 소스 폴더를 삭제했습니다.', 3500);
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (window.uiModule?.showError) window.uiModule.showError(msg);
+    else if (window.uiModule?.showToast) window.uiModule.showToast(msg, 7000);
+    else alert(msg);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = original || '삭제';
+    }
   }
 }
 

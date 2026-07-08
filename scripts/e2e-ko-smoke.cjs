@@ -178,6 +178,24 @@ async function clickFirstVisible(locator, description) {
     assertOk(researchSourceState.rowVisible && researchSourceState.buttonVisible, 'Knowledge folder picker controls are not visible.', researchSourceState);
     assertOk(researchSourceState.buttonText.includes('Finder'), 'Finder folder add button is missing.', researchSourceState);
     assertOk(researchSourceState.overflow === false, 'Research knowledge source row overflows the modal.', researchSourceState);
+    const localFolderDeleteState = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('#research-local-folder-list .research-local-root-row'));
+      const buttons = Array.from(document.querySelectorAll('#research-local-folder-list [data-remove-local-root]'));
+      return {
+        rowCount: rows.length,
+        removeButtonCount: buttons.length,
+        labels: rows.slice(0, 5).map((row) => row.innerText.trim()),
+        overflowCount: rows.filter((row) => row.scrollWidth > row.clientWidth + 2).length,
+      };
+    });
+    if (localFolderDeleteState.rowCount > 0) {
+      assertOk(
+        localFolderDeleteState.removeButtonCount === localFolderDeleteState.rowCount,
+        'Local knowledge folder rows must expose delete controls.',
+        localFolderDeleteState
+      );
+      assertOk(localFolderDeleteState.overflowCount === 0, 'Local knowledge folder delete rows overflow.', localFolderDeleteState);
+    }
 
     const englishLeaks = await page.evaluate(() => {
       const selectors = [

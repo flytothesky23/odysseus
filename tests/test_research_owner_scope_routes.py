@@ -98,6 +98,61 @@ def test_local_folder_picker_requires_admin_when_auth_enabled(tmp_path, monkeypa
     assert exc.value.status_code == 403
 
 
+def test_local_folder_remove_allows_auth_disabled_single_user(tmp_path, monkeypatch):
+    selected = tmp_path / "knowledge"
+    selected.mkdir()
+    saved = {
+        "knowledge_local_roots": [
+            {"id": "local123", "label": "Knowledge", "path": str(selected)}
+        ]
+    }
+
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr("src.settings.load_settings", lambda: dict(saved))
+    monkeypatch.setattr("src.settings.save_settings", lambda data: saved.update(data))
+    monkeypatch.setattr(
+        "src.knowledge_base.get_setting",
+        lambda key, default=None: saved.get(key, default),
+    )
+
+    auth_manager = SimpleNamespace(is_configured=True, is_admin=lambda user: False)
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/{root_id}", "DELETE")
+
+    out = asyncio.run(target(root_id="local123", request=_request(None, auth_manager=auth_manager)))
+
+    assert out == {"ok": True, "removed": True}
+    assert saved["knowledge_local_roots"] == []
+
+
+def test_local_folder_remove_requires_admin_when_auth_enabled(tmp_path, monkeypatch):
+    selected = tmp_path / "knowledge"
+    selected.mkdir()
+    saved = {
+        "knowledge_local_roots": [
+            {"id": "local123", "label": "Knowledge", "path": str(selected)}
+        ]
+    }
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr("src.settings.load_settings", lambda: dict(saved))
+    monkeypatch.setattr("src.settings.save_settings", lambda data: saved.update(data))
+    monkeypatch.setattr(
+        "src.knowledge_base.get_setting",
+        lambda key, default=None: saved.get(key, default),
+    )
+
+    auth_manager = SimpleNamespace(is_configured=True, is_admin=lambda user: False)
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/{root_id}", "DELETE")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(root_id="local123", request=_request("alice", auth_manager=auth_manager)))
+
+    assert exc.value.status_code == 403
+    assert len(saved["knowledge_local_roots"]) == 1
+
+
 def test_library_returns_only_caller_owned_unarchived_reports(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"
