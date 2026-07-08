@@ -36389,6 +36389,7 @@ body.research-panel-view #research-divider { display:none; }
 .research-job-card[data-category="howto"]      { --cat-color: #82c882; }
 .research-job-card[data-category="landscape"]  { --cat-color: #a07ae0; }
 .research-job-card[data-category="factcheck"]  { --cat-color: var(--red); }
+.research-job-card[data-category="management"] { --cat-color: #3f9f9a; }
 .research-job-card.done[data-category] {
   background: color-mix(in srgb, var(--cat-color) 4%, transparent);
 }
@@ -36528,6 +36529,38 @@ body.research-panel-view #research-divider { display:none; }
   color: var(--red);
   padding: 1px 6px; border-radius: 4px;
   background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+/* Management analysis: KPI-board preview */
+.research-body-management {
+  font-variant-numeric: tabular-nums;
+}
+.research-body-management table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, #3f9f9a 25%, transparent);
+}
+.research-body-management th {
+  background: color-mix(in srgb, #3f9f9a 16%, transparent);
+  color: #6fc9c4;
+  padding: 7px 9px;
+  text-align: left;
+  border-bottom: 2px solid color-mix(in srgb, #3f9f9a 40%, transparent);
+}
+.research-body-management td {
+  padding: 7px 9px;
+  border-bottom: 1px solid color-mix(in srgb, #3f9f9a 12%, transparent);
+}
+.research-body-management tr:nth-child(even) td {
+  background: color-mix(in srgb, #3f9f9a 3%, transparent);
+}
+.research-body-management blockquote {
+  border-left: 3px solid #d8a23f;
+  background: color-mix(in srgb, #d8a23f 7%, transparent);
+  padding: 10px 14px;
+  border-radius: 0 6px 6px 0;
 }
 
 .research-job-header {

@@ -453,6 +453,7 @@ function _buildPanelHTML() {
           <button class="research-cat" data-cat="comparison">Compare</button>
           <button class="research-cat" data-cat="howto">How-to</button>
           <button class="research-cat" data-cat="factcheck">Fact-check</button>
+          <button class="research-cat" data-cat="management">경영분석</button>
         </div>
         <button id="research-settings-toggle" class="research-settings-toggle${chevronCls}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;opacity:0.85;flex-shrink:0;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings<span class="research-settings-chevron">${_chevronIcon}</span>
@@ -471,6 +472,7 @@ function _buildPanelHTML() {
                 <option value="comparison">Compare</option>
                 <option value="howto">How-to</option>
                 <option value="factcheck">Fact-check</option>
+                <option value="management">경영분석</option>
               </select>
             </label>
             <label class="research-setting">
@@ -553,6 +555,16 @@ function _dismissKeyboard(input) {
 function _resetCategoryToAuto() {
   const sel = document.getElementById('research-category');
   if (sel) sel.value = '';
+  _syncCategoryChips('');
+}
+
+function _syncCategoryChips(value) {
+  const cat = value || '';
+  const sel = document.getElementById('research-category');
+  if (sel && sel.value !== cat) sel.value = cat;
+  document.querySelectorAll('.research-cat').forEach((btn) => {
+    btn.classList.toggle('active', (btn.dataset.cat || '') === cat);
+  });
 }
 
 function _wireEvents(pane) {
@@ -586,6 +598,16 @@ function _wireEvents(pane) {
 
   const endpointSelect = pane.querySelector('#research-endpoint');
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
+  pane.querySelector('#research-category')?.addEventListener('change', (e) => {
+    _syncCategoryChips(e.target.value || '');
+    _saveSettingsToStorage();
+  });
+  pane.querySelectorAll('.research-cat').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _syncCategoryChips(btn.dataset.cat || '');
+      _saveSettingsToStorage();
+    });
+  });
   pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
   pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
   pane.querySelector('#research-local-folder-list')?.addEventListener('click', (e) => {
@@ -653,6 +675,7 @@ function _editJob(job) {
   const cat = job.category || '';
   const catSel = document.getElementById('research-category');
   if (catSel) catSel.value = cat;
+  _syncCategoryChips(cat);
   // Restore settings
   const s = job.settings || {};
   const roundsEl = document.getElementById('research-rounds');
@@ -749,6 +772,7 @@ function _restoreSavedSettings() {
   if (saved.category !== undefined) {
     const catSel = document.getElementById('research-category');
     if (catSel) catSel.value = saved.category;
+    _syncCategoryChips(saved.category || '');
   }
   // Rounds intentionally defaults to "Auto" on every open — don't restore.
   // Users can pick a specific cap each time if needed.
@@ -1245,7 +1269,7 @@ function _buildJobCard(job) {
     const meta = [mName, epName, roundsLabel].filter(Boolean).join(' -- ');
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(job.category)}</span>` : ""}
+        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : ""}
       </div>
       <div class="research-job-queued-meta">${_esc(meta)}</div>
       <div class="research-job-actions">
@@ -1275,7 +1299,7 @@ function _buildJobCard(job) {
     const pct = Math.min(100, Math.round((round / barCap) * 100));
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(job.category)}</span>` : ""}
+        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : ""}
         ${modelTag}
         <span class="research-job-time">${elapsed}</span>
         <button class="research-synapse-toggle${_synapseMinimized ? ' active' : ''}" title="${_synapseMinimized ? 'Show visualization' : 'Minimize visualization'}">${_synapseMinimized ? _vizExpandIcon : _vizCollapseIcon}</button>
@@ -1331,7 +1355,7 @@ function _buildJobCard(job) {
     if (failed) card.classList.add('research-job-failed');
     const doneBadge = failed
       ? `<span class="research-cat-badge research-cat-failed">${_cancelIcon} no results</span>`
-      : (job.category ? `<span class="research-cat-badge">${_esc(job.category)}</span>` : `<span class="research-cat-badge research-cat-standard">standard</span>`);
+      : (job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : `<span class="research-cat-badge research-cat-standard">standard</span>`);
     const failNote = failed
       ? `<div class="research-job-failnote">Couldn't extract anything — try rephrasing the question, or switch the search engine in Settings.</div>`
       : '';
@@ -1409,7 +1433,7 @@ function _buildJobCard(job) {
     const errMsg = job.errorMsg ? `<div class="research-job-error">${_esc(job.errorMsg)}</div>` : '';
     card.innerHTML = `
       <div class="research-job-header">
-        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(job.category)}</span>` : ""}
+        <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : ""}
         <span class="research-job-status">${job.status}</span>
       </div>
       ${errMsg}
@@ -1439,6 +1463,7 @@ const _CAT_ICONS = {
   howto:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
   landscape:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>',
   factcheck:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>',
+  management: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="5"/><rect x="12" y="8" width="3" height="9"/><rect x="17" y="5" width="3" height="12"/><path d="M7 8l4-3 4 2 5-4"/></svg>',
 };
 
 const _CAT_LABELS = {
@@ -1447,7 +1472,12 @@ const _CAT_LABELS = {
   howto: 'How-to Guide',
   landscape: 'Landscape',
   factcheck: 'Fact-check',
+  management: '경영분석 보고서',
 };
+
+function _categoryBadgeLabel(cat) {
+  return _CAT_LABELS[cat] || cat || '';
+}
 
 function _renderResult(job) {
   if (!job.result) return '<div class="research-job-loading">Loading result...</div>';

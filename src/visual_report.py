@@ -1266,6 +1266,14 @@ body.category-landscape {
   --aurora-b: rgba(184,84,58,0.06);
   --aurora-c: rgba(122,76,184,0.05);
 }
+body.category-management {
+  --accent: #2f7f7b;
+  --accent-light: #56aaa5;
+  --accent-bg: rgba(47,127,123,0.08);
+  --aurora-a: rgba(47,127,123,0.12);
+  --aurora-b: rgba(196,139,45,0.07);
+  --aurora-c: rgba(68,86,113,0.07);
+}
 @media (prefers-color-scheme: dark) {
   body.category-product {
     --accent: #5cc8cb; --accent-light: #8fdde0;
@@ -1294,6 +1302,13 @@ body.category-landscape {
     --aurora-a: rgba(230,192,105,0.15);
     --aurora-b: rgba(232,143,115,0.07);
     --aurora-c: rgba(184,150,232,0.06);
+  }
+  body.category-management {
+    --accent: #72cbc6; --accent-light: #9cddd9;
+    --accent-bg: rgba(114,203,198,0.10);
+    --aurora-a: rgba(114,203,198,0.13);
+    --aurora-b: rgba(235,187,90,0.08);
+    --aurora-c: rgba(125,180,224,0.07);
   }
 }
 
@@ -1326,6 +1341,12 @@ body.category-product {
   --font-body: 'Inter', system-ui, sans-serif;
 }
 
+/* Management: boardroom memo, dense tables, clean numerals */
+body.category-management {
+  --font-display: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+}
+
 /* Source Serif sits visually larger than Inter at the same px — pull it
    back one notch for the categories that use it as body so line length
    and rhythm stay comparable across categories. */
@@ -1336,9 +1357,11 @@ body.category-landscape { font-size: 16.5px; }
 body.category-product   .content > p:first-of-type::first-letter,
 body.category-howto     .content > p:first-of-type::first-letter,
 body.category-comparison .content > p:first-of-type::first-letter,
+body.category-management .content > p:first-of-type::first-letter,
 body.category-product   .content > h2:first-child + p::first-letter,
 body.category-howto     .content > h2:first-child + p::first-letter,
-body.category-comparison .content > h2:first-child + p::first-letter {
+body.category-comparison .content > h2:first-child + p::first-letter,
+body.category-management .content > h2:first-child + p::first-letter {
   font-size: 1em; float: none; margin: 0; color: inherit;
   font-family: inherit; font-weight: inherit;
 }
@@ -1410,11 +1433,24 @@ body.category-landscape::before {
   100% { background-position: 0 100%; }
 }
 
+/* Management → ledger grid + boardroom wash */
+body.category-management::before {
+  background:
+    linear-gradient(to right, var(--aurora-a) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--aurora-a) 1px, transparent 1px),
+    radial-gradient(65vw 55vh at 22% 15%, var(--aurora-b) 0%, transparent 62%),
+    radial-gradient(70vw 60vh at 80% 85%, var(--aurora-c) 0%, transparent 65%);
+  background-size: 42px 42px, 42px 42px, 100% 100%, 100% 100%;
+  filter: none;
+  animation: cat-grid-pan 90s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   body.category-product::before,
   body.category-comparison::before,
   body.category-howto::before,
-  body.category-landscape::before {
+  body.category-landscape::before,
+  body.category-management::before {
     animation: none;
   }
 }
@@ -1587,6 +1623,40 @@ body.category-product .content h3 + table {
   margin-top: 0.8rem;
   padding-left: 4px;
 }
+
+/* ── MANAGEMENT: executive KPI board ─────────────── */
+body.category-management .content {
+  font-feature-settings: 'tnum' on, 'ss01';
+}
+body.category-management .content h2 {
+  border-bottom: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  padding-bottom: 0.45rem;
+}
+body.category-management .content h3 {
+  border-left: 4px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  padding: 10px 14px;
+  border-radius: 0 8px 8px 0;
+}
+body.category-management .content table {
+  font-size: 0.88rem;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.05);
+}
+body.category-management .content th {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-surface));
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 0.72rem;
+}
+body.category-management .content td:first-child {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+body.category-management .content blockquote {
+  border-left: 4px solid #c48b2d;
+  background: color-mix(in srgb, #c48b2d 8%, transparent);
+}
 """
     styles = {
         "product": """
@@ -1732,6 +1802,28 @@ body.category-product .content h3 + table {
 .category-factcheck .content strong:only-child {
   display:inline-block; padding:4px 12px; border-radius:4px;
   font-size:1.1em;
+}
+""",
+        "management": """
+/* Management analysis category */
+.category-management .content {
+  font-variant-numeric: tabular-nums;
+}
+.category-management .content table {
+  width:100%; border-collapse:collapse; margin:1.2em 0;
+}
+.category-management .content table th {
+  background:var(--accent); color:#fff; padding:9px 12px; text-align:left;
+}
+.category-management .content table td {
+  padding:9px 12px; border-bottom:1px solid var(--border);
+}
+.category-management .content table tr:nth-child(even) td {
+  background:var(--bg-surface);
+}
+.category-management .content h2 + ul,
+.category-management .content h2 + p {
+  margin-top:0.8rem;
 }
 """,
     }

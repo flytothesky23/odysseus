@@ -157,6 +157,44 @@ Requirements:
 - Write in an engaging, informative style — not dry or robotic
 """
 
+CATEGORY_DESCRIPTIONS = {
+    "product": "ranked product or vendor research with prices, pros/cons, and recommendations",
+    "comparison": "side-by-side comparison across options, criteria, and best-fit verdicts",
+    "howto": "step-by-step implementation or usage guide",
+    "factcheck": "claim verification with evidence for/against and a clear verdict",
+    "management": "business, financial, audit, operations, daily/weekly/monthly/yearly management analysis report",
+}
+
+MANAGEMENT_ANALYSIS_STAGE_GUIDE = """\
+
+**Management Analysis Report mode**
+Treat this as a business-management analysis task, not a generic article. Build an evidence ledger before writing conclusions.
+
+Core analysis axes:
+- Period and baseline: identify daily/weekly/monthly/yearly scope; compare against prior period, recent baseline, YTD, and prior-year comparable period when evidence exists.
+- Financial report track: cover management summary, P&L, cost structure, balance sheet, cash flow, segment performance, impairment/contingency, financial ratios, risks, and improvement priorities.
+- Operations report track: cover PSBall sales/value mix, steel slag removal, Haman/Cheongnam byproduct and intermediate-processing flow, logistics/freight, labor/equipment productivity, field issues, and management Check Points.
+- Use data tables where possible. Every major judgment should name the metric, period, value, comparison target, direction, and operational meaning.
+- Keep private knowledge citations such as vault:// or local-knowledge:// links when source mode includes local knowledge.
+
+Language and terminology locks:
+- Prefer Korean executive-report language when the user writes in Korean.
+- Use "PSBall 공급가액", "PSBall 판매수량", "공급가액 대비 운임비율", "함안 부산물 판매실적", "청남 부산물 판매실적", "관리 Check Point".
+- Avoid reader-facing internal labels such as Branch A/B, v2, guarded comparator, direct benchmark, allocation confidence, source-screening.
+- Do not claim "시장평균", "표준운임", "적정운임", "고운임", "저운임", "과다", or "저렴" unless a directly comparable source proves it. Prefer "선정 유사대조군 대비 높은 위치/낮은 위치".
+- Do not write empty caveats like "확인 필요" alone. State why, the source/data, the comparison target, completion criteria, and residual risk.
+"""
+
+MANAGEMENT_STAGE_FOCUS = {
+    "plan": """Plan sub-questions around the report type. Include financial-statement questions if audit/PDF/annual report evidence appears; include operations questions if daily/weekly production, freight, byproduct, route, or work-log evidence appears.""",
+    "query": """Generate searches that retrieve source packs, not only opinions. Include period terms, company/project names, metric names, table names, branch/site names, and Korean aliases such as PSBall, 슬래그반출, 함안, 청남, 운임, 장비시간, 인력시간, 현장 이슈.""",
+    "extract": """Extract metric-bearing evidence. Capture period, value, unit, baseline/comparison target, source table/note, caveat, and which axis it supports: financial, PSBall, slag, Haman/Cheongnam, logistics, productivity, field issue, or risk.""",
+    "synthesize": """Maintain an evolving management ledger. Group evidence by axis, reconcile contradictions, mark unavailable baselines explicitly, and convert findings into management implications rather than a list of facts.""",
+    "stop": """Continue unless the report has either covered or explicitly marked unavailable the relevant axes, period baselines, driver table, risks, and action/checkpoint section.""",
+    "final": """Write the finished report as an executive-ready management report with tables, not a magazine article. Keep the conclusion tied to practical management decisions.""",
+}
+
+
 CATEGORY_PROMPTS = {
     "product": """IMPORTANT FORMAT OVERRIDE — this is a PRODUCT research report:
 - Structure as a RANKED LIST of products/options (best first)
@@ -188,6 +226,18 @@ CATEGORY_PROMPTS = {
 - Include a ## Verdict section with one of: **Supported**, **Mixed Evidence**, or **Unsupported**
 - End with ## Nuance & Caveats for important context and limitations
 - Be balanced and cite sources for every claim""",
+
+    "management": """IMPORTANT FORMAT OVERRIDE — this is a MANAGEMENT ANALYSIS / BUSINESS REPORT:
+- Write in Korean if the user's prompt is Korean.
+- Start with ## 경영 요약 or ## Executive Brief: 5-7 bullets with the most important numbers, deltas, and decisions.
+- Detect the data shape and choose the matching structure:
+  - Financial/audit/annual report: 경영 요약, 손익 추이, 비용 구조, 자산·부채·자본, 현금흐름, 부문별 손익, 주요 재무비율, 리스크, 종합 의견 및 개선 과제.
+  - Daily/weekly/monthly operations report: 이번 기간 판단, Executive Brief, 기간 기준선, 경영 지표 보드, PSBall 판매 mix, 슬래그반출·후공정, 함안·청남 가치 회수, 물류/운임 적정성 평가 검증, 인력·장비 생산성, 운영 근거 스토리보드, 종합의견과 관리 Check Point.
+- Use markdown tables for KPI boards and comparisons. Include units such as 원, 백만원, T, %, %p, T/h.
+- For each management claim, show the metric, period, value, comparison baseline, and why it matters.
+- Separate operational facts from management judgment; do not invent unavailable numbers.
+- End with ## 종합의견 및 관리 Check Point. Each checkpoint needs 근거, 실행 방향, 완료 기준, and residual risk if any.
+- Keep source citations inline.""",
 }
 
 SOURCE_MODE_PROMPTS = {
@@ -235,7 +285,7 @@ class DeepResearcher:
         self.llm_model = llm_model
         self.llm_headers = llm_headers
         self.search_provider_override = search_provider
-        self.category = category
+        self.category = (str(category).strip().lower() if category else None)
         self.source_mode = self._normalize_source_mode(source_mode)
         self.knowledge_folders = list(knowledge_folders or [])
         self.knowledge_searcher = knowledge_searcher
@@ -303,6 +353,15 @@ class DeepResearcher:
             instruction += f"\nSelected private knowledge folders: {folders}."
         return instruction
 
+    def _category_stage_instruction(self, stage: str) -> str:
+        """Return extra guidance for categories that alter the research loop."""
+        category = (getattr(self, "category", "") or "").strip().lower()
+        if category != "management":
+            return ""
+        focus = MANAGEMENT_STAGE_FOCUS.get(stage, "")
+        stage_note = f"\nStage focus: {focus}" if focus else ""
+        return f"{MANAGEMENT_ANALYSIS_STAGE_GUIDE}{stage_note}"
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -325,6 +384,11 @@ class DeepResearcher:
         findings: List[Dict] = list(prior_findings) if prior_findings else []
         report = prior_report or ""
 
+        if not self.category and not prior_report:
+            self.category = await self._classify_category(question)
+            if self.category:
+                logger.info(f"Auto-detected category: {self.category}")
+
         # PLAN: Analyze the question and create a research strategy
         if not prior_report:
             self._emit(phase="planning")
@@ -335,10 +399,6 @@ class DeepResearcher:
             self._emit(phase="planning")
             self.research_plan = await self._create_plan(question)
             logger.info(f"Continuation plan: {self.research_plan[:200]}")
-        if not self.category and not prior_report:
-            self.category = await self._classify_category(question)
-            if self.category:
-                logger.info(f"Auto-detected category: {self.category}")
 
         if prior_urls:
             self.urls_fetched.update(prior_urls)
@@ -466,6 +526,9 @@ class DeepResearcher:
             question=question,
             source_instruction=self._source_instruction(),
         )
+        category_instruction = self._category_stage_instruction("plan")
+        if category_instruction:
+            prompt += "\n\n" + category_instruction
         try:
             response = await self._llm(
                 [{"role": "user", "content": prompt}],
@@ -493,9 +556,13 @@ class DeepResearcher:
     async def _classify_category(self, question: str) -> Optional[str]:
         """Fast LLM call to classify the research question into a category."""
         valid = ", ".join(CATEGORY_PROMPTS.keys())
+        descriptions = "\n".join(
+            f"- {name}: {desc}" for name, desc in CATEGORY_DESCRIPTIONS.items()
+        )
         prompt = (
             f"Classify this research question into exactly ONE category.\n"
-            f"Categories: {valid}\n"
+            f"Categories: {valid}\n\n"
+            f"Category meanings:\n{descriptions}\n\n"
             f"If none fit well, respond with: general\n\n"
             f"Question: {question}\n\n"
             f"Respond with ONLY the category name, nothing else."
@@ -554,6 +621,9 @@ class DeepResearcher:
                     "queries to fill gaps, verify claims, or explore specific aspects "
                     "that the report doesn't yet cover well."
                 )
+        category_instruction = self._category_stage_instruction("query")
+        if category_instruction:
+            round_instruction = f"{round_instruction}\n\n{category_instruction}"
 
         prompt = current_date_context() + QUERY_GEN_PROMPT.format(
             question=question,
@@ -778,9 +848,13 @@ class DeepResearcher:
                 content = truncated
 
         try:
+            goal = question
+            category_instruction = self._category_stage_instruction("extract")
+            if category_instruction:
+                goal = f"{question}\n\n{category_instruction}"
             response = await self._llm(
                 [
-                    {"role": "user", "content": EXTRACTOR_SYSTEM.format(goal=question)},
+                    {"role": "user", "content": EXTRACTOR_SYSTEM.format(goal=goal)},
                     untrusted_context_message("webpage", content),
                 ],
                 temperature=0.2,
@@ -828,6 +902,9 @@ class DeepResearcher:
             new_findings=findings_text,
             source_instruction=self._source_instruction(),
         )
+        category_instruction = self._category_stage_instruction("synthesize")
+        if category_instruction:
+            prompt += "\n\n" + category_instruction
 
         try:
             return await self._llm(
@@ -857,6 +934,9 @@ class DeepResearcher:
             round_num=round_num,
             max_rounds=self.max_rounds,
         )
+        category_instruction = self._category_stage_instruction("stop")
+        if category_instruction:
+            prompt += "\n\n" + category_instruction
 
         try:
             response = await self._llm(
@@ -889,6 +969,9 @@ class DeepResearcher:
         )
         cat_extra = CATEGORY_PROMPTS.get(self.category or "", "")
         if cat_extra:
+            category_instruction = self._category_stage_instruction("final")
+            if category_instruction:
+                prompt += "\n\n" + category_instruction
             prompt += "\n\n" + cat_extra
 
         try:

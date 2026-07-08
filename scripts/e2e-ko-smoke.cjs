@@ -137,6 +137,22 @@ async function clickFirstVisible(locator, description) {
     });
     assertOk(outputFormats.some((item) => item.value === 'html' && item.checked), 'Research output selector should default to HTML.', { outputFormats });
     assertOk(outputFormats.some((item) => item.value === 'md_json'), 'Research output selector is missing MD+JSON.', { outputFormats });
+    const categoryOptions = await page.locator('#research-category option').evaluateAll((options) =>
+      options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
+    );
+    const categoryChips = await page.locator('#research-category-row .research-cat').evaluateAll((buttons) =>
+      buttons.map((button) => ({ value: button.getAttribute('data-cat') || '', text: button.textContent.trim() }))
+    );
+    assertOk(
+      categoryOptions.some((option) => option.value === 'management' && option.text.includes('경영분석')),
+      'Research category dropdown is missing management analysis.',
+      { categoryOptions }
+    );
+    assertOk(
+      categoryChips.some((chip) => chip.value === 'management' && chip.text.includes('경영분석')),
+      'Research category chips are missing management analysis.',
+      { categoryChips }
+    );
     await page.locator('#research-output-md-json').check();
     await page.locator('#research-output-html').uncheck();
     await page.locator('#research-output-md-json').click();
