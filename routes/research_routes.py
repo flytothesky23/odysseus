@@ -178,6 +178,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "progress": entry.get("progress", {}),
                     "started_at": entry.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                    "reasoning_effort": entry.get("reasoning_effort"),
                 })
         return {"active": active}
 
@@ -358,6 +359,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "duration": d.get("stats", {}).get("Duration", ""),
                     "rounds": d.get("stats", {}).get("Rounds", ""),
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "reasoning_effort": d.get("reasoning_effort") or "",
                     "started_at": d.get("started_at", 0),
                     "completed_at": d.get("completed_at", 0),
                     "archived": bool(d.get("archived")),
@@ -550,6 +552,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         source_mode: Optional[str] = None
         knowledge_folders: List[str] = Field(default_factory=list)
         artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
+        reasoning_effort: Optional[str] = None
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -561,6 +564,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             normalize_source_mode,
         )
         from src.settings import get_setting
+        from src.llm_core import _normalize_reasoning_effort
         user = require_privilege(request, "can_use_research")
         if user == INTERNAL_TOOL_USER:
             tool_owner = (request.headers.get("X-Odysseus-Owner") or "").strip()
@@ -635,6 +639,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         except KnowledgeBaseError as e:
             raise HTTPException(400, str(e))
         artifact_formats = normalize_artifact_formats(body.artifact_formats)
+        reasoning_effort = _normalize_reasoning_effort(body.reasoning_effort)
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
@@ -653,6 +658,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
             artifact_formats=artifact_formats,
+            reasoning_effort=reasoning_effort,
             owner=user,
         )
         return {
@@ -660,6 +666,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "status": "running",
             "query": body.query,
             "artifact_formats": artifact_formats,
+            "reasoning_effort": reasoning_effort,
         }
 
     @router.get("/api/research/stream/{session_id}")
@@ -714,6 +721,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "raw_findings": d.get("raw_findings", []),
                     "category": d.get("category") or "",
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "reasoning_effort": d.get("reasoning_effort") or "",
                 }
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
@@ -725,6 +733,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "raw_findings": raw_findings,
             "category": "",
             "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
+            "reasoning_effort": task.get("reasoning_effort") or "",
         }
 
     @router.post("/api/research/spinoff/{session_id}")

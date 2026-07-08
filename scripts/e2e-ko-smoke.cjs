@@ -126,6 +126,29 @@ async function clickFirstVisible(locator, description) {
 
     await clickFirstVisible(page.locator('#rail-research, #tool-research-btn'), 'research button');
     await page.waitForSelector('#research-pane', { timeout: 5000 });
+    const researchEffortOptions = await page.locator('#research-reasoning-effort option').evaluateAll((options) =>
+      options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
+    );
+    assertOk(
+      ['low', 'medium', 'high', 'xhigh'].every((value) => researchEffortOptions.some((option) => option.value === value)),
+      'Research reasoning effort dropdown is missing quality controls.',
+      { researchEffortOptions }
+    );
+    await page.locator('#research-reasoning-effort').selectOption('high');
+    const researchEffortState = await page.evaluate(() => {
+      const raw = localStorage.getItem('odysseus-research-settings') || '{}';
+      let parsed = {};
+      try { parsed = JSON.parse(raw); } catch {}
+      return {
+        value: document.querySelector('#research-reasoning-effort')?.value || '',
+        storageValue: parsed.reasoning_effort || '',
+      };
+    });
+    assertOk(
+      researchEffortState.value === 'high' && researchEffortState.storageValue === 'high',
+      'Research reasoning effort selection was not persisted.',
+      researchEffortState
+    );
     const outputFormats = await page.evaluate(() => {
       const checks = Array.from(document.querySelectorAll('input[name="research-output-format"]'));
       return checks.map((el) => ({

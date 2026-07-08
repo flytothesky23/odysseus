@@ -306,6 +306,7 @@ class ResearchHandler:
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
         artifact_formats: list = None,
+        reasoning_effort: str = None,
         owner: str = "",
     ) -> dict:
         """Start research as a background task. Returns task info dict.
@@ -315,6 +316,8 @@ class ResearchHandler:
         """
         if _research_json_path(session_id) is None:
             raise ValueError("Invalid research session_id")
+        from src.llm_core import _normalize_reasoning_effort
+        reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
         # Resolve the hard wall-clock timeout from settings when the caller
         # didn't pin one. Local / edge models routinely need more than the
@@ -356,6 +359,7 @@ class ResearchHandler:
             "source_mode": source_mode,
             "knowledge_folders": list(knowledge_folders or []),
             "artifact_formats": normalize_artifact_formats(artifact_formats),
+            "reasoning_effort": reasoning_effort,
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -395,6 +399,7 @@ class ResearchHandler:
                         knowledge_folders=knowledge_folders,
                         extraction_timeout=extraction_timeout,
                         extraction_concurrency=extraction_concurrency,
+                        reasoning_effort=reasoning_effort,
                     ),
                     timeout=hard_timeout,
                 )
@@ -463,6 +468,7 @@ class ResearchHandler:
             "status": "running",
             "query": query,
             "artifact_formats": entry["artifact_formats"],
+            "reasoning_effort": entry.get("reasoning_effort"),
         }
 
     def get_status(self, session_id: str) -> Optional[dict]:
@@ -475,6 +481,7 @@ class ResearchHandler:
                 "query": entry["query"],
                 "started_at": entry["started_at"],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                "reasoning_effort": entry.get("reasoning_effort"),
             }
             # avg_duration is a historical figure over completed reports on
             # disk; get_avg_duration() globs and JSON-parses the whole research
@@ -502,6 +509,7 @@ class ResearchHandler:
                     "query": data.get("query", ""),
                     "started_at": data.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
+                    "reasoning_effort": data.get("reasoning_effort"),
                 }
             except Exception:
                 pass
@@ -706,6 +714,7 @@ class ResearchHandler:
                 "source_mode": entry.get("source_mode"),
                 "knowledge_folders": entry.get("knowledge_folders") or [],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                "reasoning_effort": entry.get("reasoning_effort"),
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
                 # SECURITY: stamp owner so route handlers can filter by user.
@@ -786,6 +795,7 @@ class ResearchHandler:
             "source_mode": data.get("source_mode") or "",
             "knowledge_folders": data.get("knowledge_folders") or [],
             "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
+            "reasoning_effort": data.get("reasoning_effort") or "",
             "started_at": data.get("started_at", 0),
             "completed_at": data.get("completed_at", 0),
             "artifact_urls": artifact_urls,
@@ -810,6 +820,7 @@ class ResearchHandler:
             f"odysseus_session_id: {_frontmatter_string(session_id)}",
             f"created: {_frontmatter_string(_iso_from_timestamp(completed_at))}",
             f"source_mode: {_frontmatter_string(data.get('source_mode') or '')}",
+            f"reasoning_effort: {_frontmatter_string(data.get('reasoning_effort') or '')}",
             "artifact_formats:",
         ]
         frontmatter.extend(f"  - {fmt}" for fmt in artifact_formats)
@@ -826,6 +837,7 @@ class ResearchHandler:
             f"- 세션 ID: `{session_id}`",
             f"- 상태: `{data.get('status') or 'done'}`",
             f"- 소스 모드: `{data.get('source_mode') or 'default'}`",
+            f"- 추론 정도: `{data.get('reasoning_effort') or 'auto'}`",
             f"- 결과물 형식: {', '.join(artifact_formats)}",
             f"- HTML 리포트: `{data['artifact_urls']['html']}`",
             f"- Markdown 리포트: `{data['artifact_urls']['markdown']}`",
@@ -957,6 +969,7 @@ class ResearchHandler:
         knowledge_folders: list = None,
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
+        reasoning_effort: str = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
@@ -1076,6 +1089,7 @@ class ResearchHandler:
                 source_mode=_source_mode,
                 knowledge_folders=_knowledge_folders,
                 knowledge_searcher=_knowledge_search if _source_mode in {"hybrid", "knowledge"} else None,
+                reasoning_effort=reasoning_effort,
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher

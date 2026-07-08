@@ -65,6 +65,14 @@ let _settingsCollapsed = false;
 let _knowledgeConfig = { configured: false, folders: [] };
 const _SETTINGS_KEY = 'odysseus-research-settings';
 const _COLLAPSE_KEY = 'odysseus-research-settings-collapsed';
+const _REASONING_EFFORT_LABELS = {
+  none: '없음',
+  minimal: '최소',
+  low: '낮음',
+  medium: '보통',
+  high: '높음',
+  xhigh: '매우 높음',
+};
 
 try { _settingsCollapsed = localStorage.getItem(_COLLAPSE_KEY) === '1'; } catch {}
 
@@ -75,6 +83,7 @@ function _saveSettingsToStorage() {
       search_provider: document.getElementById('research-search-provider')?.value || '',
       endpoint_id: document.getElementById('research-endpoint')?.value || '',
       model: document.getElementById('research-model')?.value || '',
+      reasoning_effort: document.getElementById('research-reasoning-effort')?.value || '',
       category: document.getElementById('research-category')?.value || '',
       source_mode: document.getElementById('research-source-mode')?.value || '',
       knowledge_folders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map(o => o.value).filter(Boolean),
@@ -487,6 +496,16 @@ function _buildPanelHTML() {
               <span class="research-setting-label">Endpoint</span>
               <select id="research-endpoint"><option value="">Default</option></select>
             </label>
+            <label class="research-setting">
+              <span class="research-setting-label">추론 <span class="hwfit-help-chip hwfit-help-chip-inline" title="보고서 품질과 실행 시간/비용을 조절합니다. 자동은 모델 기본값을 사용합니다.">?</span></span>
+              <select id="research-reasoning-effort">
+                <option value="" selected>자동</option>
+                <option value="low">낮음</option>
+                <option value="medium">보통</option>
+                <option value="high">높음</option>
+                <option value="xhigh">매우 높음</option>
+              </select>
+            </label>
           </div>
           <div class="research-setting research-setting-wide research-output-setting" id="research-output-setting">
             <div class="research-output-header">
@@ -609,6 +628,7 @@ function _wireEvents(pane) {
     });
   });
   pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
+  pane.querySelector('#research-reasoning-effort')?.addEventListener('change', _saveSettingsToStorage);
   pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
   pane.querySelector('#research-local-folder-list')?.addEventListener('click', (e) => {
     const btn = e.target.closest?.('[data-remove-local-root]');
@@ -637,6 +657,7 @@ function _readSettings() {
     search_provider: document.getElementById('research-search-provider')?.value || undefined,
     endpoint_id: document.getElementById('research-endpoint')?.value || undefined,
     model: document.getElementById('research-model')?.value || undefined,
+    reasoning_effort: document.getElementById('research-reasoning-effort')?.value || undefined,
     category: category || undefined,
     source_mode: sourceMode || undefined,
     artifact_formats: _selectedArtifactFormats(),
@@ -694,6 +715,8 @@ function _editJob(job) {
   if (epEl && s.endpoint_id) epEl.value = s.endpoint_id;
   const mEl = document.getElementById('research-model');
   if (mEl && s.model) mEl.value = s.model;
+  const effortEl = document.getElementById('research-reasoning-effort');
+  if (effortEl) effortEl.value = s.reasoning_effort || '';
   // Remove the old job so clicking Start/Queue makes a fresh one
   jobs.removeJob(job.id);
   // Scroll the form into view
@@ -780,6 +803,8 @@ function _restoreSavedSettings() {
   if (search && saved.search_provider !== undefined) search.value = saved.search_provider;
   const source = document.getElementById('research-source-mode');
   if (source && saved.source_mode !== undefined) source.value = saved.source_mode;
+  const effort = document.getElementById('research-reasoning-effort');
+  if (effort && saved.reasoning_effort !== undefined) effort.value = saved.reasoning_effort || '';
   const folders = document.getElementById('research-knowledge-folders');
   if (folders && Array.isArray(saved.knowledge_folders)) {
     Array.from(folders.options).forEach(opt => {
@@ -1260,13 +1285,15 @@ function _buildJobCard(job) {
   const isExpanded = _expandedJobId === job.id;
   const modelTag = (job.modelName || job.settings?._modelName)
     ? `<span class="research-job-model">${_esc(job.modelName || job.settings._modelName)}</span>` : '';
+  const effortLabel = _reasoningEffortLabel(job.reasoning_effort || job.settings?.reasoning_effort);
+  const effortTag = effortLabel ? `<span class="research-job-model">${_esc(effortLabel)}</span>` : '';
 
   if (job.status === 'queued') {
     const rounds = job.settings?.max_rounds;
     const roundsLabel = !rounds ? 'Auto rounds' : `${rounds} rounds`;
     const epName = job.settings?._endpointName || '';
     const mName = job.settings?._modelName || '';
-    const meta = [mName, epName, roundsLabel].filter(Boolean).join(' -- ');
+    const meta = [mName, epName, roundsLabel, effortLabel].filter(Boolean).join(' -- ');
     card.innerHTML = `
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : ""}
@@ -1301,6 +1328,7 @@ function _buildJobCard(job) {
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${job.category ? `<span class="research-cat-badge">${_esc(_categoryBadgeLabel(job.category))}</span>` : ""}
         ${modelTag}
+        ${effortTag}
         <span class="research-job-time">${elapsed}</span>
         <button class="research-synapse-toggle${_synapseMinimized ? ' active' : ''}" title="${_synapseMinimized ? 'Show visualization' : 'Minimize visualization'}">${_synapseMinimized ? _vizExpandIcon : _vizCollapseIcon}</button>
         <button class="research-job-cancel" title="Cancel research">${_cancelIcon}</button>
@@ -1379,6 +1407,7 @@ function _buildJobCard(job) {
       <div class="research-job-header">
         <span class="research-job-query">${_esc(job.query)}</span>${doneBadge}
         ${modelTag}
+        ${effortTag}
         <span class="research-job-meta">${elapsed} -- ${srcCount} sources</span>
       </div>
       ${failNote}
@@ -1477,6 +1506,11 @@ const _CAT_LABELS = {
 
 function _categoryBadgeLabel(cat) {
   return _CAT_LABELS[cat] || cat || '';
+}
+
+function _reasoningEffortLabel(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return key && _REASONING_EFFORT_LABELS[key] ? `추론 ${_REASONING_EFFORT_LABELS[key]}` : '';
 }
 
 function _renderResult(job) {

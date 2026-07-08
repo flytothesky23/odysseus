@@ -280,10 +280,14 @@ class DeepResearcher:
         source_mode: Optional[str] = None,
         knowledge_folders: Optional[List[str]] = None,
         knowledge_searcher: Optional[Callable[[str], List[Dict]]] = None,
+        reasoning_effort: Optional[str] = None,
     ):
+        from src.llm_core import _normalize_reasoning_effort
+
         self.llm_endpoint = llm_endpoint
         self.llm_model = llm_model
         self.llm_headers = llm_headers
+        self.reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
         self.search_provider_override = search_provider
         self.category = (str(category).strip().lower() if category else None)
         self.source_mode = self._normalize_source_mode(source_mode)
@@ -514,6 +518,7 @@ class DeepResearcher:
             max_tokens=max_tokens,
             headers=self.llm_headers,
             timeout=timeout,
+            reasoning_effort=self.reasoning_effort,
         )
         return strip_thinking(response)
 
