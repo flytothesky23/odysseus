@@ -21,8 +21,12 @@ def _redirect_research_dir(tmp_path, monkeypatch):
     )
 
 
-def _request(user: str):
-    return SimpleNamespace(state=SimpleNamespace(current_user=user))
+def _request(user: str, auth_manager=None):
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user=user),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
 
 
 def _route(router, path: str, method: str):
@@ -45,6 +49,53 @@ def _research_handler():
     handler = MagicMock()
     handler._active_tasks = {}
     return handler
+
+
+def test_local_folder_picker_allows_auth_disabled_single_user(tmp_path, monkeypatch):
+    selected = tmp_path / "knowledge"
+    selected.mkdir()
+    saved = {"knowledge_local_roots": []}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = str(selected) + "\n"
+        stderr = ""
+
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr("routes.research_routes.sys.platform", "darwin")
+    monkeypatch.setattr("routes.research_routes.subprocess.run", lambda *args, **kwargs: FakeCompleted())
+    monkeypatch.setattr("src.settings.load_settings", lambda: dict(saved))
+    monkeypatch.setattr("src.settings.save_settings", lambda data: saved.update(data))
+    monkeypatch.setattr(
+        "src.knowledge_base.get_setting",
+        lambda key, default=None: saved.get(key, default),
+    )
+
+    auth_manager = SimpleNamespace(is_configured=True, is_admin=lambda user: False)
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/pick", "POST")
+
+    out = asyncio.run(target(request=_request(None, auth_manager=auth_manager)))
+
+    assert out["ok"] is True
+    assert out["folder"]["path"] == str(selected.resolve())
+    assert saved["knowledge_local_roots"][0]["path"] == str(selected.resolve())
+
+
+def test_local_folder_picker_requires_admin_when_auth_enabled(tmp_path, monkeypatch):
+    selected = tmp_path / "knowledge"
+    selected.mkdir()
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr("routes.research_routes.sys.platform", "darwin")
+
+    auth_manager = SimpleNamespace(is_configured=True, is_admin=lambda user: False)
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/pick", "POST")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(request=_request("alice", auth_manager=auth_manager)))
+
+    assert exc.value.status_code == 403
 
 
 def test_library_returns_only_caller_owned_unarchived_reports(tmp_path, monkeypatch):

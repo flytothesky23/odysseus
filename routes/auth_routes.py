@@ -13,6 +13,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult
+from routes.codexian_bridge import clear_codexian_odysseus_session, sync_codexian_odysseus_session
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -163,13 +164,19 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if body.remember:
             cookie_kwargs["max_age"] = 60 * 60 * 24 * 7  # 7 days
         response.set_cookie(**cookie_kwargs)
-        return {"ok": True, "username": username}
+        codexian_bridge = await asyncio.to_thread(
+            sync_codexian_odysseus_session,
+            username=username,
+            token=token,
+        )
+        return {"ok": True, "username": username, "codexian_bridge": codexian_bridge}
 
     @router.post("/logout")
     async def logout(request: Request, response: Response):
         token = request.cookies.get(SESSION_COOKIE)
         if token:
             auth_manager.revoke_token(token)
+            await asyncio.to_thread(clear_codexian_odysseus_session)
         response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True}
 
@@ -186,6 +193,14 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             u = result.get("username")
             if u:
                 result["privileges"] = auth_manager.get_privileges(u)
+                if token:
+                    result["codexian_bridge"] = await asyncio.to_thread(
+                        sync_codexian_odysseus_session,
+                        username=str(u),
+                        token=token,
+                    )
+            elif token:
+                result["codexian_bridge"] = await asyncio.to_thread(clear_codexian_odysseus_session)
         except Exception:
             pass
         return result

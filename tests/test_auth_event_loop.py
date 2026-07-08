@@ -84,9 +84,28 @@ def _login_endpoint(auth_manager):
     raise AssertionError("login route not found on the auth router")
 
 
-def test_login_offloads_bcrypt_bearing_calls(monkeypatch):
+def _status_endpoint(auth_manager):
+    router = setup_auth_routes(auth_manager)
+    for r in router.routes:
+        if getattr(r, "path", None) == "/api/auth/status" and "GET" in getattr(r, "methods", set()):
+            return r.endpoint
+    raise AssertionError("status route not found on the auth router")
+
+
+def _logout_endpoint(auth_manager):
+    router = setup_auth_routes(auth_manager)
+    for r in router.routes:
+        if getattr(r, "path", None) == "/api/auth/logout" and "POST" in getattr(r, "methods", set()):
+            return r.endpoint
+    raise AssertionError("logout route not found on the auth router")
+
+
+def test_login_offloads_bcrypt_bearing_calls(monkeypatch, tmp_path):
     calls = []
     auth = MagicMock()
+    codexian_settings = tmp_path / "codexian-data.json"
+    codexian_settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CODEXIAN_OBSIDIAN_PLUGIN_DATA", str(codexian_settings))
 
     async def fake_to_thread(fn, *args, **kwargs):
         calls.append(fn)
@@ -110,4 +129,72 @@ def test_login_offloads_bcrypt_bearing_calls(monkeypatch):
     auth.create_session_trusted.assert_called_once()
     # The whole point: the expensive bcrypt-bearing calls go through
     # asyncio.to_thread rather than running inline in the request coroutine.
-    assert calls == [auth.verify_password, auth.create_session_trusted]
+    assert calls[:2] == [auth.verify_password, auth.create_session_trusted]
+    assert getattr(calls[2], "__name__", "") == "sync_codexian_odysseus_session"
+
+
+def test_auth_status_syncs_existing_session_cookie_to_codexian(monkeypatch, tmp_path):
+    codexian_settings = tmp_path / "codexian-data.json"
+    codexian_settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CODEXIAN_OBSIDIAN_PLUGIN_DATA", str(codexian_settings))
+
+    auth = MagicMock()
+    auth.signup_enabled = False
+    auth.status.return_value = {"authenticated": True, "username": "alice"}
+    auth.get_privileges.return_value = {"research": True}
+    status = _status_endpoint(auth)
+
+    request = SimpleNamespace(cookies={"odysseus_session": "tok-status"})
+    result = asyncio.run(status(request=request))
+
+    assert result["codexian_bridge"] == {"updated": True}
+    saved = __import__("json").loads(codexian_settings.read_text(encoding="utf-8"))
+    assert saved["odysseusLocal"]["authMode"] == "cookie"
+    assert saved["odysseusLocal"]["authToken"] == "odysseus_session=tok-status"
+    assert saved["odysseusLocal"]["loginUsername"] == "alice"
+
+
+def test_auth_status_clears_codexian_when_cookie_is_invalid(monkeypatch, tmp_path):
+    codexian_settings = tmp_path / "codexian-data.json"
+    codexian_settings.write_text(
+        '{"odysseusLocal":{"enabled":true,"authMode":"cookie","authToken":"odysseus_session=stale","loginUsername":"alice"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEXIAN_OBSIDIAN_PLUGIN_DATA", str(codexian_settings))
+
+    auth = MagicMock()
+    auth.signup_enabled = False
+    auth.status.return_value = {"authenticated": False}
+    status = _status_endpoint(auth)
+
+    request = SimpleNamespace(cookies={"odysseus_session": "stale"})
+    result = asyncio.run(status(request=request))
+
+    assert result["codexian_bridge"] == {"updated": True}
+    saved = __import__("json").loads(codexian_settings.read_text(encoding="utf-8"))
+    assert saved["odysseusLocal"]["enabled"] is False
+    assert saved["odysseusLocal"]["authToken"] == ""
+    assert saved["odysseusLocal"]["loginUsername"] == ""
+
+
+def test_logout_clears_codexian_cookie(monkeypatch, tmp_path):
+    codexian_settings = tmp_path / "codexian-data.json"
+    codexian_settings.write_text(
+        '{"odysseusLocal":{"enabled":true,"authMode":"cookie","authToken":"odysseus_session=tok-logout","loginUsername":"alice"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEXIAN_OBSIDIAN_PLUGIN_DATA", str(codexian_settings))
+
+    auth = MagicMock()
+    logout = _logout_endpoint(auth)
+    request = SimpleNamespace(cookies={"odysseus_session": "tok-logout"})
+    response = MagicMock()
+
+    result = asyncio.run(logout(request=request, response=response))
+
+    assert result == {"ok": True}
+    auth.revoke_token.assert_called_once_with("tok-logout")
+    response.delete_cookie.assert_called_once_with("odysseus_session", path="/")
+    saved = __import__("json").loads(codexian_settings.read_text(encoding="utf-8"))
+    assert saved["odysseusLocal"]["enabled"] is False
+    assert saved["odysseusLocal"]["authToken"] == ""

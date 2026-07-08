@@ -354,10 +354,13 @@ function _buildPanelHTML() {
     `<option value="${p}">${p || 'Default'}</option>`
   ).join('');
   const sourceModeOpts = [
-    ['', 'Default'],
-    ['web', 'Web only'],
-    ['hybrid', 'Web + Obsidian'],
-    ['knowledge', 'Obsidian only'],
+    ['', '기본값'],
+    ['web', '웹만'],
+    ['local', '로컬 지식만'],
+    ['web_local', '웹 + 로컬 지식'],
+    ['obsidian', 'Obsidian만'],
+    ['web_obsidian', '웹 + Obsidian'],
+    ['web_all', '웹 + Obsidian + 로컬'],
   ].map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
 
   let roundOpts = '<option value="0" selected>Auto</option>';
@@ -417,7 +420,7 @@ function _buildPanelHTML() {
               <select id="research-search-provider">${providerOpts}</select>
             </label>
             <label class="research-setting">
-              <span class="research-setting-label">Source</span>
+            <span class="research-setting-label">소스</span>
               <select id="research-source-mode">${sourceModeOpts}</select>
             </label>
             <label class="research-setting">
@@ -425,11 +428,14 @@ function _buildPanelHTML() {
               <select id="research-endpoint"><option value="">Default</option></select>
             </label>
           </div>
-          <label class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
-            <span class="research-setting-label">Obsidian folders</span>
+          <div class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
+            <div class="research-knowledge-source-header">
+              <span class="research-setting-label">지식 소스 폴더</span>
+              <button id="research-add-local-folder" class="research-local-folder-btn" type="button" title="Finder에서 로컬 폴더를 지식 소스로 추가">Finder 폴더 추가</button>
+            </div>
             <select id="research-knowledge-folders" class="research-folder-select" multiple size="6"><option value="">Loading...</option></select>
-            <span class="research-setting-hint">선택하지 않으면 설정된 Vault 전체를 사용합니다. 여러 폴더는 Command 키를 누른 채 선택하세요.</span>
-          </label>
+            <span class="research-setting-hint">선택하지 않으면 설정된 Obsidian Vault와 추가한 로컬 폴더 전체를 사용합니다. 여러 폴더는 Command 키를 누른 채 선택하세요.</span>
+          </div>
           <label class="research-setting research-setting-wide">
             <span class="research-setting-label">Model</span>
             <select id="research-model" class="research-model-select"><option value="">Default</option></select>
@@ -506,6 +512,7 @@ function _wireEvents(pane) {
   const endpointSelect = pane.querySelector('#research-endpoint');
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
   pane.querySelector('#research-source-mode')?.addEventListener('change', _syncKnowledgeControls);
+  pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
 
   _renderJobs();
 }
@@ -704,26 +711,75 @@ async function _loadKnowledgeOptions() {
     const settingsRes = await fetch(`${_apiBase}/api/research/knowledge/settings`, { credentials: 'same-origin' });
     const settings = settingsRes.ok ? await settingsRes.json() : {};
     _knowledgeConfig.configured = !!settings.configured;
+    _knowledgeConfig.local_roots = Array.isArray(settings.local_roots) ? settings.local_roots : [];
     if (settings.source_mode && !sourceSel.value) sourceSel.value = settings.source_mode;
-    if (!_knowledgeConfig.configured) {
-      folderSel.innerHTML = '<option value="">Set vault root in Settings</option>';
-      folderSel.disabled = true;
-      return;
-    }
     const folderRes = await fetch(`${_apiBase}/api/research/knowledge/folders?recursive=true&max_depth=3`, { credentials: 'same-origin' });
     const data = folderRes.ok ? await folderRes.json() : { folders: [] };
+    _knowledgeConfig.configured = !!data.configured;
     _knowledgeConfig.folders = Array.isArray(data.folders) ? data.folders : [];
-    folderSel.disabled = false;
+    folderSel.disabled = !_knowledgeConfig.configured;
     folderSel.innerHTML = _knowledgeConfig.folders.length
       ? _knowledgeConfig.folders.map(f => {
+          const token = f.token || f.path || '';
+          const display = f.display_path || f.path || token;
+          const title = f.absolute_path || f.path || token;
+          const prefix = f.source_kind === 'local' ? '로컬 · ' : 'Obsidian · ';
           const indent = '&nbsp;'.repeat(Math.max(0, (f.depth || 1) - 1) * 2);
-          return `<option value="${_esc(f.path)}" title="${_esc(f.path)}">${indent}${_esc(f.path)}</option>`;
+          return `<option value="${_esc(token)}" title="${_esc(title)}">${indent}${_esc(prefix + display)}</option>`;
         }).join('')
-      : '<option value="">No folders found</option>';
+      : '<option value="">Finder 폴더 추가 또는 설정에서 Vault 루트를 지정하세요</option>';
   } catch {
     _knowledgeConfig = { configured: false, folders: [] };
-    folderSel.innerHTML = '<option value="">Could not load folders</option>';
+    folderSel.innerHTML = '<option value="">폴더 목록을 불러오지 못했습니다</option>';
     folderSel.disabled = true;
+  }
+}
+
+async function _handleAddLocalFolder() {
+  const btn = document.getElementById('research-add-local-folder');
+  const folderSel = document.getElementById('research-knowledge-folders');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '선택 중...';
+  try {
+    const res = await fetch(`${_apiBase}/api/research/knowledge/local-folders/pick`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.cancelled) return;
+    if (!res.ok || !data.ok || !data.folder) {
+      let detail = data.detail || data.error || '폴더를 추가하지 못했습니다';
+      if (res.status === 404) {
+        detail = 'Finder 폴더 추가 API가 현재 서버에 없습니다. Odysseus 서버를 재시작하고 브라우저를 새로고침해 주세요.';
+      } else if (res.status === 401) {
+        detail = '로그인 세션이 만료되었습니다. 다시 로그인한 뒤 폴더를 추가해 주세요.';
+      } else if (res.status === 403) {
+        detail = '이 기능은 관리자 또는 로컬 단일 사용자 모드에서 사용할 수 있습니다.';
+      }
+      throw new Error(detail);
+    }
+    await _loadKnowledgeOptions();
+    if (folderSel && data.folder.token) {
+      Array.from(folderSel.options).forEach(opt => {
+        opt.selected = opt.value === data.folder.token;
+      });
+      folderSel.disabled = false;
+    }
+    const sourceSel = document.getElementById('research-source-mode');
+    if (sourceSel && (!sourceSel.value || sourceSel.value === 'web')) {
+      sourceSel.value = 'local';
+      _syncKnowledgeControls();
+    }
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (window.uiModule?.showError) window.uiModule.showError(msg);
+    else if (window.uiModule?.showToast) window.uiModule.showToast(msg, 7000);
+    else alert(msg);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -733,7 +789,10 @@ function _syncKnowledgeControls() {
   const folderSel = document.getElementById('research-knowledge-folders');
   if (!sourceSel || !row) return;
   const mode = sourceSel.value || '';
-  const usesKnowledge = mode === 'hybrid' || mode === 'knowledge';
+  const usesKnowledge = mode === 'hybrid' || mode === 'knowledge'
+    || mode === 'local' || mode === 'web_local'
+    || mode === 'obsidian' || mode === 'web_obsidian'
+    || mode === 'web_all';
   row.style.display = usesKnowledge ? '' : 'none';
   if (folderSel) folderSel.disabled = usesKnowledge && !_knowledgeConfig.configured;
 }

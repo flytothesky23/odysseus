@@ -814,10 +814,19 @@ class ResearchHandler:
         try:
             from src.deep_research import DeepResearcher
 
-            from src.knowledge_base import normalize_source_mode, search_knowledge_sources
+            from src.knowledge_base import (
+                knowledge_folders_for_source_mode,
+                normalize_source_mode,
+                search_knowledge_sources,
+            )
             from src.settings import get_setting
             _max_report_tokens = int(get_setting("research_max_tokens", 16384))
-            _source_mode = normalize_source_mode(source_mode or get_setting("research_source_mode", "web"))
+            _requested_source_mode = source_mode or get_setting("research_source_mode", "web")
+            _source_mode = normalize_source_mode(_requested_source_mode)
+            _knowledge_folders = knowledge_folders_for_source_mode(
+                _requested_source_mode,
+                knowledge_folders or [],
+            )
             _knowledge_max_chunks = _bounded_int(
                 get_setting("research_knowledge_max_chunks", 12),
                 default=12,
@@ -860,7 +869,7 @@ class ResearchHandler:
                             search_knowledge_sources,
                             query_text,
                             owner=(_task_entry or {}).get("owner", ""),
-                            folders=knowledge_folders or [],
+                            folders=_knowledge_folders,
                             limit=max(2, min(6, _knowledge_max_chunks)),
                             auto_index=True,
                         )
@@ -868,7 +877,7 @@ class ResearchHandler:
                     search_knowledge_sources,
                     query_text,
                     owner=(_task_entry or {}).get("owner", ""),
-                    folders=knowledge_folders or [],
+                    folders=_knowledge_folders,
                     limit=max(2, min(6, _knowledge_max_chunks)),
                     auto_index=auto_index,
                 )
@@ -889,7 +898,7 @@ class ResearchHandler:
                 search_provider=search_provider,
                 category=category,
                 source_mode=_source_mode,
-                knowledge_folders=knowledge_folders or [],
+                knowledge_folders=_knowledge_folders,
                 knowledge_searcher=_knowledge_search if _source_mode in {"hybrid", "knowledge"} else None,
             )
             if _task_entry is not None:

@@ -834,6 +834,21 @@ function initializeEventListeners() {
     });
   }
 
+  // Local bridge for Codexian/Obsidian: opening /?tool=research should land
+  // directly on the native Deep Research panel so active jobs are visible.
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const tool = (params.get('tool') || params.get('open') || '').toLowerCase();
+    if (tool === 'research' || tool === 'deep-research') {
+      const focusJobId = params.get('focus') || params.get('session') || undefined;
+      setTimeout(() => {
+        if (researchPanelModule && typeof researchPanelModule.openPanel === 'function') {
+          researchPanelModule.openPanel(focusJobId);
+        }
+      }, 250);
+    }
+  } catch {}
+
   // ── Cookbook modal toggle ──
   const toolCookbookBtn = el('tool-cookbook-btn');
   if (toolCookbookBtn) {

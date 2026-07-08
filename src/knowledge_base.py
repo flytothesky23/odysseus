@@ -1,13 +1,17 @@
-"""Obsidian-vault knowledge source helpers for Deep Research.
+"""Local knowledge source helpers for Deep Research.
 
 The public surface is intentionally narrow: callers can only read/index files
-under the configured ``knowledge_vault_root`` setting, and hidden/system
-folders are skipped by default.
+under the configured ``knowledge_vault_root`` setting or user-added local
+knowledge roots, and hidden/system folders are skipped by default.
 """
 
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Optional
@@ -33,6 +37,19 @@ SUPPORTED_EXTENSIONS = {
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 MAX_NOTE_IMAGES = 12
+LOCAL_FOLDER_TOKEN_PREFIX = "local:"
+OBSIDIAN_FOLDER_TOKEN_PREFIX = "obsidian:"
+OBSIDIAN_ROOT_TOKEN = "obsidian:"
+MAX_STRUCTURED_ROWS = 500
+MAX_STRUCTURED_SCALARS = 2000
+MAX_FILE_TEXT_CHARS = 500_000
+SENSITIVE_FILENAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    "auth.json",
+    "sessions.json",
+}
 
 _OBSIDIAN_IMAGE_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -43,13 +60,47 @@ class KnowledgeBaseError(ValueError):
     """Raised for invalid or unavailable knowledge-base configuration."""
 
 
+@dataclass(frozen=True)
+class KnowledgeSourceRoot:
+    """Resolved folder selected for a knowledge-source search/index pass."""
+
+    path: Path
+    source_kind: str
+    token: str
+    label: str
+    display_root: Path
+    relative_path: str = ""
+
+
 def normalize_source_mode(value: Optional[str]) -> str:
     mode = (value or "").strip().lower()
-    if mode in {"hybrid", "mixed", "web+knowledge", "web_knowledge"}:
+    if mode in {
+        "hybrid", "mixed", "web+knowledge", "web_knowledge", "web_all",
+        "web+all", "web_obsidian_local", "web+obsidian+local",
+        "web_local", "web+local", "web_obsidian", "web+obsidian",
+    }:
         return "hybrid"
-    if mode in {"knowledge", "local", "obsidian", "vault"}:
+    if mode in {
+        "knowledge", "local", "local_only", "local-knowledge",
+        "obsidian", "obsidian_only", "vault",
+    }:
         return "knowledge"
     return "web"
+
+
+def knowledge_scope_for_source_mode(value: Optional[str]) -> str:
+    """Return which private source family a source-mode value should use."""
+    mode = (value or "").strip().lower()
+    if mode in {"local", "local_only", "local-knowledge", "web_local", "web+local"}:
+        return "local"
+    if mode in {"obsidian", "obsidian_only", "vault", "web_obsidian", "web+obsidian"}:
+        return "obsidian"
+    if mode in {
+        "knowledge", "hybrid", "mixed", "web+knowledge", "web_knowledge",
+        "web_all", "web+all", "web_obsidian_local", "web+obsidian+local",
+    }:
+        return "all"
+    return "none"
 
 
 def configured_vault_root() -> Optional[Path]:
@@ -60,6 +111,133 @@ def configured_vault_root() -> Optional[Path]:
     if not root.exists() or not root.is_dir():
         return None
     return root
+
+
+def _local_root_id(path: Path) -> str:
+    return hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
+
+
+def _validate_local_root(path: str | Path) -> Path:
+    raw = str(path or "").strip()
+    if not raw:
+        raise KnowledgeBaseError("Folder path is required.")
+    root = Path(os.path.expanduser(raw)).resolve()
+    if not root.exists() or not root.is_dir():
+        raise KnowledgeBaseError("Folder does not exist or is not a directory.")
+    try:
+        is_filesystem_root = root == Path(root.anchor).resolve()
+    except Exception:
+        is_filesystem_root = False
+    if is_filesystem_root:
+        raise KnowledgeBaseError("Filesystem root cannot be used as a knowledge source.")
+    try:
+        is_home_root = root == Path.home().resolve()
+    except Exception:
+        is_home_root = False
+    if is_home_root:
+        raise KnowledgeBaseError("Choose a specific subfolder, not the whole home folder.")
+    if _is_excluded_dir(root, excluded_dirs()):
+        raise KnowledgeBaseError("Hidden/system folders cannot be used as knowledge sources.")
+    return root
+
+
+def _normalize_local_root_config(item: Any) -> Optional[Dict[str, str]]:
+    if isinstance(item, str):
+        raw_path = item
+        raw_label = ""
+        raw_id = ""
+    elif isinstance(item, dict):
+        raw_path = item.get("path") or ""
+        raw_label = item.get("label") or ""
+        raw_id = item.get("id") or ""
+    else:
+        return None
+    try:
+        path = _validate_local_root(raw_path)
+    except KnowledgeBaseError:
+        return None
+    root_id = str(raw_id or _local_root_id(path)).strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", root_id):
+        root_id = _local_root_id(path)
+    label = str(raw_label or path.name or str(path)).strip()
+    return {
+        "id": root_id,
+        "label": label,
+        "path": str(path),
+        "token": f"{LOCAL_FOLDER_TOKEN_PREFIX}{root_id}",
+        "source_kind": "local",
+    }
+
+
+def configured_local_roots() -> List[Dict[str, str]]:
+    configured = get_setting("knowledge_local_roots", [])
+    if not isinstance(configured, list):
+        return []
+    roots: List[Dict[str, str]] = []
+    seen_paths = set()
+    seen_ids = set()
+    for item in configured:
+        root = _normalize_local_root_config(item)
+        if not root:
+            continue
+        path_key = root["path"]
+        root_id = root["id"]
+        if path_key in seen_paths or root_id in seen_ids:
+            continue
+        roots.append(root)
+        seen_paths.add(path_key)
+        seen_ids.add(root_id)
+    return roots
+
+
+def add_local_knowledge_root(path: str, label: str = "") -> Dict[str, str]:
+    """Persist a user-selected local folder as a selectable knowledge source."""
+    from src.settings import load_settings, save_settings
+
+    root_path = _validate_local_root(path)
+    settings = load_settings()
+    roots = configured_local_roots()
+    root_id = _local_root_id(root_path)
+    normalized = {
+        "id": root_id,
+        "label": str(label or root_path.name or str(root_path)).strip(),
+        "path": str(root_path),
+        "token": f"{LOCAL_FOLDER_TOKEN_PREFIX}{root_id}",
+        "source_kind": "local",
+    }
+    updated = False
+    for i, root in enumerate(roots):
+        if root["path"] == normalized["path"] or root["id"] == normalized["id"]:
+            roots[i] = {**root, **normalized}
+            updated = True
+            break
+    if not updated:
+        roots.append(normalized)
+    settings["knowledge_local_roots"] = [
+        {"id": root["id"], "label": root["label"], "path": root["path"]}
+        for root in roots
+    ]
+    save_settings(settings)
+    return normalized
+
+
+def remove_local_knowledge_root(root_id: str) -> bool:
+    from src.settings import load_settings, save_settings
+
+    root_id = str(root_id or "").strip()
+    if not root_id:
+        return False
+    settings = load_settings()
+    roots = configured_local_roots()
+    kept = [root for root in roots if root["id"] != root_id]
+    if len(kept) == len(roots):
+        return False
+    settings["knowledge_local_roots"] = [
+        {"id": root["id"], "label": root["label"], "path": root["path"]}
+        for root in kept
+    ]
+    save_settings(settings)
+    return True
 
 
 def excluded_dirs() -> set[str]:
@@ -103,24 +281,150 @@ def _resolve_under_root(root: Path, rel_path: str = "") -> Path:
     return target
 
 
-def resolve_selected_folders(folders: Optional[Iterable[str]]) -> List[Path]:
-    root = configured_vault_root()
-    if root is None:
-        raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
+def _local_folder_token(root_id: str, rel_path: str = "") -> str:
+    token = f"{LOCAL_FOLDER_TOKEN_PREFIX}{root_id}"
+    rel = str(rel_path or "").strip().strip("/")
+    if rel:
+        token += f":{quote(rel, safe='/')}"
+    return token
 
+
+def _obsidian_folder_token(rel_path: str = "") -> str:
+    rel = str(rel_path or "").strip().strip("/")
+    if not rel:
+        return OBSIDIAN_ROOT_TOKEN
+    return f"{OBSIDIAN_FOLDER_TOKEN_PREFIX}{quote(rel, safe='/')}"
+
+
+def _split_local_folder_token(token: str) -> tuple[str, str]:
+    value = str(token or "").strip()
+    if not value.startswith(LOCAL_FOLDER_TOKEN_PREFIX):
+        raise KnowledgeBaseError("Invalid local knowledge-source token.")
+    rest = value[len(LOCAL_FOLDER_TOKEN_PREFIX):]
+    root_id, sep, rel = rest.partition(":")
+    if not root_id:
+        raise KnowledgeBaseError("Invalid local knowledge-source token.")
+    return root_id, unquote(rel) if sep else ""
+
+
+def _split_obsidian_folder_token(token: str) -> str:
+    value = str(token or "").strip()
+    if not value.startswith(OBSIDIAN_FOLDER_TOKEN_PREFIX):
+        raise KnowledgeBaseError("Invalid Obsidian knowledge-source token.")
+    return unquote(value[len(OBSIDIAN_FOLDER_TOKEN_PREFIX):])
+
+
+def _local_source_from_token(token: str, local_roots: List[Dict[str, str]]) -> KnowledgeSourceRoot:
+    root_id, rel = _split_local_folder_token(token)
+    root = next((item for item in local_roots if item["id"] == root_id), None)
+    if not root:
+        raise KnowledgeBaseError("Local knowledge folder is not configured.")
+    base = Path(root["path"]).resolve()
+    path = _resolve_under_root(base, rel)
+    rel_path = _relative(base, path) if path != base else ""
+    return KnowledgeSourceRoot(
+        path=path,
+        source_kind="local",
+        token=_local_folder_token(root_id, rel_path),
+        label=root["label"],
+        display_root=base,
+        relative_path=rel_path,
+    )
+
+
+def _obsidian_source(root: Path, rel: str = "") -> KnowledgeSourceRoot:
+    path = _resolve_under_root(root, rel)
+    rel_path = _relative(root, path) if path != root else ""
+    return KnowledgeSourceRoot(
+        path=path,
+        source_kind="obsidian",
+        token=_obsidian_folder_token(rel_path),
+        label="Obsidian",
+        display_root=root,
+        relative_path=rel_path,
+    )
+
+
+def knowledge_folders_for_source_mode(
+    source_mode: Optional[str],
+    folders: Optional[Iterable[str]],
+) -> List[str]:
+    """Filter/default selected folder tokens for the chosen source dropdown mode."""
+    scope = knowledge_scope_for_source_mode(source_mode)
+    selected = [str(f or "").strip() for f in (folders or []) if str(f or "").strip()]
+    if scope == "none":
+        return []
+    if scope == "all":
+        return selected
+
+    if scope == "local":
+        local_selected = [token for token in selected if token.startswith(LOCAL_FOLDER_TOKEN_PREFIX)]
+        if local_selected:
+            return local_selected
+        local_roots = configured_local_roots()
+        if not local_roots:
+            raise KnowledgeBaseError("Local knowledge folder is not configured.")
+        return [root["token"] for root in local_roots]
+
+    if scope == "obsidian":
+        obsidian_selected = [
+            token for token in selected
+            if not token.startswith(LOCAL_FOLDER_TOKEN_PREFIX)
+        ]
+        if obsidian_selected:
+            return obsidian_selected
+        if configured_vault_root() is None:
+            raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
+        return [OBSIDIAN_ROOT_TOKEN]
+
+    return selected
+
+
+def _resolve_selected_sources(folders: Optional[Iterable[str]]) -> List[KnowledgeSourceRoot]:
+    vault_root = configured_vault_root()
+    local_roots = configured_local_roots()
     requested = [str(f or "").strip() for f in (folders or []) if str(f or "").strip()]
-    if not requested:
-        return [root]
 
-    resolved: List[Path] = []
+    if not requested:
+        resolved: List[KnowledgeSourceRoot] = []
+        if vault_root is not None:
+            resolved.append(_obsidian_source(vault_root))
+        resolved.extend(
+            KnowledgeSourceRoot(
+                path=Path(root["path"]).resolve(),
+                source_kind="local",
+                token=root["token"],
+                label=root["label"],
+                display_root=Path(root["path"]).resolve(),
+            )
+            for root in local_roots
+        )
+        if resolved:
+            return resolved
+        raise KnowledgeBaseError("Knowledge source root is not configured or does not exist.")
+
+    resolved = []
     seen = set()
-    for rel in requested:
-        path = _resolve_under_root(root, rel)
-        key = str(path)
+    for token in requested:
+        if token.startswith(LOCAL_FOLDER_TOKEN_PREFIX):
+            source = _local_source_from_token(token, local_roots)
+        elif token.startswith(OBSIDIAN_FOLDER_TOKEN_PREFIX):
+            if vault_root is None:
+                raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
+            source = _obsidian_source(vault_root, _split_obsidian_folder_token(token))
+        else:
+            if vault_root is None:
+                raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
+            source = _obsidian_source(vault_root, token)
+        key = f"{source.source_kind}:{source.path}"
         if key not in seen:
-            resolved.append(path)
+            resolved.append(source)
             seen.add(key)
     return resolved
+
+
+def resolve_selected_folders(folders: Optional[Iterable[str]]) -> List[Path]:
+    return [source.path for source in _resolve_selected_sources(folders)]
 
 
 def _relative(root: Path, path: Path) -> str:
@@ -364,6 +668,115 @@ def list_vault_folders(
     }
 
 
+def list_knowledge_folders(
+    parent: str = "",
+    *,
+    recursive: bool = False,
+    max_depth: int = 3,
+    max_items: int = 500,
+) -> Dict[str, Any]:
+    """List selectable Obsidian and user-added local knowledge folders."""
+    vault_root = configured_vault_root()
+    local_roots = configured_local_roots()
+    folders: List[Dict[str, Any]] = []
+    max_depth = max(1, min(int(max_depth or 1), 6))
+    max_items = max(1, min(int(max_items or 500), 5000))
+
+    if vault_root is not None:
+        folders.append({
+            "name": vault_root.name or "Obsidian",
+            "path": OBSIDIAN_ROOT_TOKEN,
+            "token": OBSIDIAN_ROOT_TOKEN,
+            "depth": 1,
+            "has_children": True,
+            "source_kind": "obsidian",
+            "source_label": "Obsidian",
+            "display_path": "Obsidian 전체 Vault",
+            "absolute_path": str(vault_root),
+        })
+        try:
+            obsidian = list_vault_folders(parent, recursive=recursive, max_depth=max_depth, max_items=max_items)
+            for item in obsidian.get("folders", []):
+                rel = item.get("path", "")
+                token = _obsidian_folder_token(rel)
+                folders.append({
+                    **item,
+                    "path": token,
+                    "token": token,
+                    "source_kind": "obsidian",
+                    "source_label": "Obsidian",
+                    "display_path": rel,
+                    "absolute_path": str((vault_root / rel).resolve()) if rel else str(vault_root),
+                })
+        except KnowledgeBaseError:
+            pass
+
+    remaining = max_items - len(folders)
+    if remaining > 0 and local_roots:
+        excluded = excluded_dirs()
+
+        def has_allowed_child(path: Path) -> bool:
+            try:
+                return any(
+                    child.is_dir() and not _is_excluded_dir(child, excluded)
+                    for child in path.iterdir()
+                )
+            except OSError:
+                return False
+
+        def append_local(root: Dict[str, str], path: Path, depth: int) -> None:
+            if len(folders) >= max_items:
+                return
+            base = Path(root["path"]).resolve()
+            rel = _relative(base, path) if path != base else ""
+            token = _local_folder_token(root["id"], rel)
+            display = root["label"] if not rel else f"{root['label']}/{rel}"
+            folders.append({
+                "name": path.name or root["label"],
+                "path": token,
+                "token": token,
+                "depth": depth,
+                "has_children": has_allowed_child(path),
+                "source_kind": "local",
+                "source_label": root["label"],
+                "display_path": display,
+                "absolute_path": str(path),
+            })
+
+        def walk_local(root: Dict[str, str], path: Path, depth: int) -> None:
+            if len(folders) >= max_items or depth >= max_depth:
+                return
+            try:
+                children = sorted(
+                    (p for p in path.iterdir() if p.is_dir() and not _is_excluded_dir(p, excluded)),
+                    key=lambda p: p.name.casefold(),
+                )
+            except OSError:
+                return
+            for child in children:
+                append_local(root, child, depth + 1)
+                if recursive:
+                    walk_local(root, child, depth + 1)
+
+        for root in local_roots:
+            if len(folders) >= max_items:
+                break
+            base = Path(root["path"]).resolve()
+            append_local(root, base, 1)
+            if recursive:
+                walk_local(root, base, 1)
+
+    return {
+        "configured": bool(vault_root or local_roots),
+        "root": str(vault_root) if vault_root else "",
+        "local_roots": local_roots,
+        "parent": parent,
+        "folders": folders[:max_items],
+        "truncated": len(folders) >= max_items,
+        "message": "" if (vault_root or local_roots) else "Knowledge source root is not configured or does not exist.",
+    }
+
+
 def _iter_supported_files(directory: Path):
     excluded = excluded_dirs()
     for root, dirs, files in os.walk(directory):
@@ -373,28 +786,109 @@ def _iter_supported_files(directory: Path):
         ]
         for fname in files:
             path = Path(root) / fname
+            if path.name.lower() in SENSITIVE_FILENAMES:
+                continue
             if path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 yield path
 
 
+def _truncate_text(text: str, max_chars: int = MAX_FILE_TEXT_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n[truncated]"
+
+
+def _flatten_structured(value: Any, prefix: str = "", rows: Optional[List[str]] = None) -> List[str]:
+    rows = rows if rows is not None else []
+    if len(rows) >= MAX_STRUCTURED_SCALARS:
+        return rows
+    if isinstance(value, dict):
+        for key, child in value.items():
+            next_key = f"{prefix}.{key}" if prefix else str(key)
+            _flatten_structured(child, next_key, rows)
+            if len(rows) >= MAX_STRUCTURED_SCALARS:
+                break
+    elif isinstance(value, list):
+        for i, child in enumerate(value[:MAX_STRUCTURED_ROWS]):
+            next_key = f"{prefix}[{i}]" if prefix else f"[{i}]"
+            _flatten_structured(child, next_key, rows)
+            if len(rows) >= MAX_STRUCTURED_SCALARS:
+                break
+    else:
+        rows.append(f"{prefix or 'value'}: {value}")
+    return rows
+
+
+def _read_json_text(path: Path) -> str:
+    data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    rows = _flatten_structured(data)
+    header = f"# JSON data: {path.name}\n"
+    if len(rows) >= MAX_STRUCTURED_SCALARS:
+        rows.append("[truncated structured values]")
+    return _truncate_text(header + "\n".join(rows))
+
+
+def _read_yaml_text(path: Path) -> str:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return _truncate_text(path.read_text(encoding="utf-8", errors="ignore"))
+    data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
+    rows = _flatten_structured(data)
+    header = f"# YAML data: {path.name}\n"
+    if len(rows) >= MAX_STRUCTURED_SCALARS:
+        rows.append("[truncated structured values]")
+    return _truncate_text(header + "\n".join(rows))
+
+
+def _read_csv_text(path: Path) -> str:
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+        sample = f.read(MAX_FILE_TEXT_CHARS)
+    rows: List[str] = []
+    reader = csv.DictReader(sample.splitlines())
+    headers = reader.fieldnames or []
+    rows.append(f"# CSV data: {path.name}")
+    if headers:
+        rows.append("columns: " + ", ".join(headers))
+    for i, row in enumerate(reader, start=1):
+        if i > MAX_STRUCTURED_ROWS:
+            rows.append("[truncated csv rows]")
+            break
+        pairs = [f"{key}={value}" for key, value in row.items()]
+        rows.append(f"row {i}: " + "; ".join(pairs))
+    return _truncate_text("\n".join(rows))
+
+
 def _read_file_text(path: Path) -> str:
-    if path.suffix.lower() == ".pdf":
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
         from src.personal_docs import extract_pdf_text
 
         return extract_pdf_text(str(path))
-    return path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == ".json":
+        try:
+            return _read_json_text(path)
+        except Exception:
+            return _truncate_text(path.read_text(encoding="utf-8", errors="ignore"))
+    if suffix in {".yaml", ".yml"}:
+        return _read_yaml_text(path)
+    if suffix == ".csv":
+        try:
+            return _read_csv_text(path)
+        except Exception:
+            return _truncate_text(path.read_text(encoding="utf-8", errors="ignore"))
+    return _truncate_text(path.read_text(encoding="utf-8", errors="ignore"))
 
 
 def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = "") -> Dict[str, Any]:
-    roots = resolve_selected_folders(folders)
+    sources = _resolve_selected_sources(folders)
     vault_root = configured_vault_root()
-    if vault_root is None:
-        raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
     indexed = 0
     failed = 0
     files_seen = 0
 
-    for folder in roots:
+    for source_root in sources:
+        folder = source_root.path
         for path in _iter_supported_files(folder):
             files_seen += 1
             try:
@@ -404,15 +898,20 @@ def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = 
                 continue
             if not content or not content.strip():
                 continue
-            rel = _relative(vault_root, path)
+            rel = _relative(source_root.display_root, path)
             meta = {
                 "source": str(path),
                 "filename": path.name,
                 "directory": str(path.parent),
                 "vault_relative_path": rel,
+                "knowledge_relative_path": rel,
+                "knowledge_source_label": source_root.label,
+                "knowledge_source_token": source_root.token,
                 "type": path.suffix.lower(),
-                "source_kind": "obsidian",
+                "source_kind": source_root.source_kind,
             }
+            if vault_root is not None and source_root.source_kind == "obsidian":
+                meta["vault_relative_path"] = rel
             if owner:
                 meta["owner"] = owner
             try:
@@ -427,7 +926,7 @@ def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = 
 
     return {
         "success": True,
-        "folders": [_relative(vault_root, p) if p != vault_root else "" for p in roots],
+        "folders": [source.token for source in sources],
         "files_seen": files_seen,
         "indexed_count": indexed,
         "failed_count": failed,
@@ -461,10 +960,10 @@ def search_knowledge_sources(
     rag = get_rag_manager()
     if rag is None:
         raise KnowledgeBaseError("Knowledge vector index is unavailable.")
-    roots = resolve_selected_folders(folders)
+    sources = _resolve_selected_sources(folders)
+    roots = [source.path for source in sources]
+    source_by_root = {str(source.path.resolve()): source for source in sources}
     vault_root = configured_vault_root()
-    if vault_root is None:
-        raise KnowledgeBaseError("Knowledge vault root is not configured or does not exist.")
 
     if auto_index is None:
         auto_index = bool(get_setting("research_knowledge_auto_index", True))
@@ -480,7 +979,22 @@ def search_knowledge_sources(
         source = meta.get("source") or ""
         if not source or not _path_is_under_any(source, roots):
             continue
-        rel = meta.get("vault_relative_path") or _relative(vault_root, Path(source))
+        matched_root: Optional[KnowledgeSourceRoot] = None
+        try:
+            resolved_source = Path(source).resolve()
+            for root in roots:
+                try:
+                    resolved_source.relative_to(root.resolve())
+                    matched_root = source_by_root.get(str(root.resolve()))
+                    break
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        display_root = matched_root.display_root if matched_root else (vault_root or Path(source).parent)
+        source_kind = meta.get("source_kind") or (matched_root.source_kind if matched_root else "obsidian")
+        source_label = meta.get("knowledge_source_label") or (matched_root.label if matched_root else "Obsidian")
+        rel = meta.get("knowledge_relative_path") or meta.get("vault_relative_path") or _relative(display_root, Path(source))
         chunk_id = meta.get("chunk_id", "")
         key = f"{rel}#{chunk_id}"
         if key in seen:
@@ -488,16 +1002,22 @@ def search_knowledge_sources(
         seen.add(key)
         document = str(result.get("document") or "")
         title = meta.get("filename") or Path(source).name or rel
+        title_prefix = "Obsidian" if source_kind == "obsidian" else source_label
+        url_scheme = "vault" if source_kind == "obsidian" else "local-knowledge"
+        url = f"vault://{rel}#chunk-{chunk_id}" if source_kind == "obsidian" else (
+            f"{url_scheme}://{quote(source_label, safe='')}/{quote(rel, safe='/')}#chunk-{chunk_id}"
+        )
         item = {
-            "url": f"vault://{rel}#chunk-{chunk_id}",
-            "title": f"Obsidian: {title}",
+            "url": url,
+            "title": f"{title_prefix}: {title}",
             "source_path": rel,
-            "source_kind": "obsidian",
+            "source_kind": source_kind,
+            "source_label": source_label,
             "summary": document[:1200],
             "evidence": document[:3000],
             "similarity": result.get("similarity"),
         }
-        images = collect_note_images(Path(source), roots=roots)
+        images = collect_note_images(Path(source), roots=roots) if source_kind == "obsidian" else []
         if images:
             item["images"] = images
         items.append(item)

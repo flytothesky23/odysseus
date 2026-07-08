@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -122,6 +124,21 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             if _auth_disabled():
                 return ""
             raise HTTPException(401, "Not authenticated")
+        return user
+
+    def _require_admin_user(request: Request) -> str:
+        user = _require_user(request)
+        if _auth_disabled():
+            return user
+        auth_mgr = getattr(request.app.state, "auth_manager", None)
+        if auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
+            try:
+                if not auth_mgr.is_admin(user):
+                    raise HTTPException(403, "Admin only")
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(403, "Admin only")
         return user
 
     def _validate_session_id(session_id: str) -> None:
@@ -370,14 +387,17 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     async def research_knowledge_settings(request: Request):
         """Return configured Obsidian knowledge-base status for the research UI."""
         _require_user(request)
-        from src.knowledge_base import configured_vault_root, normalize_source_mode
+        from src.knowledge_base import configured_local_roots, configured_vault_root
         from src.settings import get_setting
 
         root = configured_vault_root()
+        local_roots = configured_local_roots()
+        source_mode = str(get_setting("research_source_mode", "web") or "web").strip() or "web"
         return {
-            "configured": root is not None,
+            "configured": root is not None or bool(local_roots),
             "root": str(root) if root else "",
-            "source_mode": normalize_source_mode(get_setting("research_source_mode", "web")),
+            "local_roots": local_roots,
+            "source_mode": source_mode,
             "max_chunks": int(get_setting("research_knowledge_max_chunks", 12) or 12),
             "auto_index": bool(get_setting("research_knowledge_auto_index", True)),
         }
@@ -389,12 +409,72 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         recursive: bool = Query(True),
         max_depth: int = Query(3, ge=1, le=6),
     ):
-        """List selectable folders under the configured Obsidian vault root."""
+        """List selectable folders under configured Obsidian/local knowledge roots."""
         _require_user(request)
-        from src.knowledge_base import KnowledgeBaseError, list_vault_folders
+        from src.knowledge_base import KnowledgeBaseError, list_knowledge_folders
 
         try:
-            return list_vault_folders(parent, recursive=recursive, max_depth=max_depth)
+            return list_knowledge_folders(parent, recursive=recursive, max_depth=max_depth)
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
+    class KnowledgeLocalFolderRequest(BaseModel):
+        path: str
+        label: Optional[str] = None
+
+    @router.post("/api/research/knowledge/local-folders")
+    async def research_add_local_knowledge_folder(body: KnowledgeLocalFolderRequest, request: Request):
+        """Persist a local folder as a selectable Deep Research knowledge source."""
+        _require_admin_user(request)
+        from src.knowledge_base import KnowledgeBaseError, add_local_knowledge_root
+
+        try:
+            folder = add_local_knowledge_root(body.path, label=body.label or "")
+            return {"ok": True, "folder": folder}
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
+    @router.delete("/api/research/knowledge/local-folders/{root_id}")
+    async def research_remove_local_knowledge_folder(root_id: str, request: Request):
+        """Remove a previously added local knowledge folder."""
+        _require_admin_user(request)
+        from src.knowledge_base import remove_local_knowledge_root
+
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", root_id or ""):
+            raise HTTPException(400, "Invalid local folder id")
+        removed = remove_local_knowledge_root(root_id)
+        if not removed:
+            raise HTTPException(404, "Local knowledge folder not found")
+        return {"ok": True, "removed": True}
+
+    @router.post("/api/research/knowledge/local-folders/pick")
+    async def research_pick_local_knowledge_folder(request: Request):
+        """Open the macOS folder picker and add the selected folder."""
+        _require_admin_user(request)
+        if sys.platform != "darwin":
+            raise HTTPException(400, "Folder picker is only available on macOS.")
+        from src.knowledge_base import KnowledgeBaseError, add_local_knowledge_root
+
+        script = 'POSIX path of (choose folder with prompt "Odysseus Deep Research 지식 소스로 사용할 폴더를 선택하세요")'
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(408, "Folder picker timed out")
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            if "User canceled" in stderr or "사용자가 취소" in stderr:
+                return {"ok": False, "cancelled": True}
+            raise HTTPException(400, stderr or "Folder picker was cancelled")
+        selected = (proc.stdout or "").strip()
+        try:
+            folder = add_local_knowledge_root(selected)
+            return {"ok": True, "folder": folder}
         except KnowledgeBaseError as e:
             raise HTTPException(400, str(e))
 
@@ -420,6 +500,12 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     async def research_start(body: ResearchStartRequest, request: Request):
         """Launch a research job from the dedicated panel."""
         from src.auth_helpers import require_privilege
+        from src.knowledge_base import (
+            KnowledgeBaseError,
+            knowledge_folders_for_source_mode,
+            normalize_source_mode,
+        )
+        from src.settings import get_setting
         user = require_privilege(request, "can_use_research")
         if user == INTERNAL_TOOL_USER:
             tool_owner = (request.headers.get("X-Odysseus-Owner") or "").strip()
@@ -485,6 +571,15 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             if body.model:
                 ep_model = body.model
 
+        requested_source_mode = body.source_mode or get_setting("research_source_mode", "web")
+        try:
+            resolved_knowledge_folders = knowledge_folders_for_source_mode(
+                requested_source_mode,
+                body.knowledge_folders,
+            )
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
         research_handler.start_research(
@@ -497,8 +592,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,
-            source_mode=body.source_mode,
-            knowledge_folders=body.knowledge_folders,
+            source_mode=normalize_source_mode(requested_source_mode),
+            knowledge_folders=resolved_knowledge_folders,
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
             owner=user,

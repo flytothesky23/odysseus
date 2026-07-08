@@ -36030,9 +36030,39 @@ body.research-panel-view #research-divider { display:none; }
 .research-setting-wide {
   width: 100%;
 }
+.research-knowledge-source-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  min-width:0;
+}
 .research-setting-label {
   font-size:9px; text-transform:uppercase; letter-spacing:0.5px;
   opacity:0.5; margin-bottom:2px;
+}
+.research-local-folder-btn {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  flex:0 0 auto;
+  min-height:24px;
+  padding:3px 8px;
+  border:1px solid var(--border);
+  border-radius:4px;
+  background:var(--bg);
+  color:var(--fg);
+  font-size:10px;
+  font-weight:600;
+  cursor:pointer;
+}
+.research-local-folder-btn:hover {
+  border-color:var(--accent-primary, var(--red));
+  color:var(--accent-primary, var(--red));
+}
+.research-local-folder-btn:disabled {
+  opacity:0.55;
+  cursor:wait;
 }
 .research-setting select {
   width: 100%;

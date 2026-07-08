@@ -107,7 +107,13 @@ DEFAULT_SETTINGS = {
         ".obsidian", ".trash", ".git", ".omx", ".codexian",
         "node_modules", "__pycache__",
     ],
-    "research_source_mode": "web",  # "web" | "hybrid" | "knowledge"
+    # Additional local folders that Deep Research may use as private knowledge
+    # sources. These are stored as {id, label, path} records and selected by
+    # opaque "local:<id>" tokens in the research modal.
+    "knowledge_local_roots": [],
+    # Preferred Deep Research evidence source. Extended UI values are normalized
+    # before execution: web/local/web_local/obsidian/web_obsidian/web_all.
+    "research_source_mode": "web",
     "research_knowledge_max_chunks": 12,
     "research_knowledge_auto_index": True,
     # Hard wall-clock cap on a single deep-research run. The previous 600s

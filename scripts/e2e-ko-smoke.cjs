@@ -111,6 +111,56 @@ async function clickFirstVisible(locator, description) {
     });
     assertOk(memoryToggleText.includes('사용'), 'Memory toggle pseudo-label is not Korean.', { memoryToggleText });
 
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => {
+      const modal = document.querySelector('#memory-modal');
+      return !modal || modal.classList.contains('hidden') || getComputedStyle(modal).display === 'none';
+    }, null, { timeout: 3000 }).catch(() => {});
+    const memoryStillOpen = await page.evaluate(() => {
+      const modal = document.querySelector('#memory-modal');
+      return !!modal && !modal.classList.contains('hidden') && getComputedStyle(modal).display !== 'none';
+    });
+    if (memoryStillOpen) {
+      await clickFirstVisible(page.locator('#memory-modal .close-btn, #memory-modal button[title="Close"], #memory-modal button[title="닫기"]'), 'memory close button');
+    }
+
+    await clickFirstVisible(page.locator('#rail-research, #tool-research-btn'), 'research button');
+    await page.waitForSelector('#research-pane', { timeout: 5000 });
+    const sourceOptions = await page.locator('#research-source-mode option').evaluateAll((options) =>
+      options.map((option) => ({ value: option.value, text: option.textContent.trim() }))
+    );
+    const expectedSourceValues = ['', 'web', 'local', 'web_local', 'obsidian', 'web_obsidian', 'web_all'];
+    assertOk(
+      expectedSourceValues.every((value) => sourceOptions.some((option) => option.value === value)),
+      'Research source dropdown is missing Obsidian/local source combinations.',
+      { sourceOptions }
+    );
+    await page.locator('#research-source-mode').selectOption('obsidian');
+    await page.waitForSelector('#research-knowledge-setting', { timeout: 3000 });
+    const researchSourceState = await page.evaluate(() => {
+      const pane = document.querySelector('#research-pane');
+      const source = document.querySelector('#research-source-mode');
+      const row = document.querySelector('#research-knowledge-setting');
+      const button = document.querySelector('#research-add-local-folder');
+      const select = document.querySelector('#research-knowledge-folders');
+      const rowBox = row?.getBoundingClientRect();
+      const paneBox = pane?.getBoundingClientRect();
+      return {
+        sourceValue: source?.value || '',
+        rowVisible: !!row && getComputedStyle(row).display !== 'none',
+        buttonText: button?.textContent?.trim() || '',
+        buttonVisible: !!button && getComputedStyle(button).display !== 'none',
+        selectText: select?.innerText || '',
+        rowWidth: rowBox ? Math.round(rowBox.width) : 0,
+        paneWidth: paneBox ? Math.round(paneBox.width) : 0,
+        overflow: row && pane ? row.scrollWidth > pane.clientWidth + 2 : true,
+      };
+    });
+    assertOk(researchSourceState.sourceValue === 'obsidian', 'Research source mode did not switch to Obsidian only.', researchSourceState);
+    assertOk(researchSourceState.rowVisible && researchSourceState.buttonVisible, 'Knowledge folder picker controls are not visible.', researchSourceState);
+    assertOk(researchSourceState.buttonText.includes('Finder'), 'Finder folder add button is missing.', researchSourceState);
+    assertOk(researchSourceState.overflow === false, 'Research knowledge source row overflows the modal.', researchSourceState);
+
     const englishLeaks = await page.evaluate(() => {
       const selectors = [
         '#sidebar',

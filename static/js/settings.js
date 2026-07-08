@@ -1681,12 +1681,16 @@ async function initKnowledgeBaseSettings() {
     var root = (rootInput.value || '').trim();
     var chunks = parseInt(maxChunksInput.value || '12', 10) || 12;
     var modeLabel = modeSel.options[modeSel.selectedIndex]?.textContent || '웹 검색만';
-    if (!root) {
-      msg.textContent = 'Vault 루트를 설정하면 심층 조사에서 Obsidian 폴더를 선택할 수 있습니다.';
+    var localRoots = Array.isArray(settings && settings.knowledge_local_roots) ? settings.knowledge_local_roots.length : 0;
+    if (!root && !localRoots) {
+      msg.textContent = 'Vault 루트 또는 Research 모달의 Finder 폴더를 추가하면 개인 지식 소스를 선택할 수 있습니다.';
       msg.style.color = 'var(--fg)';
       return;
     }
-    msg.textContent = modeLabel + ' · 최대 ' + chunks + '개 노트 조각 · ' + (autoIndexInput.checked ? '자동 색인' : '색인된 내용만 사용');
+    var sourceBits = [];
+    if (root) sourceBits.push('Obsidian Vault');
+    if (localRoots) sourceBits.push('로컬 폴더 ' + localRoots + '개');
+    msg.textContent = modeLabel + ' · ' + sourceBits.join(' + ') + ' · 최대 ' + chunks + '개 노트 조각 · ' + (autoIndexInput.checked ? '자동 색인' : '색인된 내용만 사용');
     msg.style.color = 'var(--fg)';
   }
 
