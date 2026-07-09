@@ -22,6 +22,8 @@ def test_management_category_is_registered_for_manual_and_auto_use():
     assert "경영 요약" in prompt
     assert "PSBall" in prompt
     assert "관리 Check Point" in prompt
+    assert "Default to an operations-management report" in prompt
+    assert "Do not add rows or paragraphs saying that balance sheet" in prompt
 
 
 def test_auto_management_classification_runs_before_planning():
@@ -34,8 +36,8 @@ def test_auto_management_classification_runs_before_planning():
         if "Classify this research question" in prompt:
             return "management"
         return json.dumps({
-            "sub_questions": ["손익과 운영 KPI는 무엇인가?"],
-            "key_topics": ["PSBall", "현금흐름"],
+            "sub_questions": ["PSBall과 운송 KPI는 무엇인가?"],
+            "key_topics": ["PSBall", "운임비율"],
             "success_criteria": "경영 판단과 Check Point가 포함된 보고서",
         })
 
@@ -47,7 +49,8 @@ def test_auto_management_classification_runs_before_planning():
     assert any("Category meanings" in prompt and "management" in prompt for prompt in seen)
     plan_prompt = next(prompt for prompt in seen if "research strategist" in prompt)
     assert "Management Analysis Report mode" in plan_prompt
-    assert "financial-statement" in plan_prompt
+    assert "operations-management plan first" in plan_prompt
+    assert "financial-statement questions only if" in plan_prompt
     assert "PSBall" in plan_prompt
 
 
@@ -111,6 +114,7 @@ def test_management_extraction_goal_requests_period_value_and_baseline(monkeypat
     assert "period, value, unit, baseline" in seen["goal"]
     assert "공급가액 대비 운임비율" in seen["goal"]
     assert "Haman/Cheongnam" in seen["goal"]
+    assert "sales/value" in seen["goal"]
 
 
 def test_management_synthesis_stop_and_final_prompts_include_contract():
@@ -136,8 +140,9 @@ def test_management_synthesis_stop_and_final_prompts_include_contract():
 
     joined = "\n\n".join(seen)
     assert "evolving management ledger" in joined
-    assert "relevant axes" in joined
+    assert "evidence-backed axes" in joined
     assert "Executive Brief" in joined
+    assert "Do not add rows or paragraphs saying that balance sheet" in joined
     assert "종합의견 및 관리 Check Point" in joined
 
 
@@ -151,3 +156,5 @@ def test_visual_report_has_management_category_skin():
     assert 'class="category-management"' in html
     assert "Management analysis category" in html
     assert "font-variant-numeric: tabular-nums" in html
+    assert 'class="table-scroll"' in html
+    assert "width:max-content" in html

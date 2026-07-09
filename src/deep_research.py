@@ -162,7 +162,7 @@ CATEGORY_DESCRIPTIONS = {
     "comparison": "side-by-side comparison across options, criteria, and best-fit verdicts",
     "howto": "step-by-step implementation or usage guide",
     "factcheck": "claim verification with evidence for/against and a clear verdict",
-    "management": "business, financial, audit, operations, daily/weekly/monthly/yearly management analysis report",
+    "management": "operations-first business management report for production, sales, logistics, audit, daily/weekly/monthly/yearly analysis; include corporate finance only when financial-statement evidence exists",
 }
 
 MANAGEMENT_ANALYSIS_STAGE_GUIDE = """\
@@ -172,10 +172,12 @@ Treat this as a business-management analysis task, not a generic article. Build 
 
 Core analysis axes:
 - Period and baseline: identify daily/weekly/monthly/yearly scope; compare against prior period, recent baseline, YTD, and prior-year comparable period when evidence exists.
-- Financial report track: cover management summary, P&L, cost structure, balance sheet, cash flow, segment performance, impairment/contingency, financial ratios, risks, and improvement priorities.
-- Operations report track: cover PSBall sales/value mix, steel slag removal, Haman/Cheongnam byproduct and intermediate-processing flow, logistics/freight, labor/equipment productivity, field issues, and management Check Points.
+- Default track for field/local data: treat production, sales, byproduct, route, freight, work-log, and field issue files as operations-management evidence. Analyze what management decisions can be made from that evidence instead of forcing corporate finance sections.
+- Corporate financial-statement track: cover P&L, cost structure, balance sheet, cash flow, segment performance, impairment/contingency, financial ratios, and audit risks ONLY when the provided evidence explicitly contains those financial-statement fields.
+- Operations-management track: cover PSBall sales/value mix, steel slag removal, Haman/Cheongnam byproduct and intermediate-processing flow, logistics/freight, labor/equipment productivity, field issues, and management Check Points.
 - Use data tables where possible. Every major judgment should name the metric, period, value, comparison target, direction, and operational meaning.
 - Keep private knowledge citations such as vault:// or local-knowledge:// links when source mode includes local knowledge.
+- If evidence lacks balance-sheet, cash-flow, SG&A, purchasing, or full cost-accounting data, do not create repeated "자료 없음" sections for those topics. State the report scope once as operations-management analysis and omit unavailable corporate-finance sections.
 
 Language and terminology locks:
 - Prefer Korean executive-report language when the user writes in Korean.
@@ -186,12 +188,12 @@ Language and terminology locks:
 """
 
 MANAGEMENT_STAGE_FOCUS = {
-    "plan": """Plan sub-questions around the report type. Include financial-statement questions if audit/PDF/annual report evidence appears; include operations questions if daily/weekly production, freight, byproduct, route, or work-log evidence appears.""",
+    "plan": """Plan sub-questions around the available evidence. For production, sales, byproduct, route, freight, or work-log files, make an operations-management plan first. Add financial-statement questions only if audit/PDF/annual-report evidence explicitly includes P&L, balance sheet, cash flow, SG&A, purchasing, or full cost-accounting fields.""",
     "query": """Generate searches that retrieve source packs, not only opinions. Include period terms, company/project names, metric names, table names, branch/site names, and Korean aliases such as PSBall, 슬래그반출, 함안, 청남, 운임, 장비시간, 인력시간, 현장 이슈.""",
-    "extract": """Extract metric-bearing evidence. Capture period, value, unit, baseline/comparison target, source table/note, caveat, and which axis it supports: financial, PSBall, slag, Haman/Cheongnam, logistics, productivity, field issue, or risk.""",
-    "synthesize": """Maintain an evolving management ledger. Group evidence by axis, reconcile contradictions, mark unavailable baselines explicitly, and convert findings into management implications rather than a list of facts.""",
-    "stop": """Continue unless the report has either covered or explicitly marked unavailable the relevant axes, period baselines, driver table, risks, and action/checkpoint section.""",
-    "final": """Write the finished report as an executive-ready management report with tables, not a magazine article. Keep the conclusion tied to practical management decisions.""",
+    "extract": """Extract metric-bearing evidence. Capture period, value, unit, baseline/comparison target, source table/note, caveat, and which axis it supports: sales/value, PSBall, slag, Haman/Cheongnam, logistics/freight, productivity, field issue, risk, or explicit financial-statement data.""",
+    "synthesize": """Maintain an evolving management ledger. Group evidence by operations axis first, reconcile contradictions, mark unavailable operational baselines explicitly, and convert findings into management implications rather than a list of facts. Do not turn absent corporate-finance fields into repeated missing-data findings.""",
+    "stop": """Continue unless the report has covered the relevant evidence-backed axes, period baselines, driver table, risks, and action/checkpoint section. For operations-only evidence, do not wait for balance-sheet, cash-flow, SG&A, or full financial-statement coverage.""",
+    "final": """Write the finished report as an executive-ready operations-management report with KPI boards, driver tables, and decision checkpoints, not a magazine article. Keep the conclusion tied to practical production, sales, logistics, and field-management decisions.""",
 }
 
 
@@ -230,10 +232,12 @@ CATEGORY_PROMPTS = {
     "management": """IMPORTANT FORMAT OVERRIDE — this is a MANAGEMENT ANALYSIS / BUSINESS REPORT:
 - Write in Korean if the user's prompt is Korean.
 - Start with ## 경영 요약 or ## Executive Brief: 5-7 bullets with the most important numbers, deltas, and decisions.
-- Detect the data shape and choose the matching structure:
-  - Financial/audit/annual report: 경영 요약, 손익 추이, 비용 구조, 자산·부채·자본, 현금흐름, 부문별 손익, 주요 재무비율, 리스크, 종합 의견 및 개선 과제.
-  - Daily/weekly/monthly operations report: 이번 기간 판단, Executive Brief, 기간 기준선, 경영 지표 보드, PSBall 판매 mix, 슬래그반출·후공정, 함안·청남 가치 회수, 물류/운임 적정성 평가 검증, 인력·장비 생산성, 운영 근거 스토리보드, 종합의견과 관리 Check Point.
+- Detect the data shape and choose the matching structure. Default to an operations-management report when the evidence is production, sales, byproduct, freight, route, field issue, or work-log data.
+  - Operations-management report: 이번 기간 판단, Executive Brief, 기간 기준선, 경영 지표 보드, PSBall 판매 mix, 슬래그반출·후공정, 함안·청남 가치 회수, 물류/운임 적정성 평가 검증, 인력·장비 생산성, 운영 근거 스토리보드, 종합의견과 관리 Check Point.
+  - Financial/audit/annual report: use this structure only when evidence explicitly contains financial statements or audit schedules: 경영 요약, 손익 추이, 비용 구조, 자산·부채·자본, 현금흐름, 부문별 손익, 주요 재무비율, 리스크, 종합 의견 및 개선 과제.
+- Do not add rows or paragraphs saying that balance sheet, cash flow, operating profit, SG&A, purchasing, receivables, inventory, debt, or full cost data are missing when the user's source scope is operations/sales/logistics. State the analysis scope once and omit those corporate-finance sections unless evidence supports them.
 - Use markdown tables for KPI boards and comparisons. Include units such as 원, 백만원, T, %, %p, T/h.
+- Include at least one management visualization as a markdown table when data allows: KPI board, route/freight board, variance board, source reliability ledger, or decision matrix.
 - For each management claim, show the metric, period, value, comparison baseline, and why it matters.
 - Separate operational facts from management judgment; do not invent unavailable numbers.
 - End with ## 종합의견 및 관리 Check Point. Each checkpoint needs 근거, 실행 방향, 완료 기준, and residual risk if any.

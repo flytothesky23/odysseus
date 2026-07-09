@@ -170,6 +170,21 @@ def _apply_heading_ids(report_html: str, headings: List[Dict[str, str]]) -> str:
     return str(soup)
 
 
+def _wrap_report_tables(report_html: str) -> str:
+    """Wrap markdown tables so wide operational boards can scroll horizontally."""
+    if "<table" not in report_html:
+        return report_html
+
+    soup = BeautifulSoup(report_html, "html.parser")
+    for table in soup.find_all("table"):
+        if table.parent and "table-scroll" in (table.parent.get("class") or []):
+            continue
+        wrapper = soup.new_tag("div")
+        wrapper["class"] = "table-scroll"
+        table.wrap(wrapper)
+    return str(soup)
+
+
 # Overlay buttons shown on each image: reroll (swap for the next unused
 # scraped image) + hide (remove and skip on future renders). Reroll is
 # wired up in the page script using the embedded spare-image pool.
@@ -804,6 +819,19 @@ body::after {{
 .content code {{ font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-surface-alt); padding: 0.15em 0.4em; border-radius: 4px; }}
 .content pre {{ background: var(--bg-surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; overflow-x: auto; margin: 1.25rem 0; font-size: 0.86rem; line-height: 1.6; }}
 .content pre code {{ background: none; padding: 0; }}
+.table-scroll {{
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  -webkit-overflow-scrolling: touch;
+}}
+.table-scroll table {{ margin: 0; box-shadow: none; }}
+.table-scroll::-webkit-scrollbar {{ height: 10px; }}
+.table-scroll::-webkit-scrollbar-track {{ background: var(--bg-surface-alt); border-radius: 999px; }}
+.table-scroll::-webkit-scrollbar-thumb {{ background: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); border-radius: 999px; }}
 .content table {{ width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-sm); }}
 .content th {{ text-align: left; padding: 0.7rem 1rem; background: var(--accent-bg); font-weight: 600; border-bottom: 2px solid var(--border-strong); }}
 .content td {{ padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }}
@@ -1267,12 +1295,19 @@ body.category-landscape {
   --aurora-c: rgba(122,76,184,0.05);
 }
 body.category-management {
-  --accent: #2f7f7b;
-  --accent-light: #56aaa5;
-  --accent-bg: rgba(47,127,123,0.08);
-  --aurora-a: rgba(47,127,123,0.12);
-  --aurora-b: rgba(196,139,45,0.07);
-  --aurora-c: rgba(68,86,113,0.07);
+  --bg: #f7f4ed;
+  --bg-surface: #fffdf8;
+  --bg-surface-alt: #ece7dc;
+  --text: #1f2426;
+  --text-dim: #596064;
+  --accent: #245f68;
+  --accent-light: #347d87;
+  --accent-bg: rgba(36,95,104,0.08);
+  --gold: #b7792f;
+  --gold-bg: rgba(183,121,47,0.10);
+  --aurora-a: rgba(36,95,104,0.10);
+  --aurora-b: rgba(183,121,47,0.08);
+  --aurora-c: rgba(62,76,92,0.08);
 }
 @media (prefers-color-scheme: dark) {
   body.category-product {
@@ -1304,11 +1339,14 @@ body.category-management {
     --aurora-c: rgba(184,150,232,0.06);
   }
   body.category-management {
-    --accent: #72cbc6; --accent-light: #9cddd9;
-    --accent-bg: rgba(114,203,198,0.10);
-    --aurora-a: rgba(114,203,198,0.13);
-    --aurora-b: rgba(235,187,90,0.08);
-    --aurora-c: rgba(125,180,224,0.07);
+    --bg: #111416; --bg-surface: #1a1f21; --bg-surface-alt: #232a2d;
+    --text: #eef1ed; --text-dim: #adb5b4; --text-muted: #707b7a;
+    --accent: #76c7c1; --accent-light: #a3dfda;
+    --accent-bg: rgba(118,199,193,0.10);
+    --gold: #e0b45d; --gold-bg: rgba(224,180,93,0.10);
+    --aurora-a: rgba(118,199,193,0.12);
+    --aurora-b: rgba(224,180,93,0.08);
+    --aurora-c: rgba(125,149,179,0.07);
   }
 }
 
@@ -1345,6 +1383,39 @@ body.category-product {
 body.category-management {
   --font-display: 'IBM Plex Sans', system-ui, sans-serif;
   --font-body: 'Inter', system-ui, sans-serif;
+  --max-w: 1120px;
+}
+body.category-management .layout {
+  grid-template-columns: minmax(150px, 12vw) minmax(0, 1fr);
+  width: min(96vw, 1480px);
+  max-width: none;
+}
+body.category-management .toc-sidebar {
+  padding-left: 0.9rem;
+  padding-right: 0.55rem;
+  font-size: 0.74rem;
+}
+body.category-management .content {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  padding-left: clamp(1.2rem, 2.2vw, 3rem);
+  padding-right: clamp(1.2rem, 2.2vw, 3rem);
+}
+body.category-management .hero h1 {
+  max-width: min(980px, 90vw);
+}
+@media (min-width: 1500px) {
+  body.category-management .layout {
+    width: min(98vw, 1680px);
+    grid-template-columns: minmax(160px, 11vw) minmax(0, 1fr);
+  }
+}
+@media (max-width: 900px) {
+  body.category-management .layout {
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Source Serif sits visually larger than Inter at the same px — pull it
@@ -1638,20 +1709,62 @@ body.category-management .content h3 {
   padding: 10px 14px;
   border-radius: 0 8px 8px 0;
 }
+body.category-management .content > ul:first-child,
+body.category-management .content h2:first-of-type + ul {
+  list-style: none;
+  margin-left: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.8rem;
+}
+body.category-management .content > ul:first-child li,
+body.category-management .content h2:first-of-type + ul li {
+  margin: 0;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-surface) 88%, var(--accent-bg));
+  box-shadow: var(--shadow-sm);
+}
+body.category-management .table-scroll {
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background: var(--bg-surface);
+}
 body.category-management .content table {
   font-size: 0.88rem;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
   box-shadow: 0 4px 18px rgba(0,0,0,0.05);
 }
 body.category-management .content th {
-  background: color-mix(in srgb, var(--accent) 18%, var(--bg-surface));
-  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 86%, #1f2426);
+  color: #fff;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0;
   font-size: 0.72rem;
+  min-width: 7.5rem;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
 }
+body.category-management .content td {
+  min-width: 7.5rem;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  line-height: 1.6;
+}
+body.category-management .content th:first-child,
 body.category-management .content td:first-child {
   font-weight: 600;
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  min-width: 8rem;
+}
+body.category-management .content td:first-child {
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+}
+body.category-management .content th:first-child {
+  background: color-mix(in srgb, var(--accent) 94%, #1f2426);
 }
 body.category-management .content blockquote {
   border-left: 4px solid #c48b2d;
@@ -1809,17 +1922,29 @@ body.category-management .content blockquote {
 .category-management .content {
   font-variant-numeric: tabular-nums;
 }
+.category-management .table-scroll {
+  margin:1.25em 0 1.6em;
+  border:1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:var(--bg-surface);
+}
 .category-management .content table {
-  width:100%; border-collapse:collapse; margin:1.2em 0;
+  width:max-content; min-width:100%; table-layout:auto;
+  border-collapse:collapse; margin:0;
 }
 .category-management .content table th {
   background:var(--accent); color:#fff; padding:9px 12px; text-align:left;
+  min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; letter-spacing:0;
 }
 .category-management .content table td {
   padding:9px 12px; border-bottom:1px solid var(--border);
+  min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; line-height:1.6;
 }
 .category-management .content table tr:nth-child(even) td {
   background:var(--bg-surface);
+}
+.category-management .content table th:first-child,
+.category-management .content table td:first-child {
+  min-width:8rem; font-weight:700;
 }
 .category-management .content h2 + ul,
 .category-management .content h2 + p {
@@ -1921,6 +2046,7 @@ def generate_visual_report(
 
     headings = _extract_headings(report_markdown)
     report_html = _apply_heading_ids(report_html, headings)
+    report_html = _wrap_report_tables(report_html)
 
     # Collect report images from sources. Web reports provide OpenGraph image
     # URLs; Obsidian-only reports can provide vault-image:// references that
