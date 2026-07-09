@@ -113,8 +113,14 @@ def test_management_visual_report_uses_wide_scrollable_tables():
     soup = BeautifulSoup(html, "html.parser")
 
     assert soup.select_one(".table-scroll table") is not None
+    first_list = soup.select_one(".content > ul")
+    assert first_list is not None
+    assert len(first_list.select(":scope > li")) == 2
     assert "body.category-management .layout" in html
     assert "width: min(96vw, 1480px)" in html
-    assert "body.category-management .content > ul:first-child" in html
     assert "word-break: keep-all" in html
-    assert "grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))" in html
+    assert "body.category-management .content > ul:first-child" not in html
+    assert "grid-template-columns: repeat(auto-fit, minmax(220px, 1fr))" not in html
+    assert "body.category-management::before" not in html
+    assert "background:var(--accent); color:#fff" not in html
+    assert "body.category-management .content h3 {" not in html

@@ -1294,21 +1294,6 @@ body.category-landscape {
   --aurora-b: rgba(184,84,58,0.06);
   --aurora-c: rgba(122,76,184,0.05);
 }
-body.category-management {
-  --bg: #f7f4ed;
-  --bg-surface: #fffdf8;
-  --bg-surface-alt: #ece7dc;
-  --text: #1f2426;
-  --text-dim: #596064;
-  --accent: #245f68;
-  --accent-light: #347d87;
-  --accent-bg: rgba(36,95,104,0.08);
-  --gold: #b7792f;
-  --gold-bg: rgba(183,121,47,0.10);
-  --aurora-a: rgba(36,95,104,0.10);
-  --aurora-b: rgba(183,121,47,0.08);
-  --aurora-c: rgba(62,76,92,0.08);
-}
 @media (prefers-color-scheme: dark) {
   body.category-product {
     --accent: #5cc8cb; --accent-light: #8fdde0;
@@ -1337,16 +1322,6 @@ body.category-management {
     --aurora-a: rgba(230,192,105,0.15);
     --aurora-b: rgba(232,143,115,0.07);
     --aurora-c: rgba(184,150,232,0.06);
-  }
-  body.category-management {
-    --bg: #111416; --bg-surface: #1a1f21; --bg-surface-alt: #232a2d;
-    --text: #eef1ed; --text-dim: #adb5b4; --text-muted: #707b7a;
-    --accent: #76c7c1; --accent-light: #a3dfda;
-    --accent-bg: rgba(118,199,193,0.10);
-    --gold: #e0b45d; --gold-bg: rgba(224,180,93,0.10);
-    --aurora-a: rgba(118,199,193,0.12);
-    --aurora-b: rgba(224,180,93,0.08);
-    --aurora-c: rgba(125,149,179,0.07);
   }
 }
 
@@ -1379,10 +1354,8 @@ body.category-product {
   --font-body: 'Inter', system-ui, sans-serif;
 }
 
-/* Management: boardroom memo, dense tables, clean numerals */
+/* Management: default report typography with a wider rail for dense tables */
 body.category-management {
-  --font-display: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-body: 'Inter', system-ui, sans-serif;
   --max-w: 1120px;
 }
 body.category-management .layout {
@@ -1504,24 +1477,11 @@ body.category-landscape::before {
   100% { background-position: 0 100%; }
 }
 
-/* Management → ledger grid + boardroom wash */
-body.category-management::before {
-  background:
-    linear-gradient(to right, var(--aurora-a) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--aurora-a) 1px, transparent 1px),
-    radial-gradient(65vw 55vh at 22% 15%, var(--aurora-b) 0%, transparent 62%),
-    radial-gradient(70vw 60vh at 80% 85%, var(--aurora-c) 0%, transparent 65%);
-  background-size: 42px 42px, 42px 42px, 100% 100%, 100% 100%;
-  filter: none;
-  animation: cat-grid-pan 90s linear infinite;
-}
-
 @media (prefers-reduced-motion: reduce) {
   body.category-product::before,
   body.category-comparison::before,
   body.category-howto::before,
-  body.category-landscape::before,
-  body.category-management::before {
+  body.category-landscape::before {
     animation: none;
   }
 }
@@ -1695,55 +1655,22 @@ body.category-product .content h3 + table {
   padding-left: 4px;
 }
 
-/* ── MANAGEMENT: executive KPI board ─────────────── */
+/* ── MANAGEMENT: traditional report layout with wide tables ─────────────── */
 body.category-management .content {
   font-feature-settings: 'tnum' on, 'ss01';
 }
-body.category-management .content h2 {
-  border-bottom: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  padding-bottom: 0.45rem;
-}
-body.category-management .content h3 {
-  border-left: 4px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
-  padding: 10px 14px;
-  border-radius: 0 8px 8px 0;
-}
-body.category-management .content > ul:first-child,
-body.category-management .content h2:first-of-type + ul {
-  list-style: none;
-  margin-left: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.8rem;
-}
-body.category-management .content > ul:first-child li,
-body.category-management .content h2:first-of-type + ul li {
-  margin: 0;
-  padding: 0.85rem 0.95rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
-  border-left: 4px solid var(--accent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-surface) 88%, var(--accent-bg));
-  box-shadow: var(--shadow-sm);
-}
 body.category-management .table-scroll {
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border: 1px solid var(--border);
   background: var(--bg-surface);
 }
 body.category-management .content table {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   width: max-content;
   min-width: 100%;
   table-layout: auto;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.05);
 }
 body.category-management .content th {
-  background: color-mix(in srgb, var(--accent) 86%, #1f2426);
-  color: #fff;
-  text-transform: uppercase;
   letter-spacing: 0;
-  font-size: 0.72rem;
   min-width: 7.5rem;
   white-space: normal;
   word-break: keep-all;
@@ -1757,18 +1684,7 @@ body.category-management .content td {
 }
 body.category-management .content th:first-child,
 body.category-management .content td:first-child {
-  font-weight: 600;
   min-width: 8rem;
-}
-body.category-management .content td:first-child {
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
-}
-body.category-management .content th:first-child {
-  background: color-mix(in srgb, var(--accent) 94%, #1f2426);
-}
-body.category-management .content blockquote {
-  border-left: 4px solid #c48b2d;
-  background: color-mix(in srgb, #c48b2d 8%, transparent);
 }
 """
     styles = {
@@ -1924,7 +1840,7 @@ body.category-management .content blockquote {
 }
 .category-management .table-scroll {
   margin:1.25em 0 1.6em;
-  border:1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border:1px solid var(--border);
   background:var(--bg-surface);
 }
 .category-management .content table {
@@ -1932,19 +1848,16 @@ body.category-management .content blockquote {
   border-collapse:collapse; margin:0;
 }
 .category-management .content table th {
-  background:var(--accent); color:#fff; padding:9px 12px; text-align:left;
+  padding:9px 12px; text-align:left;
   min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; letter-spacing:0;
 }
 .category-management .content table td {
   padding:9px 12px; border-bottom:1px solid var(--border);
   min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; line-height:1.6;
 }
-.category-management .content table tr:nth-child(even) td {
-  background:var(--bg-surface);
-}
 .category-management .content table th:first-child,
 .category-management .content table td:first-child {
-  min-width:8rem; font-weight:700;
+  min-width:8rem;
 }
 .category-management .content h2 + ul,
 .category-management .content h2 + p {
