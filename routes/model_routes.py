@@ -11,6 +11,7 @@ import time as _time
 import logging
 import httpx
 from datetime import datetime
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
@@ -692,6 +693,15 @@ def _resolve_probe_key(ep) -> Optional[str]:
         return None
 
 
+def _probe_configured_endpoint(ep, timeout: int = 5) -> List[str]:
+    """Probe a configured endpoint, resolving provider-auth credentials safely."""
+    base = _normalize_base(getattr(ep, "base_url", "") or "")
+    api_key = getattr(ep, "api_key", None)
+    if getattr(ep, "provider_auth_id", None):
+        api_key = _resolve_probe_key(ep)
+    return _probe_endpoint(base, api_key, timeout=timeout)
+
+
 def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
     provider = _safe_detect_provider(base)
@@ -1349,6 +1359,12 @@ def _picker_models_for_endpoint(ep, base_url: str, kind: str):
     the picker. Local/self-hosted endpoints keep the older hide-list behavior.
     """
     pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+    if _safe_detect_provider(base_url) == "chatgpt-subscription":
+        return _visible_models(
+            _cached_model_ids(ep),
+            getattr(ep, "hidden_models", None),
+            pinned,
+        ), pinned
     if _picker_requires_pinning(base_url, kind):
         if not _has_explicit_pinned_models(ep):
             pinned = _legacy_visible_api_models(ep) if _hidden_model_ids(ep) else []
@@ -1394,8 +1410,9 @@ def setup_model_routes(model_discovery):
     _REFRESH_FAILURE_BASE = 300.0
     _REFRESH_FAILURE_MAX = 3600.0
 
-    def _refresh_key(base: str, api_key: Optional[str]) -> str:
-        return f"{base.rstrip('/')}\x00{api_key or ''}"
+    def _refresh_key(base: str, api_key: Optional[str], provider_auth_id: Optional[str] = None) -> str:
+        credential_ref = f"auth:{provider_auth_id}" if provider_auth_id else (api_key or "")
+        return f"{base.rstrip('/')}\x00{credential_ref}"
 
     def _ts(value: Any) -> float:
         try:
@@ -1416,13 +1433,16 @@ def setup_model_routes(model_discovery):
         category = _classify_endpoint(base, kind)
         mode = _endpoint_refresh_mode(ep, kind)
         cached = _cached_model_ids(ep)
-        key = _refresh_key(base, getattr(ep, "api_key", None))
+        provider_auth_id = getattr(ep, "provider_auth_id", None)
+        key = _refresh_key(base, getattr(ep, "api_key", None), provider_auth_id)
         state = _refresh_state.get(key, {})
 
         info = {
             "id": getattr(ep, "id", ""),
             "base": base,
             "api_key": getattr(ep, "api_key", None),
+            "provider_auth_id": provider_auth_id,
+            "owner": getattr(ep, "owner", None),
             "kind": kind,
             "category": category,
             "mode": mode,
@@ -1452,13 +1472,14 @@ def setup_model_routes(model_discovery):
                 return False, info
         return True, info
 
-    def _refresh_caches_bg(force: bool = False):
+    def _refresh_caches_bg(force: bool = False, exclude_endpoint_ids: Optional[set[str]] = None):
         """Background thread: safely refresh model caches with per-base single-flight.
 
         The public /api/models path stays cached-first. This refresh never clears
         a non-empty cached model list on timeout/failure, and proxy/manual
         endpoints are skipped unless explicitly forced."""
         import threading
+        excluded = set(exclude_endpoint_ids or ())
         if _refresh_inflight["v"]:
             return  # already running
         _refresh_inflight["v"] = True
@@ -1475,12 +1496,16 @@ def setup_model_routes(model_discovery):
                     now = _time.time()
                     groups: Dict[str, Dict[str, Any]] = {}
                     for ep in endpoints:
+                        if getattr(ep, "id", "") in excluded:
+                            continue
                         ok, info = _should_refresh_endpoint(ep, now, force=force)
                         if not ok:
                             continue
                         groups.setdefault(info["key"], {
                             "base": info["base"],
                             "api_key": info["api_key"],
+                            "provider_auth_id": info["provider_auth_id"],
+                            "owner": info["owner"],
                             "timeout": info["timeout"],
                             "endpoint_ids": [],
                         })["endpoint_ids"].append(info["id"])
@@ -1492,7 +1517,14 @@ def setup_model_routes(model_discovery):
 
                     def _probe_one(key: str, data: Dict[str, Any]):
                         try:
-                            ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
+                            endpoint = SimpleNamespace(
+                                id=data["endpoint_ids"][0],
+                                base_url=data["base"],
+                                api_key=data.get("api_key"),
+                                provider_auth_id=data.get("provider_auth_id"),
+                                owner=data.get("owner"),
+                            )
+                            ids = _probe_configured_endpoint(endpoint, timeout=data.get("timeout") or 2)
                             return key, data["endpoint_ids"], ids, None
                         except Exception as e:
                             return key, data["endpoint_ids"], None, e
@@ -1529,6 +1561,49 @@ def setup_model_routes(model_discovery):
                 _refresh_inflight["v"] = False
         threading.Thread(target=_do, daemon=True).start()
 
+    def _refresh_subscription_caches(owner: str = "", is_admin: bool = False) -> set[str]:
+        """Synchronously refresh visible ChatGPT subscription catalogs.
+
+        Explicit picker refreshes must return the new Codex catalog in the same
+        response. Other endpoints retain the cached-first background behavior.
+        """
+        refreshed_endpoint_ids: set[str] = set()
+        db = SessionLocal()
+        changed = False
+        try:
+            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner and not is_admin:
+                q = owner_filter(q, ModelEndpoint, owner)
+            for ep in q.all():
+                base = _normalize_base(getattr(ep, "base_url", "") or "")
+                if _safe_detect_provider(base) != "chatgpt-subscription":
+                    continue
+                ep_id = str(getattr(ep, "id", "") or "")
+                refreshed_endpoint_ids.add(ep_id)
+                try:
+                    models = _probe_configured_endpoint(
+                        ep,
+                        timeout=_endpoint_refresh_timeout(ep, _classify_endpoint(base, _effective_endpoint_kind(ep, base))),
+                    )
+                except Exception as exc:
+                    logger.warning("ChatGPT subscription model refresh failed for endpoint %s: %s", ep_id, exc)
+                    models = []
+                if models:
+                    ep.cached_models = json.dumps(models)
+                    # Older Odysseus builds provisioned subscription endpoints
+                    # as manual-only. A successful explicit refresh is the safe
+                    # migration point to restore ongoing catalog updates.
+                    if _endpoint_refresh_mode(ep, _effective_endpoint_kind(ep, base)) == "manual":
+                        ep.model_refresh_mode = "auto"
+                    changed = True
+            if changed:
+                db.commit()
+        finally:
+            db.close()
+        if changed:
+            _invalidate_models_cache()
+        return refreshed_endpoint_ids
+
     def _fetch_models(owner: str = "", is_admin: bool = False):
         """Return model list from cached data (instant). Background refresh keeps caches fresh.
 
@@ -1564,6 +1639,20 @@ def setup_model_routes(model_discovery):
             kind = _effective_endpoint_kind(ep, base)
             category = _classify_endpoint(base, kind)
             model_ids, pinned = _picker_models_for_endpoint(ep, base, kind)
+            reasoning_efforts: Dict[str, List[str]] = {}
+            default_reasoning_efforts: Dict[str, str] = {}
+            if provider == "chatgpt-subscription":
+                from src.chatgpt_subscription import (
+                    default_reasoning_effort,
+                    supported_reasoning_efforts,
+                )
+                for model_id in model_ids:
+                    supported = supported_reasoning_efforts(model_id)
+                    default_effort = default_reasoning_effort(model_id)
+                    if supported:
+                        reasoning_efforts[model_id] = supported
+                    if default_effort:
+                        default_reasoning_efforts[model_id] = default_effort
 
             if model_ids:
                 curated_key = _match_provider_curated(base, None)
@@ -1587,6 +1676,8 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "model_reasoning_efforts": reasoning_efforts,
+                    "model_default_reasoning_efforts": default_reasoning_efforts,
                 })
             else:
                 # Endpoint unreachable but still show it greyed out
@@ -1643,6 +1734,9 @@ def setup_model_routes(model_discovery):
         except Exception:
             _is_admin = False
         now = _time.time()
+        synchronously_refreshed: set[str] = set()
+        if refresh:
+            synchronously_refreshed = _refresh_subscription_caches(owner=owner, is_admin=_is_admin)
         # Cache key includes the admin flag so a demotion / promotion doesn't
         # serve the wrong scoped view from cache.
         _cache_key = (owner, _is_admin)
@@ -1655,7 +1749,7 @@ def setup_model_routes(model_discovery):
         # Page boot can opt out with background=false so opening Odysseus does
         # not start endpoint probes against slow/offline model servers.
         if background or refresh:
-            _refresh_caches_bg(force=refresh)
+            _refresh_caches_bg(force=refresh, exclude_endpoint_ids=synchronously_refreshed)
         return result
 
     # Brief cache for local-probe results so picker-open doesn't hammer
@@ -2321,7 +2415,7 @@ def setup_model_routes(model_discovery):
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
-                    probed = _probe_endpoint(base, ep.api_key, timeout=timeout)
+                    probed = _probe_configured_endpoint(ep, timeout=timeout)
                 except Exception as exc:
                     logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
                     probed = []

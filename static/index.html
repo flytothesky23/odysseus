@@ -1036,8 +1036,15 @@
         </div>
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
-          <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
+          <button type="button" class="model-picker-btn" id="model-picker-btn" title="Switch model"><span id="model-picker-label">Select model</span><span class="model-picker-reasoning-indicator" id="model-picker-reasoning-indicator" hidden></span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
           <div class="model-picker-menu hidden" id="model-picker-menu">
+            <div class="model-picker-reasoning-row" id="model-picker-reasoning-row" hidden>
+              <label for="model-picker-reasoning">Reasoning</label>
+              <select id="model-picker-reasoning" aria-label="Reasoning effort">
+                <option value="">Automatic</option>
+              </select>
+              <span class="model-picker-reasoning-default" id="model-picker-reasoning-default"></span>
+            </div>
             <div class="model-picker-search-row">
               <div class="model-picker-search-wrap">
                 <input type="text" id="model-picker-search" placeholder="Search models..." autocomplete="off" aria-label="Search models">

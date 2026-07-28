@@ -30,6 +30,13 @@ CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 _AUTH_REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _AUTH_REFRESH_LOCKS_GUARD = threading.Lock()
 
+# Codex exposes Ultra in its own clients as a multi-agent execution mode, not
+# as a raw Responses API reasoning effort. Odysseus can safely forward the
+# single-request efforts below; it must not advertise Ultra until it implements
+# the corresponding orchestration behavior.
+_GPT56_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_GPT5_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
+
 
 def _database_handles():
     from core.database import ProviderAuthSession, SessionLocal, utcnow_naive
@@ -123,6 +130,36 @@ def fetch_available_models(access_token: str, timeout: float = 10.0) -> list[str
             ordered.append(slug)
             seen.add(slug)
     return ordered
+
+
+def supported_reasoning_efforts(model: str) -> list[str]:
+    """Return Responses API reasoning efforts Odysseus can safely forward."""
+    model_id = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    if model_id.startswith("gpt-5.6"):
+        return list(_GPT56_REASONING_EFFORTS)
+    if (
+        model_id.startswith(("gpt-5.5", "gpt-5.4", "gpt-5.3"))
+        or "codex-spark" in model_id
+    ):
+        return list(_GPT5_REASONING_EFFORTS)
+    return []
+
+
+def default_reasoning_effort(model: str) -> Optional[str]:
+    """Return the balanced Codex default for a supported subscription model."""
+    efforts = supported_reasoning_efforts(model)
+    if not efforts:
+        return None
+    model_id = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    return "low" if model_id == "gpt-5.6-sol" else "medium"
+
+
+def normalize_reasoning_effort(model: str, effort: Optional[str]) -> Optional[str]:
+    """Validate a user-selected effort against the selected model."""
+    normalized = str(effort or "").strip().lower()
+    if not normalized or normalized == "auto":
+        return None
+    return normalized if normalized in supported_reasoning_efforts(model) else None
 
 
 def _raise_for_oauth_response(response: httpx.Response, action: str) -> None:

@@ -3223,6 +3223,15 @@ body.bg-pattern-sparkles {
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .model-picker-reasoning-indicator {
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .model-picker-reasoning-indicator[hidden] {
+      display: none;
+    }
     .model-picker-btn svg {
       flex-shrink: 0;
       opacity: 0.5;
@@ -3256,6 +3265,41 @@ body.bg-pattern-sparkles {
       animation: picker-roll-down 0.15s ease-in forwards;
     }
     .model-picker-menu.hidden { display: none; }
+    .model-picker-reasoning-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 4px 8px;
+      padding: 4px 4px 8px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .model-picker-reasoning-row[hidden] {
+      display: none;
+    }
+    .model-picker-reasoning-row label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .model-picker-reasoning-row select {
+      width: 100%;
+      min-width: 0;
+      height: 28px;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 0 24px 0 8px;
+      font: inherit;
+      font-size: 11px;
+    }
+    .model-picker-reasoning-default {
+      grid-column: 2;
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.2;
+    }
     .model-picker-search-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 30px;

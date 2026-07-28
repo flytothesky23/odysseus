@@ -51,6 +51,14 @@
     ['Provider', '공급자'],
     ['Endpoint', '엔드포인트'],
     ['Model', '모델'],
+    ['Reasoning', '추론 정도'],
+    ['Reasoning effort', '추론 정도'],
+    ['Automatic', '자동'],
+    ['Low', '낮음'],
+    ['Medium', '보통'],
+    ['High', '높음'],
+    ['Extra High', '매우 높음'],
+    ['Max', '최대'],
     ['Local', '로컬'],
     ['OpenAI', 'OpenAI'],
     ['Test', '테스트'],
@@ -175,6 +183,7 @@
       ['Hide password', '비밀번호 숨기기'],
       ['Search models', '모델 검색'],
       ['Refresh model picker', '모델 목록 새로고침'],
+      ['Reasoning effort', '추론 정도'],
       ['Search memories', '기억 검색'],
       ['Search skills', '기능 검색'],
       ['Two-factor authentication code', '2단계 인증 코드'],
@@ -240,6 +249,17 @@
     if (match) return `${match[1]}개 선택됨`;
     match = key.match(/^Using (.+)$/);
     if (match) return `${match[1]} 사용 중`;
+    match = key.match(/^Default: (low|medium|high|xhigh|max)$/);
+    if (match) {
+      const efforts = {
+        low: '낮음',
+        medium: '보통',
+        high: '높음',
+        xhigh: '매우 높음',
+        max: '최대',
+      };
+      return `기본값: ${efforts[match[1]]}`;
+    }
     return null;
   }
 

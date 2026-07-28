@@ -131,3 +131,28 @@ def test_chatgpt_subscription_payload_omits_max_output_tokens_when_zero():
     )
 
     assert "max_output_tokens" not in payload
+
+
+def test_chatgpt_subscription_payload_forwards_supported_reasoning_effort():
+    payload = llm_core._build_chatgpt_responses_payload(
+        "gpt-5.6-terra",
+        [{"role": "user", "content": "Say OK"}],
+        temperature=0.2,
+        max_tokens=37,
+        reasoning_effort="max",
+    )
+
+    assert payload["reasoning"] == {"effort": "max"}
+
+
+@pytest.mark.parametrize("effort", ["ultra", "unsupported", "", None])
+def test_chatgpt_subscription_payload_omits_unsupported_reasoning_effort(effort):
+    payload = llm_core._build_chatgpt_responses_payload(
+        "gpt-5.6-sol",
+        [{"role": "user", "content": "Say OK"}],
+        temperature=0.2,
+        max_tokens=37,
+        reasoning_effort=effort,
+    )
+
+    assert "reasoning" not in payload

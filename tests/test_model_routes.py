@@ -1592,6 +1592,7 @@ def _route_ep(
     refresh_mode="auto",
     refresh_timeout=None,
     owner=None,
+    provider_auth_id=None,
 ):
     return SimpleNamespace(
         id=id,
@@ -1609,6 +1610,7 @@ def _route_ep(
         model_refresh_timeout=refresh_timeout,
         supports_tools=None,
         owner=owner,
+        provider_auth_id=provider_auth_id,
         created_at=None,
         updated_at=None,
     )
@@ -1830,6 +1832,58 @@ def test_background_refresh_deduplicates_same_base_url(monkeypatch):
     assert calls == ["http://127.0.0.1:8000/v1"]
     assert json.loads(ep1.cached_models) == ["live-model"]
     assert json.loads(ep2.cached_models) == ["live-model"]
+
+
+def test_subscription_refresh_returns_live_catalog_and_reasoning_metadata(monkeypatch):
+    ep = _route_ep(
+        "subscription",
+        "https://chatgpt.com/backend-api/codex",
+        cached_models=["gpt-5.5"],
+        owner="alice",
+        provider_auth_id="auth-1",
+        refresh_mode="manual",
+    )
+    db = _RouteDb([ep])
+    router = model_routes.setup_model_routes(model_discovery=None)
+    live_models = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+    ]
+    calls = []
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "_auth_disabled", lambda: True)
+    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: base)
+    monkeypatch.setattr(threading, "Thread", _NoopThread)
+
+    def fake_probe(endpoint, timeout=5):
+        calls.append((endpoint.id, endpoint.provider_auth_id, timeout))
+        return live_models
+
+    monkeypatch.setattr(model_routes, "_probe_configured_endpoint", fake_probe)
+
+    result = _route_endpoint(router, "/api/models")(_route_request(), refresh=True)
+
+    assert calls and calls[0][0:2] == ("subscription", "auth-1")
+    assert result["items"][0]["models"] == live_models
+    assert result["items"][0]["model_reasoning_efforts"]["gpt-5.6-sol"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert result["items"][0]["model_default_reasoning_efforts"] == {
+        "gpt-5.6-sol": "low",
+        "gpt-5.6-terra": "medium",
+        "gpt-5.6-luna": "medium",
+        "gpt-5.5": "medium",
+    }
+    assert json.loads(ep.cached_models) == live_models
+    assert ep.model_refresh_mode == "auto"
 
 
 def test_background_refresh_failure_keeps_existing_cached_models(monkeypatch):

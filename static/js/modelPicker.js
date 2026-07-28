@@ -15,6 +15,7 @@ const API_BASE = window.location.origin;
 // favorite toggled here shows up there and vice-versa.
 const RECENT_KEY = 'odysseus-model-recent';
 const FAVORITES_KEY = 'odysseus-model-favorites';
+const REASONING_PREFS_KEY = 'odysseus-model-reasoning-efforts';
 const RECENT_MAX = 5;
 // Catalogs at or below this size are small enough that hiding everything
 // behind search would be a regression — keep listing them in browse mode.
@@ -85,6 +86,117 @@ let _deps = null;
 let _autoSelectingDefault = false;
 let _defaultChatPickInFlight = false;
 let _defaultPendingSeq = 0;
+
+function _loadReasoningPrefs() {
+  try {
+    const value = JSON.parse(localStorage.getItem(REASONING_PREFS_KEY) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function _currentModelRoute() {
+  if (!_deps) return { modelId: '', endpointId: '', url: '' };
+  const currentSessionId = _deps.getCurrentSessionId();
+  const sessions = _deps.getSessions();
+  const pending = _deps.getPendingChat();
+  const session = sessions.find(item => item.id === currentSessionId);
+  if (session && session.model) {
+    return {
+      modelId: session.model,
+      endpointId: session.endpoint_id || '',
+      url: session.endpoint_url || '',
+    };
+  }
+  return {
+    modelId: (pending && pending.modelId) || '',
+    endpointId: (pending && pending.endpointId) || '',
+    url: (pending && pending.url) || '',
+  };
+}
+
+function _reasoningPreferenceKey(route) {
+  const endpoint = route.endpointId || String(route.url || '').replace(/\/+$/, '');
+  return `${endpoint}::${route.modelId || ''}`;
+}
+
+function _reasoningCapability(route) {
+  if (!route.modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return null;
+  const routeUrl = String(route.url || '').replace(/\/+$/, '');
+  const items = window.modelsModule.getCachedItems() || [];
+  const item = items.find(candidate => {
+    const models = (candidate.models || []).concat(candidate.models_extra || []);
+    if (!models.includes(route.modelId)) return false;
+    if (route.endpointId) return candidate.endpoint_id === route.endpointId;
+    return !routeUrl || String(candidate.url || '').replace(/\/+$/, '') === routeUrl;
+  });
+  if (!item) return null;
+  const efforts = (item.model_reasoning_efforts || {})[route.modelId];
+  if (!Array.isArray(efforts) || !efforts.length) return null;
+  return {
+    efforts,
+    defaultEffort: (item.model_default_reasoning_efforts || {})[route.modelId] || '',
+  };
+}
+
+function _reasoningLabel(effort) {
+  const labels = {
+    low: 'Low',
+    medium: 'Medium',
+    high: 'High',
+    xhigh: 'Extra High',
+    max: 'Max',
+  };
+  return labels[effort] || effort;
+}
+
+function _syncReasoningPicker(route = _currentModelRoute()) {
+  const row = document.getElementById('model-picker-reasoning-row');
+  const select = document.getElementById('model-picker-reasoning');
+  const defaultLabel = document.getElementById('model-picker-reasoning-default');
+  const indicator = document.getElementById('model-picker-reasoning-indicator');
+  if (!row || !select || !defaultLabel || !indicator) return;
+  const capability = _reasoningCapability(route);
+  if (!capability) {
+    row.hidden = true;
+    indicator.hidden = true;
+    indicator.textContent = '';
+    return;
+  }
+  const prefs = _loadReasoningPrefs();
+  const key = _reasoningPreferenceKey(route);
+  let selected = String(prefs[key] || '').toLowerCase();
+  if (selected && !capability.efforts.includes(selected)) {
+    delete prefs[key];
+    selected = '';
+    try { localStorage.setItem(REASONING_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+  }
+  select.innerHTML = '';
+  const automatic = document.createElement('option');
+  automatic.value = '';
+  automatic.textContent = 'Automatic';
+  select.appendChild(automatic);
+  capability.efforts.forEach(effort => {
+    const option = document.createElement('option');
+    option.value = effort;
+    option.textContent = _reasoningLabel(effort);
+    select.appendChild(option);
+  });
+  select.value = selected;
+  defaultLabel.textContent = capability.defaultEffort ? `Default: ${capability.defaultEffort}` : '';
+  row.hidden = false;
+  indicator.textContent = `· ${selected || 'auto'}`;
+  indicator.hidden = false;
+}
+
+export function getSelectedReasoningEffort() {
+  const route = _currentModelRoute();
+  const capability = _reasoningCapability(route);
+  if (!capability) return '';
+  const selected = String(_loadReasoningPrefs()[_reasoningPreferenceKey(route)] || '').toLowerCase();
+  return capability.efforts.includes(selected) ? selected : '';
+}
 
 function _modelExists(modelId, url) {
   if (!modelId || !window.modelsModule || !window.modelsModule.getCachedItems) return false;
@@ -202,6 +314,7 @@ function _initModelPickerDropdown() {
   const listEl = document.getElementById('model-picker-list');
   const searchRow = menu ? menu.querySelector('.model-picker-search-row') : null;
   const refreshBtn = document.getElementById('model-picker-refresh-btn');
+  const reasoningSelect = document.getElementById('model-picker-reasoning');
   if (!wrap || !btn || !menu || !search || !listEl) return;
   if (wrap.dataset.modelPickerBound === '1') return;
   wrap.dataset.modelPickerBound = '1';
@@ -830,6 +943,26 @@ async function _pick(m) {
       }
     });
   }
+  if (reasoningSelect) {
+    reasoningSelect.addEventListener('click', (e) => e.stopPropagation());
+    reasoningSelect.addEventListener('change', () => {
+      const route = _currentModelRoute();
+      const capability = _reasoningCapability(route);
+      if (!capability) return;
+      const prefs = _loadReasoningPrefs();
+      const key = _reasoningPreferenceKey(route);
+      const selected = String(reasoningSelect.value || '').toLowerCase();
+      if (selected && capability.efforts.includes(selected)) prefs[key] = selected;
+      else delete prefs[key];
+      try { localStorage.setItem(REASONING_PREFS_KEY, JSON.stringify(prefs)); } catch {}
+      _syncReasoningPicker(route);
+      try {
+        document.dispatchEvent(new CustomEvent('odysseus:reasoning-effort-changed', {
+          detail: { model: route.modelId, effort: selected || 'auto' },
+        }));
+      } catch {}
+    });
+  }
   search.addEventListener('keydown', (e) => {
     _handlePickerKeydown(e, listEl, '.model-switch-item', _close);
   });
@@ -955,4 +1088,9 @@ export function updateModelPicker() {
   } else {
     label.textContent = displayName;
   }
+  _syncReasoningPicker({
+    modelId: modelId || '',
+    endpointId: (s && s.endpoint_id) || (_pendingChat && _pendingChat.endpointId) || '',
+    url: (s && s.endpoint_url) || (_pendingChat && _pendingChat.url) || '',
+  });
 }

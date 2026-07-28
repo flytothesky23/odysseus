@@ -85,7 +85,7 @@ def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
         ep.supports_tools = False
         ep.model_type = "llm"
         ep.endpoint_kind = "api"
-        ep.model_refresh_mode = "manual"
+        ep.model_refresh_mode = "auto"
         ep.cached_models = json.dumps(models)
         db.commit()
         result = {
