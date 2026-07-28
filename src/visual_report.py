@@ -598,12 +598,12 @@ body::after {{
 /* ── Layout ────────────────────────────────────────── */
 .layout {{
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 200px minmax(0, 1fr);
   max-width: calc(var(--max-w) + 260px);
   margin: 0 auto;
 }}
 @media (max-width: 900px) {{
-  .layout {{ grid-template-columns: 1fr; }}
+  .layout {{ grid-template-columns: minmax(0, 1fr); }}
   .toc-sidebar {{ display: none; }}
 }}
 
@@ -665,7 +665,13 @@ body::after {{
 .toc-sidebar nav a.depth-3:hover {{ padding-left: 1.45rem; }}
 
 /* ── Content ───────────────────────────────────────── */
-.content {{ max-width: var(--max-w); padding: 3rem 2.5rem 4rem; }}
+.content {{
+  width: 100%;
+  max-width: var(--max-w);
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 3rem 2.5rem 4rem;
+}}
 
 /* Display headings — Fraunces optical-size driven so they get more
    contrast and personality at the larger end. */
@@ -855,13 +861,22 @@ body::after {{
 /* ── Print ─────────────────────────────────────────── */
 @media print {{
   .toc-sidebar, .toolbar {{ display: none !important; }}
-  .layout {{ grid-template-columns: 1fr; }}
+  .layout {{ grid-template-columns: minmax(0, 1fr); }}
   .hero {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  .content,
+  .content h2, .content h3, .content p, .content ul, .content ol,
+  .content blockquote, .content table, .content pre, .section-image {{
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }}
+  .content {{ color: #111 !important; }}
 }}
 {category_css}
+{designed_css}
 </style>
 </head>
-<body class="{body_class}">
+<body class="{body_class}" data-report-style="{report_style}">
 
 <!-- Toolbar: Export + Restore hidden images -->
 <div class="toolbar">
@@ -1181,6 +1196,188 @@ if (document.body.classList.contains('category-comparison')) {{
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _designed_report_css(category: Optional[str]) -> str:
+    """Standalone editorial tokens layered over, never replacing, content flow."""
+    management = str(category or "").strip().lower() == "management"
+    accent = "#365b6d" if management else "#8a4f3d"
+    accent_soft = "#dbe7eb" if management else "#f1dfd7"
+    return f"""
+/* DESIGNED_REPORT_TOKENS */
+/* Offline editorial layer: typography, rhythm and navigation only.
+   It intentionally does not synthesize charts or restructure report prose. */
+body[data-report-style="designed"] {{
+  --accent: {accent};
+  --accent-light: {accent};
+  --accent-bg: color-mix(in srgb, {accent_soft} 72%, transparent);
+  --designed-paper: #f7f4ed;
+  --designed-ink: #1f2529;
+  --designed-rule: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: var(--designed-paper);
+  color: var(--designed-ink);
+  font-size: 17px;
+  line-height: 1.82;
+}}
+body[data-report-style="designed"]::before {{
+  animation: none;
+  filter: none;
+  background:
+    linear-gradient(90deg, transparent 0 7%, color-mix(in srgb, var(--accent) 5%, transparent) 7% 7.1%, transparent 7.1% 100%);
+}}
+body[data-report-style="designed"]::after {{
+  opacity: 0.018;
+  mix-blend-mode: multiply;
+}}
+body[data-report-style="designed"] .hero {{
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: clamp(5rem, 10vw, 8.5rem) 2rem 3.2rem;
+  text-align: left;
+}}
+body[data-report-style="designed"] .hero::before {{
+  background: none;
+  border-top: 5px solid var(--accent);
+  border-bottom: 1px solid var(--designed-rule);
+}}
+body[data-report-style="designed"] .hero::after {{
+  display: none;
+}}
+body[data-report-style="designed"] .hero-label {{
+  letter-spacing: 0.2em;
+  margin-bottom: 2.2rem;
+}}
+body[data-report-style="designed"] .hero h1 {{
+  max-width: 880px;
+  margin: 0;
+  font-size: clamp(2.35rem, 6vw, 4.8rem);
+  line-height: 1.04;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  hyphens: none;
+}}
+body[data-report-style="designed"] .stats-bar {{
+  max-width: 1040px;
+  margin-inline: auto;
+  border-block: 1px solid var(--designed-rule);
+  background: transparent;
+}}
+body[data-report-style="designed"] .layout {{
+  max-width: 1180px;
+  gap: clamp(2rem, 5vw, 5rem);
+}}
+body[data-report-style="designed"] .toc-sidebar nav {{
+  border-left: 2px solid var(--designed-rule);
+  padding-left: 1rem;
+}}
+body[data-report-style="designed"] .content {{
+  max-width: 780px;
+}}
+body[data-report-style="designed"] .content h2 {{
+  margin-top: 3.8rem;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--accent);
+  border-bottom: 0;
+  font-size: clamp(1.55rem, 3vw, 2.15rem);
+  letter-spacing: -0.025em;
+}}
+body[data-report-style="designed"] .content h3 {{
+  margin-top: 2.4rem;
+  color: color-mix(in srgb, var(--designed-ink) 82%, var(--accent));
+}}
+body[data-report-style="designed"] .content p {{
+  text-wrap: pretty;
+}}
+body[data-report-style="designed"] .content blockquote {{
+  margin: 2rem 0;
+  padding: 1.3rem 1.4rem;
+  border-left: 4px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-bg) 72%, transparent);
+  border-radius: 0;
+}}
+body[data-report-style="designed"] .content table {{
+  background: #fffdf8;
+}}
+body[data-report-style="designed"] .content th {{
+  background: color-mix(in srgb, var(--accent) 10%, #fffdf8);
+}}
+body[data-report-style="designed"].category-management .content h2,
+body[data-report-style="designed"].category-management .content h3 {{
+  display: block;
+  padding-left: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}}
+body[data-report-style="designed"].category-management .content table {{
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}}
+body[data-report-style="designed"].category-management .content th,
+body[data-report-style="designed"].category-management .content td {{
+  word-break: keep-all;
+  overflow-wrap: normal;
+}}
+body[data-report-style="designed"] .chat-cta {{
+  background: transparent;
+  border-radius: 0;
+  border-inline: 0;
+}}
+@media (max-width: 720px) {{
+  body[data-report-style="designed"] {{
+    font-size: 16px;
+  }}
+  body[data-report-style="designed"] .hero {{
+    padding: 5rem 1.25rem 2.4rem;
+  }}
+  body[data-report-style="designed"] .hero h1 {{
+    font-size: clamp(1.85rem, 10vw, 2.8rem);
+    line-height: 1.12;
+    letter-spacing: -0.035em;
+  }}
+  body[data-report-style="designed"] .content {{
+    max-width: none;
+  }}
+}}
+@media print {{
+  body[data-report-style="designed"],
+  body[data-report-style="designed"]::before,
+  body[data-report-style="designed"]::after {{
+    background: #fff !important;
+    color: #111 !important;
+  }}
+  body[data-report-style="designed"] .hero {{
+    padding: 1.5rem 0 1.25rem;
+    break-after: avoid;
+  }}
+  body[data-report-style="designed"] .hero::before {{
+    border-top-color: #111;
+  }}
+  body[data-report-style="designed"] .layout {{
+    display: block;
+    width: 100%;
+    max-width: none;
+  }}
+  body[data-report-style="designed"] .content {{
+    width: 100%;
+    max-width: none;
+    padding: 0;
+  }}
+  body[data-report-style="designed"] .content h2 {{
+    break-after: avoid;
+  }}
+  body[data-report-style="designed"] .table-scroll {{
+    overflow: visible;
+    break-inside: auto;
+  }}
+  body[data-report-style="designed"] .content table {{
+    font-size: 9pt;
+  }}
+}}
+"""
+
 
 def _category_css(category: Optional[str]) -> str:
     if not category:
@@ -1791,6 +1988,22 @@ body.category-management .content td:first-child {
 .category-management .content h2 + p {
   margin-top:0.8rem;
 }
+@media print {
+  .category-management .layout {
+    display:block; width:100%; max-width:none;
+  }
+  .category-management .content {
+    width:100%; max-width:none; padding:0;
+  }
+  .category-management .content table {
+    width:100% !important; min-width:0 !important;
+    table-layout:auto; font-size:7.5pt;
+  }
+  .category-management .content th,
+  .category-management .content td {
+    min-width:0 !important; padding:4pt 5pt;
+  }
+}
 """,
     }
     # Always emit the per-category palette block when ANY category is set —
@@ -1861,10 +2074,14 @@ def generate_visual_report(
     category: Optional[str] = None,
     session_id: Optional[str] = None,
     hidden_images: Optional[List[str]] = None,
+    report_style: str = "legacy",
+    research_mode: str = "research",
 ) -> str:
     sources = sources or []
     stats = stats or {}
     hidden_images_set = set(hidden_images or [])
+    report_style = "designed" if str(report_style or "").strip().lower() == "designed" else "legacy"
+    research_mode = "editorial" if str(research_mode or "").strip().lower() == "editorial" else "research"
 
     # Strip thinking artifacts
     report_markdown = strip_thinking(report_markdown)
@@ -1905,6 +2122,11 @@ def generate_visual_report(
             and not _is_icon_or_logo_url(img)):
             _seen_images.add(img)
             all_images.append(img)
+    if report_style == "designed":
+        # The designed artifact is standalone/offline. Remote preview images
+        # belong to the legacy report until an explicitly generated local
+        # asset pipeline is available and verified.
+        all_images = []
 
     # Hero image = first available. data-img-url drives the per-image hide
     # button rendered by the script at the bottom of the page.
@@ -2040,8 +2262,24 @@ def generate_visual_report(
         chat_cta_html=chat_cta_html,
         restore_btn_html=restore_btn_html,
         timestamp=timestamp,
+        designed_css=_designed_report_css(category) if report_style == "designed" else "",
         category_css=_category_css(category),
-        body_class=f"category-{html.escape(str(category))}" if category else "",
+        body_class=" ".join(
+            part
+            for part in (
+                f"category-{html.escape(str(category))}" if category else "",
+                "workflow-editorial" if research_mode == "editorial" else "",
+                (
+                    "designed-profile-briefing"
+                    if report_style == "designed" and str(category or "").strip().lower() == "management"
+                    else "designed-profile-editorial"
+                    if report_style == "designed"
+                    else ""
+                ),
+            )
+            if part
+        ),
+        report_style=report_style,
         session_id_js=json_dumps_str(session_id or ""),
         spare_images_js=_json_for_script(spare_images),
     )

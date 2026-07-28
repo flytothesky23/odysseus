@@ -16,7 +16,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 from core.middleware import INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
-from src.research_handler import normalize_artifact_formats, normalize_reasoning_effort
+from src.research_handler import (
+    normalize_artifact_formats,
+    normalize_reasoning_effort,
+    normalize_research_mode,
+)
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
 from src.constants import DEEP_RESEARCH_DIR
@@ -294,6 +298,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "started_at": entry.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
+                    "research_mode": normalize_research_mode(entry.get("research_mode")),
                 })
         return {"active": active}
 
@@ -335,6 +340,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "sources": sources,
             "raw_findings": raw_findings,
             "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
+            "research_mode": normalize_research_mode(task.get("research_mode")),
         }
 
     def _assert_owns_research(session_id: str, user: str) -> None:
@@ -369,6 +375,21 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if html_content is None:
             logger.warning(f"No report data found for session {session_id}")
             raise HTTPException(404, "No visual report available for this session")
+        return HTMLResponse(content=html_content)
+
+    @router.get("/api/research/report/{session_id}/designed")
+    async def research_report_designed(session_id: str, request: Request):
+        """Serve the independent, offline designed HTML artifact."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        try:
+            html_content = research_handler.get_report_html(session_id, report_style="designed")
+        except Exception as e:
+            logger.error(f"Designed report generation error: {e}", exc_info=True)
+            raise HTTPException(500, f"Report generation failed: {e}")
+        if html_content is None:
+            raise HTTPException(404, "No designed report available for this session")
         return HTMLResponse(content=html_content)
 
     @router.get("/api/research/report/{session_id}/markdown")
@@ -479,6 +500,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "rounds": d.get("stats", {}).get("Rounds", ""),
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
+                    "research_mode": normalize_research_mode(d.get("research_mode")),
                     "started_at": d.get("started_at", 0),
                     "completed_at": d.get("completed_at", 0),
                     "archived": bool(d.get("archived")),
@@ -609,13 +631,23 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
     async def research_remove_local_knowledge_folder(root_id: str, request: Request):
         """Remove a configured local knowledge folder without touching files on disk."""
         _require_admin_user(request)
-        from src.knowledge_base import remove_local_knowledge_root
+        from src.knowledge_base import prune_removed_knowledge_roots, remove_local_knowledge_root
 
         if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", root_id or ""):
             raise HTTPException(400, "Invalid local folder id")
         removed = remove_local_knowledge_root(root_id)
         if not removed:
             raise HTTPException(404, "Local knowledge folder not found")
+        pruned_chunks = 0
+        try:
+            from src.rag_singleton import get_rag_manager
+            rag = get_rag_manager()
+            if rag is not None:
+                pruned_chunks = prune_removed_knowledge_roots(rag)
+        except Exception:
+            logger.warning("Removed knowledge root but stale-index pruning failed", exc_info=True)
+        if pruned_chunks:
+            logger.info("Pruned %s stale knowledge source(s) after root removal", pruned_chunks)
         return {"ok": True, "removed": True}
 
     @router.post("/api/research/knowledge/local-folders/pick")
@@ -668,6 +700,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         knowledge_folders: List[str] = Field(default_factory=list)
         artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
         reasoning_effort: Optional[str] = None
+        research_mode: Optional[str] = None
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -745,6 +778,18 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                 ep_model = body.model
 
         requested_source_mode = body.source_mode or get_setting("research_source_mode", "web")
+        research_mode = normalize_research_mode(body.research_mode)
+        if research_mode == "editorial":
+            if normalize_source_mode(requested_source_mode) != "knowledge":
+                raise HTTPException(
+                    400,
+                    "로컬 근거 기반 심층보고서는 로컬/Obsidian 전용 소스 모드에서만 실행할 수 있습니다.",
+                )
+            if not body.knowledge_folders:
+                raise HTTPException(
+                    400,
+                    "로컬 근거 기반 심층보고서에 사용할 폴더 또는 노트 소스를 명시적으로 선택하세요.",
+                )
         if normalize_source_mode(requested_source_mode) in {"hybrid", "knowledge"}:
             _require_admin_user(request)
         try:
@@ -775,6 +820,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             extraction_concurrency=body.extraction_concurrency,
             artifact_formats=artifact_formats,
             reasoning_effort=reasoning_effort,
+            research_mode=research_mode,
             owner=user,
         )
         return {
@@ -783,6 +829,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "query": body.query,
             "artifact_formats": artifact_formats,
             "reasoning_effort": reasoning_effort,
+            "research_mode": research_mode,
         }
 
     @router.get("/api/research/stream/{session_id}")
@@ -837,6 +884,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "category": d.get("category") or "",
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
+                    "research_mode": normalize_research_mode(d.get("research_mode")),
                 }
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
@@ -849,6 +897,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "category": "",
             "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
             "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
+            "research_mode": normalize_research_mode(task.get("research_mode")),
         }
 
     @router.post("/api/research/spinoff/{session_id}")

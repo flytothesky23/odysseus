@@ -79,6 +79,7 @@ function _saveSettingsToStorage() {
     localStorage.setItem(_SETTINGS_KEY, JSON.stringify({
       max_rounds: document.getElementById('research-rounds')?.value || '0',
       search_provider: document.getElementById('research-search-provider')?.value || '',
+      research_mode: document.getElementById('research-mode')?.value || 'research',
       source_mode: document.getElementById('research-source-mode')?.value || '',
       knowledge_folders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map(o => o.value).filter(Boolean),
       endpoint_id: document.getElementById('research-endpoint')?.value || '',
@@ -104,6 +105,8 @@ function _normalizeArtifactFormats(formats) {
     const key = String(fmt || '').trim().toLowerCase().replace(/[-+]/g, '_');
     const mapped = (key === 'md' || key === 'markdown' || key === 'json' || key === 'markdown_json' || key === 'md_json')
       ? 'md_json'
+      : (key === 'designed' || key === 'designed_html' || key === 'html_designed' || key === 'design_html')
+        ? 'html_designed'
       : (key === 'html' || key === 'visual' || key === 'visual_report')
         ? 'html'
         : '';
@@ -141,7 +144,7 @@ function _jobArtifactFormats(job) {
 }
 
 function _artifactUrl(jobId, kind, download = false) {
-  const suffix = kind === 'json' ? 'session.json' : 'markdown';
+  const suffix = kind === 'json' ? 'session.json' : kind === 'html_designed' ? 'designed' : 'markdown';
   return `${_apiBase}/api/research/report/${jobId}/${suffix}${download ? '?download=1' : ''}`;
 }
 
@@ -149,6 +152,8 @@ function _openPreferredArtifact(job) {
   const formats = _jobArtifactFormats(job);
   if (formats.includes('html')) {
     window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+  } else if (formats.includes('html_designed')) {
+    window.open(_artifactUrl(job.id, 'html_designed'), '_blank');
   } else if (formats.includes('md_json')) {
     window.open(_artifactUrl(job.id, 'markdown', true), '_blank');
   }
@@ -447,7 +452,7 @@ function _buildPanelHTML() {
           <h2 style="margin:0;padding:0;line-height:1;display:inline-flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent, var(--red))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M6 18h8"/><path d="M3 22h18"/><path d="M14 22a7 7 0 1 0 0-14h-1"/><path d="M9 14h2"/><path d="M9 12a2 2 0 0 1-2-2V6h4v4a2 2 0 0 1-2 2Z"/><path d="M12 6V3a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3"/></svg>Research <span id="research-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
         </div>
         <p class="memory-desc doclib-desc" style="margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <span>Multi-step web research with an LLM-in-the-loop agent</span>
+          <span id="research-workflow-desc">Multi-step web research with an LLM-in-the-loop agent</span>
           <span id="research-no-past-hint" style="display:none;font:inherit;opacity:1;position:static;">All past research found in: <button type="button" class="research-library-link" style="background:none;border:none;padding:0;font:inherit;color:var(--accent, var(--red));cursor:pointer;text-decoration:underline;">Library, Research</button></span>
         </p>
         <textarea id="research-query" class="research-query" placeholder="${_pickResearchHint()}" rows="4"></textarea>
@@ -473,6 +478,13 @@ function _buildPanelHTML() {
           <label class="research-setting">
             <span class="research-setting-label">Search engine</span>
             <select id="research-search-provider">${providerOpts}</select>
+          </label>
+          <label class="research-setting">
+            <span class="research-setting-label">워크플로 <span class="hwfit-help-chip hwfit-help-chip-inline" title="로컬 근거 기반 심층보고서는 선택한 자료만 반복 검색·대조하고 outline→draft→critic→rewrite→citation audit 공정으로 작성합니다.">?</span></span>
+            <select id="research-mode">
+              <option value="research" selected>기본 Deep Research</option>
+              <option value="editorial">로컬 근거 기반 심층보고서</option>
+            </select>
           </label>
           <label class="research-setting">
             <span class="research-setting-label">소스</span>
@@ -502,7 +514,11 @@ function _buildPanelHTML() {
               <div class="research-output-formats" id="research-output-formats">
                 <label class="research-output-choice" title="기존 시각화 HTML 리포트">
                   <input id="research-output-html" type="checkbox" name="research-output-format" value="html" checked>
-                  <span>HTML</span>
+                  <span>Legacy HTML</span>
+                </label>
+                <label class="research-output-choice" title="오프라인 standalone 편집 디자인 HTML">
+                  <input id="research-output-html-designed" type="checkbox" name="research-output-format" value="html_designed">
+                  <span>Design HTML</span>
                 </label>
                 <label class="research-output-choice" title="Obsidian용 Markdown과 재현 가능한 세션 JSON">
                   <input id="research-output-md-json" type="checkbox" name="research-output-format" value="md_json">
@@ -510,7 +526,7 @@ function _buildPanelHTML() {
                 </label>
               </div>
             </div>
-            <span class="research-setting-hint">최소 하나의 결과물을 선택합니다. MD+JSON은 Markdown과 세션 JSON 다운로드를 함께 엽니다.</span>
+            <span class="research-setting-hint">Legacy HTML 계약은 그대로 유지됩니다. Design HTML은 별도 standalone 결과물입니다.</span>
           </div>
           <div class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
             <div class="research-knowledge-source-header">
@@ -593,7 +609,11 @@ function _wireEvents(pane) {
   const endpointSelect = pane.querySelector('#research-endpoint');
   endpointSelect.addEventListener('change', () => _populateModels(endpointSelect.value));
   pane.querySelector('#research-source-mode')?.addEventListener('change', () => {
-    _syncKnowledgeControls();
+    _syncResearchWorkflowControls();
+    _saveSettingsToStorage();
+  });
+  pane.querySelector('#research-mode')?.addEventListener('change', () => {
+    _syncResearchWorkflowControls();
     _saveSettingsToStorage();
   });
   pane.querySelector('#research-reasoning-effort')?.addEventListener('change', _saveSettingsToStorage);
@@ -610,11 +630,12 @@ function _wireEvents(pane) {
   });
 
   _renderJobs();
-  _loadKnowledgeOptions().then(_syncKnowledgeControls);
+  _loadKnowledgeOptions().then(_syncResearchWorkflowControls);
 }
 
 function _readSettings() {
   const category = document.getElementById('research-category')?.value || undefined;
+  const researchMode = document.getElementById('research-mode')?.value || 'research';
   const sourceMode = document.getElementById('research-source-mode')?.value || undefined;
   const knowledgeFolders = Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || [])
     .map(o => o.value)
@@ -622,6 +643,7 @@ function _readSettings() {
   const settings = {
     max_rounds: parseInt(document.getElementById('research-rounds')?.value || '0', 10),
     search_provider: document.getElementById('research-search-provider')?.value || undefined,
+    research_mode: researchMode,
     source_mode: sourceMode || undefined,
     knowledge_folders: knowledgeFolders.length ? knowledgeFolders : undefined,
     endpoint_id: document.getElementById('research-endpoint')?.value || undefined,
@@ -641,12 +663,27 @@ function _readSettings() {
   return settings;
 }
 
+function _validateResearchWorkflow(settings) {
+  if (settings?.research_mode !== 'editorial') return true;
+  if (!['local', 'obsidian'].includes(settings.source_mode || '')) {
+    _showResearchUiError('로컬 근거 기반 심층보고서는 웹이 섞이지 않는 로컬 지식만 또는 Obsidian만 모드를 선택해야 합니다.');
+    return false;
+  }
+  if (!Array.isArray(settings.knowledge_folders) || settings.knowledge_folders.length === 0) {
+    _showResearchUiError('보고서 근거로 사용할 폴더 또는 노트를 명시적으로 선택하세요.');
+    return false;
+  }
+  return true;
+}
+
 function _handleAdd() {
   const queryEl = document.getElementById('research-query');
   const query = (queryEl?.value || '').trim();
   if (!query) { queryEl?.focus(); return; }
+  const settings = _readSettings();
+  if (!_validateResearchWorkflow(settings)) return;
   _saveSettingsToStorage();
-  jobs.addToQueue(query, _readSettings());
+  jobs.addToQueue(query, settings);
   queryEl.value = '';
   queryEl.focus();
 }
@@ -671,6 +708,8 @@ function _editJob(job) {
   if (spEl && s.search_provider) spEl.value = s.search_provider;
   const sourceEl = document.getElementById('research-source-mode');
   if (sourceEl && s.source_mode) sourceEl.value = s.source_mode;
+  const workflowEl = document.getElementById('research-mode');
+  if (workflowEl) workflowEl.value = s.research_mode || job.research_mode || 'research';
   const folderEl = document.getElementById('research-knowledge-folders');
   if (folderEl && Array.isArray(s.knowledge_folders)) {
     Array.from(folderEl.options).forEach(opt => { opt.selected = s.knowledge_folders.includes(opt.value); });
@@ -682,7 +721,7 @@ function _editJob(job) {
   const effortEl = document.getElementById('research-reasoning-effort');
   if (effortEl) effortEl.value = s.reasoning_effort || '';
   if (s.artifact_formats) _applyArtifactFormats(s.artifact_formats);
-  _syncKnowledgeControls();
+  _syncResearchWorkflowControls();
   // Remove the old job so clicking Start/Queue makes a fresh one
   jobs.removeJob(job.id);
   // Scroll the form into view
@@ -699,7 +738,13 @@ async function _handleStart() {
   // it joins the batch, then open the picker anchored to this button.
   const queuedCount = jobs.getJobs().filter(j => j.status === 'queued').length;
   if (queuedCount > 1) {
-    if (query) { _saveSettingsToStorage(); jobs.addToQueue(query, _readSettings()); queryEl.value = ''; }
+    if (query) {
+      const settings = _readSettings();
+      if (!_validateResearchWorkflow(settings)) return;
+      _saveSettingsToStorage();
+      jobs.addToQueue(query, settings);
+      queryEl.value = '';
+    }
     _resetCategoryToAuto();
     if (window.innerWidth <= 768) _dismissKeyboard(queryEl);
     const total = jobs.getJobs().filter(j => j.status === 'queued').length;
@@ -745,6 +790,7 @@ async function _handleStart() {
   }
   _saveSettingsToStorage();
   const settings = _readSettings();
+  if (!_validateResearchWorkflow(settings)) return;
   queryEl.value = '';
   // Mobile: drop the keyboard after sending; desktop: keep focus for fast follow-ups.
   if (_mobile) _dismissKeyboard(queryEl); else queryEl.focus();
@@ -768,6 +814,8 @@ function _restoreSavedSettings() {
   if (search && saved.search_provider !== undefined) search.value = saved.search_provider;
   const source = document.getElementById('research-source-mode');
   if (source && saved.source_mode !== undefined) source.value = saved.source_mode;
+  const workflow = document.getElementById('research-mode');
+  if (workflow && saved.research_mode !== undefined) workflow.value = saved.research_mode || 'research';
   const folders = document.getElementById('research-knowledge-folders');
   if (folders && Array.isArray(saved.knowledge_folders)) {
     Array.from(folders.options).forEach(opt => {
@@ -777,7 +825,7 @@ function _restoreSavedSettings() {
   const effort = document.getElementById('research-reasoning-effort');
   if (effort && saved.reasoning_effort !== undefined) effort.value = saved.reasoning_effort || '';
   if (saved.artifact_formats) _applyArtifactFormats(saved.artifact_formats);
-  _syncKnowledgeControls();
+  _syncResearchWorkflowControls();
   const ep = document.getElementById('research-endpoint');
   if (ep && saved.endpoint_id) {
     ep.value = saved.endpoint_id;
@@ -959,6 +1007,30 @@ function _syncKnowledgeControls() {
   const usesKnowledge = ['local', 'web_local', 'obsidian', 'web_obsidian', 'web_all'].includes(mode);
   row.style.display = usesKnowledge ? '' : 'none';
   if (folderSel) folderSel.disabled = usesKnowledge && !_knowledgeConfig.configured;
+}
+
+function _syncResearchWorkflowControls() {
+  const workflow = document.getElementById('research-mode')?.value || 'research';
+  const sourceSel = document.getElementById('research-source-mode');
+  const providerSel = document.getElementById('research-search-provider');
+  const desc = document.getElementById('research-workflow-desc');
+  if (workflow === 'editorial') {
+    if (sourceSel && !['local', 'obsidian'].includes(sourceSel.value)) {
+      const hasObsidian = _knowledgeConfig.folders.some(f => f?.source_kind === 'obsidian');
+      sourceSel.value = hasObsidian ? 'obsidian' : 'local';
+    }
+    if (providerSel) {
+      providerSel.value = '';
+      providerSel.disabled = true;
+    }
+    if (desc) {
+      desc.textContent = '선택한 로컬 근거만 반복 검색·대조하는 Research-grade Editorial Synthesis';
+    }
+  } else {
+    if (providerSel) providerSel.disabled = false;
+    if (desc) desc.textContent = 'Multi-step web research with an LLM-in-the-loop agent';
+  }
+  _syncKnowledgeControls();
 }
 
 // ── Job rendering ──
@@ -1309,7 +1381,10 @@ function _buildJobCard(job) {
     const artifactButtons = [
       thumbnail,
       artifactFormats.includes('html')
-        ? `<button class="research-job-action research-job-action-report" data-action="report" title="Visual report">${_externalIcon} Visual Report</button>`
+        ? `<button class="research-job-action research-job-action-report" data-action="report" title="기존 HTML 보고서">${_externalIcon} Legacy HTML</button>`
+        : '',
+      artifactFormats.includes('html_designed')
+        ? `<button class="research-job-action research-job-action-report" data-action="report-designed" title="오프라인 디자인 HTML 보고서">${_externalIcon} Design HTML</button>`
         : '',
       artifactFormats.includes('md_json')
         ? `<button class="research-job-action research-job-action-markdown" data-action="markdown" title="Markdown 내려받기">${_externalIcon} Markdown</button>`
@@ -1349,6 +1424,10 @@ function _buildJobCard(job) {
     card.querySelector('[data-action="report"]')?.addEventListener('click', (e) => {
       e.stopPropagation();
       window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+    });
+    card.querySelector('[data-action="report-designed"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.open(_artifactUrl(job.id, 'html_designed'), '_blank');
     });
     card.querySelector('[data-action="markdown"]')?.addEventListener('click', (e) => {
       e.stopPropagation();

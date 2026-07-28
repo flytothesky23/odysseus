@@ -55,3 +55,29 @@ def test_no_owner_filter_returns_all():
     results = store._keyword_search_fallback("shared note", k=10, owner=None)
     ids = {r["id"] for r in results}
     assert ids == {"a", "c"}     # no owner requested → no filtering
+
+
+def test_keyword_fallback_applies_selected_root_filter_before_ranking():
+    docs = [
+        (
+            f"noise-{i}",
+            "answer answer answer distractor",
+            {"owner": "alice", "knowledge_source_token": "local:noise"},
+        )
+        for i in range(100)
+    ]
+    docs.append((
+        "selected",
+        "answer selected evidence",
+        {"owner": "alice", "knowledge_source_token": "local:selected"},
+    ))
+    store = _store(docs)
+
+    results = store._keyword_search_fallback(
+        "answer",
+        k=5,
+        owner="alice",
+        where={"knowledge_source_token": {"$in": ["local:selected"]}},
+    )
+
+    assert [result["id"] for result in results] == ["selected"]

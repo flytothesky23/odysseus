@@ -45,14 +45,83 @@ KEYWORD_WEIGHT = 0.3
 COLLECTION_NAME = "odysseus_rag"
 
 
-def _generate_doc_id(text: str, owner: str = "") -> str:
+def _generate_doc_id(text: str, owner: str = "", document_key: str = "") -> str:
     # Owner-scope the id so two owners can index byte-identical chunks
     # without the second one's add early-returning on the first's id and
     # being silently dropped from their owner-filtered search results.
     # Empty owner reproduces the legacy text-only id so the unowned/base
     # index keeps its existing ids and isn't re-churned.
-    key = f"{owner}\x00{text}" if owner else text
+    identity = str(document_key or text)
+    key = f"{owner}\x00{identity}" if owner else identity
     return f"doc_{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _combine_where(owner: Optional[str], where: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Combine owner isolation with a caller-provided metadata filter."""
+    clauses: List[Dict[str, Any]] = []
+    if owner:
+        clauses.append({"owner": owner})
+    if where:
+        clauses.append(where)
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
+def _metadata_matches_where(metadata: Dict[str, Any], where: Optional[Dict[str, Any]]) -> bool:
+    """Apply the supported Chroma metadata predicate subset in local fallback."""
+    if not where:
+        return True
+    if not isinstance(metadata, dict) or not isinstance(where, dict):
+        return False
+    if "$and" in where:
+        clauses = where.get("$and")
+        return isinstance(clauses, list) and all(
+            _metadata_matches_where(metadata, clause) for clause in clauses
+        )
+    if "$or" in where:
+        clauses = where.get("$or")
+        return isinstance(clauses, list) and any(
+            _metadata_matches_where(metadata, clause) for clause in clauses
+        )
+
+    for key, expected in where.items():
+        if key.startswith("$"):
+            return False
+        actual = metadata.get(key)
+        if isinstance(expected, dict):
+            for operator, operand in expected.items():
+                if operator == "$in":
+                    if not isinstance(operand, list) or actual not in operand:
+                        return False
+                elif operator == "$nin":
+                    if not isinstance(operand, list) or actual in operand:
+                        return False
+                elif operator == "$eq":
+                    if actual != operand:
+                        return False
+                elif operator == "$ne":
+                    if actual == operand:
+                        return False
+                elif operator in {"$gt", "$gte", "$lt", "$lte"}:
+                    try:
+                        if operator == "$gt" and not actual > operand:
+                            return False
+                        if operator == "$gte" and not actual >= operand:
+                            return False
+                        if operator == "$lt" and not actual < operand:
+                            return False
+                        if operator == "$lte" and not actual <= operand:
+                            return False
+                    except TypeError:
+                        return False
+                else:
+                    return False
+        elif actual != expected:
+            return False
+    return True
 
 
 def _rewrite_owner_path(value: str, path_map: Dict[str, str], path_prefixes: List[tuple]) -> str:
@@ -188,7 +257,11 @@ class VectorRAG:
         if not metadata or not isinstance(metadata, dict):
             return False
 
-        doc_id = _generate_doc_id(text, metadata.get("owner") or "")
+        doc_id = _generate_doc_id(
+            text,
+            metadata.get("owner") or "",
+            metadata.get("document_key") or "",
+        )
         wrote = False
         for lane in self._lanes:
             try:
@@ -224,7 +297,14 @@ class VectorRAG:
         attempted_new = False
         write_failed = False
         for lane in self._lanes:
-            all_ids = [_generate_doc_id(t, m.get("owner") or "") for t, m in valid]
+            all_ids = [
+                _generate_doc_id(
+                    t,
+                    m.get("owner") or "",
+                    m.get("document_key") or "",
+                )
+                for t, m in valid
+            ]
             try:
                 existing = lane.collection.get(ids=all_ids)
                 existing_ids = set(existing.get("ids") or [])
@@ -345,7 +425,13 @@ class VectorRAG:
     # Search — hybrid: vector similarity + keyword overlap
     # ------------------------------------------------------------------
 
-    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         if not self.healthy:
             return []
         if not query or not isinstance(query, str):
@@ -354,7 +440,7 @@ class VectorRAG:
             return []
 
         try:
-            where_filter = {"owner": owner} if owner else None
+            where_filter = _combine_where(owner, where)
             query_words = set(query.lower().split())
             candidates = []
 
@@ -362,7 +448,7 @@ class VectorRAG:
                 self._lanes,
                 query,
                 n_results=lambda lane: min(
-                    (k * 6 if owner else k * 3),
+                    (k * 6 if (owner or where) else k * 3),
                     max(k, 20),
                     lane.count(),
                 ),
@@ -400,9 +486,15 @@ class VectorRAG:
 
         except Exception as e:
             logger.error(f"search failed: {e}")
-            return self._keyword_search_fallback(query, k, owner=owner)
+            return self._keyword_search_fallback(query, k, owner=owner, where=where)
 
-    def _keyword_search_fallback(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _keyword_search_fallback(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         try:
             if not self._active_collections():
                 return []
@@ -418,6 +510,8 @@ class VectorRAG:
                 for i, doc in enumerate(all_docs["documents"]):
                     meta = all_docs["metadatas"][i]
                     if owner and meta.get("owner") != owner:
+                        continue
+                    if not _metadata_matches_where(meta, where):
                         continue
                     doc_lower = doc.lower()
                     score = sum(1 for w in query_words if w in doc_lower)
@@ -675,7 +769,7 @@ class VectorRAG:
     # Delete by metadata
     # ------------------------------------------------------------------
 
-    def delete_by_source(self, source: str) -> int:
+    def delete_by_source(self, source: str, owner: Optional[str] = None) -> int:
         """Remove all chunks whose metadata['source'] matches *source*.
         Returns the number of removed chunks."""
         if not self.healthy:
@@ -684,14 +778,19 @@ class VectorRAG:
             removed_ids = set()
             for _lane_name, collection in self._collections_for_delete():
                 results = collection.get(
-                    where={"source": source},
+                    where=_combine_where(owner, {"source": source}),
                     include=[],
                 )
                 ids = results.get("ids", [])
                 if ids:
                     collection.delete(ids=ids)
                     removed_ids.update(ids)
-            logger.info(f"Deleted {len(removed_ids)} chunks for source={source}")
+            logger.info(
+                "Deleted %s chunks for source=%s owner=%s",
+                len(removed_ids),
+                source,
+                owner or "*",
+            )
             return len(removed_ids)
         except Exception as e:
             logger.error(f"delete_by_source failed: {e}")

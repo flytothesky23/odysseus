@@ -55,6 +55,10 @@ def test_management_visual_report_uses_wide_scrollable_tables():
     soup = BeautifulSoup(html, "html.parser")
 
     assert soup.select_one(".table-scroll table") is not None
+    assert "grid-template-columns: 200px minmax(0, 1fr)" in html
+    assert "grid-template-columns: minmax(0, 1fr)" in html
+    assert "min-width: 0;" in html
+    assert "box-sizing: border-box;" in html
     first_list = soup.select_one(".content > ul")
     assert first_list is not None
     assert len(first_list.select(":scope > li")) == 2
@@ -66,3 +70,35 @@ def test_management_visual_report_uses_wide_scrollable_tables():
     assert "body.category-management::before" not in html
     assert "background:var(--accent); color:#fff" not in html
     assert "body.category-management .content h3 {" not in html
+
+
+def test_designed_management_report_preserves_document_flow_and_print_tables():
+    html = generate_visual_report(
+        "월간 운영 경영분석",
+        (
+            "## 경영 요약\n\n"
+            "전통적인 문단 흐름을 유지하는 경영 보고서입니다.\n\n"
+            "## 넓은 운영 표\n\n"
+            "| 기간 | 지표 | 기준 | 결과 | 판단 | 근거 | 후속 조치 |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| 2026-07 | 물량 | 전월 | 120T | 증가 | 내부 집계 | 재확인 |\n"
+        ),
+        category="management",
+        report_style="designed",
+    )
+    soup = BeautifulSoup(html, "html.parser")
+
+    assert soup.body["data-report-style"] == "designed"
+    assert "designed-profile-briefing" in soup.body.get("class", [])
+    assert soup.select_one(".content > h2") is not None
+    assert soup.select_one(".table-scroll table") is not None
+    assert "display: grid" not in html.split("/* DESIGNED_REPORT_TOKENS */", 1)[-1]
+    assert "@media print" in html
+    assert "overflow-x: auto" in html
+    assert "word-break: keep-all" in html
+    assert "overflow-wrap: anywhere" in html
+    assert "hyphens: none" in html
+    assert "display: block;" in html
+    assert "width:100% !important; min-width:0 !important;" in html
+    assert "animation: none !important;" in html
+    assert "color: #111 !important;" in html

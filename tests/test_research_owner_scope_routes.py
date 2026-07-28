@@ -108,6 +108,22 @@ def test_report_rejects_null_owner_before_generating_html(tmp_path, monkeypatch)
     handler.get_report_html.assert_not_called()
 
 
+def test_designed_report_rejects_cross_owner_before_generating_html(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "bob-designed", owner="bob", result="bob secret")
+
+    handler = _research_handler()
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/report/{session_id}/designed", "GET")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(session_id="bob-designed", request=_request("alice")))
+
+    assert exc.value.status_code == 404
+    handler.get_report_html.assert_not_called()
+
+
 def test_archive_rejects_cross_owner_without_mutating_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"
@@ -204,3 +220,35 @@ def test_knowledge_settings_rejects_non_admin():
         asyncio.run(target(request=_request("alice")))
 
     assert exc.value.status_code == 403
+
+
+def test_editorial_start_rejects_web_or_implicit_all_roots(monkeypatch):
+    handler = _research_handler()
+    monkeypatch.setattr(
+        "routes.research_routes.resolve_endpoint",
+        lambda *_args, **_kwargs: ("http://fake.invalid/v1/chat/completions", "fake", {}),
+    )
+    monkeypatch.setattr("src.auth_helpers.require_privilege", lambda _request, _name: "alice")
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/start", "POST")
+    request_type = target.__annotations__["body"]
+
+    for body in (
+        request_type(
+            query="private report",
+            research_mode="editorial",
+            source_mode="web",
+            knowledge_folders=["obsidian:project"],
+        ),
+        request_type(
+            query="private report",
+            research_mode="editorial",
+            source_mode="obsidian",
+            knowledge_folders=[],
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(target(body=body, request=_request("alice", admin=True)))
+        assert exc.value.status_code == 400
+
+    handler.start_research.assert_not_called()

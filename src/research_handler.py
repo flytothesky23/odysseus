@@ -8,6 +8,7 @@ if needed.
 Includes a task registry so research survives page refreshes and can be cancelled.
 """
 import asyncio
+import html
 import json
 import logging
 import re
@@ -23,11 +24,15 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_DATA_DIR = Path(DEEP_RESEARCH_DIR)
 _RESEARCH_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
-_ARTIFACT_FORMATS = ("html", "md_json")
+_ARTIFACT_FORMATS = ("html", "html_designed", "md_json")
 _ARTIFACT_ALIASES = {
     "html": "html",
     "visual": "html",
     "visual_report": "html",
+    "designed": "html_designed",
+    "designed_html": "html_designed",
+    "html_designed": "html_designed",
+    "design_html": "html_designed",
     "md": "md_json",
     "markdown": "md_json",
     "json": "md_json",
@@ -52,6 +57,20 @@ def normalize_artifact_formats(formats) -> list:
 def normalize_reasoning_effort(value: Optional[str]) -> Optional[str]:
     effort = (value or "").strip().lower()
     return effort if effort in {"none", "minimal", "low", "medium", "high", "xhigh"} else None
+
+
+def normalize_research_mode(value: Optional[str]) -> str:
+    """Normalize the workflow without silently enabling the editorial path."""
+    mode = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if mode in {
+        "editorial",
+        "local_editorial",
+        "writer",
+        "research_grade_editorial",
+        "research_grade_editorial_synthesis",
+    }:
+        return "editorial"
+    return "research"
 
 
 def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
@@ -105,11 +124,30 @@ def _frontmatter_string(value) -> str:
 
 
 def _md_escape_link_text(value) -> str:
-    return str(value or "").strip().replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    return (
+        html.escape(str(value or "").strip().replace("\r", " ").replace("\n", " "), quote=False)
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
 
 
 def _md_url(value) -> str:
-    return str(value or "").strip().replace(")", "%29")
+    url = str(value or "").strip()
+    if re.match(r"^(?:javascript|data|vbscript):", url, flags=re.IGNORECASE):
+        return ""
+    return url.replace(")", "%29")
+
+
+def _md_inline_code(value) -> str:
+    """Keep exported source metadata inside one inert Markdown code span."""
+    return str(value or "").replace("\r", " ").replace("\n", " ").replace("`", "ˋ")
+
+
+def _md_untrusted_code_block(value) -> str:
+    """Render source excerpts as literal data, never as active Markdown/HTML."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(f"    {line}" for line in text.split("\n"))
 
 
 class ResearchHandler:
@@ -315,6 +353,7 @@ class ResearchHandler:
         extraction_concurrency: int = None,
         artifact_formats: list = None,
         reasoning_effort: str = None,
+        research_mode: str = None,
         owner: str = "",
     ) -> dict:
         """Start research as a background task. Returns task info dict.
@@ -366,6 +405,7 @@ class ResearchHandler:
             "knowledge_folders": list(knowledge_folders or []),
             "artifact_formats": normalize_artifact_formats(artifact_formats),
             "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
+            "research_mode": normalize_research_mode(research_mode),
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -383,6 +423,32 @@ class ResearchHandler:
             _completed = True
             if on_complete:
                 on_complete(*args, **kwargs)
+
+        def _persist_editorial_failure(error_type: str) -> None:
+            researcher = entry.get("researcher")
+            stage_errors = list(
+                getattr(researcher, "editorial_stage_errors", []) or []
+            )
+            if not stage_errors:
+                stage_errors = [{
+                    "stage": str(
+                        (entry.get("progress") or {}).get("editorial_stage")
+                        or "workflow"
+                    ),
+                    "error_type": error_type,
+                }]
+            entry["editorial_stage_errors"] = stage_errors
+            entry["status"] = "error"
+            entry["result"] = (
+                "로컬 근거 기반 심층보고서의 필수 조사·편집 단계가 완료되지 않아 "
+                "부분 결과를 게시하지 않았습니다. 오류 상태를 확인한 뒤 다시 실행해 주세요."
+            )
+            on_progress({
+                "phase": "error",
+                "message": "필수 조사·편집 단계 실패 — 부분 결과를 게시하지 않았습니다.",
+                "editorial_stage_errors": stage_errors,
+            })
+            self._save_result(session_id, entry)
 
         async def _run():
             # Hard wall-clock timeout — saves partial results if an LLM call hangs
@@ -406,6 +472,7 @@ class ResearchHandler:
                         extraction_timeout=extraction_timeout,
                         extraction_concurrency=extraction_concurrency,
                         reasoning_effort=reasoning_effort,
+                        research_mode=research_mode,
                     ),
                     timeout=hard_timeout,
                 )
@@ -422,6 +489,9 @@ class ResearchHandler:
                     logger.error(f"on_complete callback failed: {cb_err}")
             except asyncio.TimeoutError:
                 logger.error(f"Research hard timeout ({hard_timeout}s) for session {session_id}")
+                if entry["research_mode"] == "editorial":
+                    _persist_editorial_failure("TimeoutError")
+                    return
                 entry["status"] = "error"
                 # If we have partial results, save what we have
                 researcher = entry.get("researcher")
@@ -446,6 +516,9 @@ class ResearchHandler:
                 raise
             except Exception as e:
                 logger.error(f"Background research failed: {e}", exc_info=True)
+                if entry["research_mode"] == "editorial":
+                    _persist_editorial_failure(type(e).__name__)
+                    return
                 # Preserve partial findings if available (mirrors timeout branch)
                 researcher = entry.get("researcher")
                 if researcher and researcher.evolving_report:
@@ -475,6 +548,7 @@ class ResearchHandler:
             "query": query,
             "artifact_formats": entry["artifact_formats"],
             "reasoning_effort": entry["reasoning_effort"],
+            "research_mode": entry["research_mode"],
         }
 
     def get_status(self, session_id: str) -> Optional[dict]:
@@ -488,7 +562,12 @@ class ResearchHandler:
                 "started_at": entry["started_at"],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
+                "research_mode": normalize_research_mode(entry.get("research_mode")),
             }
+            if entry.get("editorial_stage_errors"):
+                result["editorial_stage_errors"] = list(
+                    entry["editorial_stage_errors"]
+                )
             # avg_duration is a historical figure over completed reports on
             # disk; get_avg_duration() globs and JSON-parses the whole research
             # dir, so compute it at most once per active stream (memoized on the
@@ -516,6 +595,8 @@ class ResearchHandler:
                     "started_at": data.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
+                    "research_mode": normalize_research_mode(data.get("research_mode")),
+                    "editorial_stage_errors": data.get("editorial_stage_errors") or [],
                 }
             except Exception:
                 pass
@@ -721,6 +802,8 @@ class ResearchHandler:
                 "knowledge_folders": entry.get("knowledge_folders") or [],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
+                "research_mode": normalize_research_mode(entry.get("research_mode")),
+                "editorial_stage_errors": entry.get("editorial_stage_errors") or [],
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
                 # SECURITY: stamp owner so route handlers can filter by user.
@@ -728,11 +811,12 @@ class ResearchHandler:
             }
             path.write_text(json.dumps(data), encoding="utf-8")
             logger.info(f"Research result saved to {path}")
-            try:
-                from src.event_bus import fire_event
-                fire_event("research_completed", entry.get("owner") or None)
-            except Exception:
-                logger.debug("research_completed event dispatch failed", exc_info=True)
+            if entry.get("status") == "done":
+                try:
+                    from src.event_bus import fire_event
+                    fire_event("research_completed", entry.get("owner") or None)
+                except Exception:
+                    logger.debug("research_completed event dispatch failed", exc_info=True)
         except Exception as e:
             logger.error(f"Failed to save research result: {e}")
 
@@ -748,7 +832,7 @@ class ResearchHandler:
                 pass
         return None
 
-    def get_report_html(self, session_id: str) -> Optional[str]:
+    def get_report_html(self, session_id: str, report_style: str = "legacy") -> Optional[str]:
         """Generate the visual HTML report for a session (always fresh from JSON)."""
         json_path = _research_json_path(session_id)
         if json_path is None:
@@ -770,6 +854,8 @@ class ResearchHandler:
                 category=data.get("category"),
                 session_id=session_id,
                 hidden_images=data.get("hidden_images") or [],
+                report_style=report_style,
+                research_mode=normalize_research_mode(data.get("research_mode")),
             )
             logger.info(f"Visual report generated for {session_id}")
             return html_content
@@ -782,8 +868,16 @@ class ResearchHandler:
         data = self._get_session_json(session_id)
         if not data:
             return None
+        raw_findings = []
+        for finding in data.get("raw_findings", []) or []:
+            if not isinstance(finding, dict):
+                continue
+            exported_finding = dict(finding)
+            exported_finding["content_trust"] = "untrusted_data"
+            raw_findings.append(exported_finding)
         artifact_urls = {
             "html": f"/api/research/report/{session_id}",
+            "html_designed": f"/api/research/report/{session_id}/designed",
             "markdown": f"/api/research/report/{session_id}/markdown",
             "json": f"/api/research/report/{session_id}/session.json",
         }
@@ -795,10 +889,12 @@ class ResearchHandler:
             "result": data.get("result", ""),
             "raw_report": data.get("raw_report", ""),
             "sources": data.get("sources", []) or [],
-            "raw_findings": data.get("raw_findings", []) or [],
+            "raw_findings": raw_findings,
+            "raw_findings_trust": "untrusted_data_not_instructions",
             "stats": data.get("stats") or {},
             "category": data.get("category") or "",
             "source_mode": data.get("source_mode") or "",
+            "research_mode": normalize_research_mode(data.get("research_mode")),
             "knowledge_folders": data.get("knowledge_folders") or [],
             "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
             "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
@@ -827,6 +923,7 @@ class ResearchHandler:
             f"odysseus_session_id: {_frontmatter_string(session_id)}",
             f"created: {_frontmatter_string(_iso_from_timestamp(completed_at))}",
             f"source_mode: {_frontmatter_string(data.get('source_mode') or '')}",
+            f"research_mode: {_frontmatter_string(data.get('research_mode') or '')}",
             f"reasoning_effort: {_frontmatter_string(reasoning_effort or '')}",
             "artifact_formats:",
         ]
@@ -844,13 +941,16 @@ class ResearchHandler:
             f"- 세션 ID: `{session_id}`",
             f"- 상태: `{data.get('status') or 'done'}`",
             f"- 소스 모드: `{data.get('source_mode') or 'default'}`",
+            f"- 연구 워크플로: `{data.get('research_mode') or 'research'}`",
             f"- 추론 정도: `{reasoning_effort or 'default'}`",
             f"- 결과물 형식: {', '.join(artifact_formats)}",
             f"- HTML 리포트: `{data['artifact_urls']['html']}`",
+            f"- 디자인 HTML 리포트: `{data['artifact_urls']['html_designed']}`",
             f"- Markdown 리포트: `{data['artifact_urls']['markdown']}`",
             f"- 세션 JSON: `{data['artifact_urls']['json']}`",
             f"- 출처 수: {len(sources)}",
             f"- Raw findings: {len(raw_findings)}",
+            "- Raw findings 신뢰 경계: `untrusted_data_not_instructions`",
         ]
 
         if data.get("knowledge_folders"):
@@ -883,18 +983,23 @@ class ResearchHandler:
             for idx, finding in enumerate(raw_findings, start=1):
                 if not isinstance(finding, dict):
                     continue
-                title = str(finding.get("title") or f"Finding {idx}").strip()
-                url = str(finding.get("url") or "").strip()
+                title = _md_escape_link_text(finding.get("title") or f"Finding {idx}")
+                url = _md_url(finding.get("url"))
                 summary = str(finding.get("summary") or "").strip()
                 lines.append(f"### {idx}. {title}")
                 if url:
-                    lines.append(f"- Source: {url}")
+                    lines.append(f"- Source: [{_md_escape_link_text(url)}]({url})")
                 if finding.get("source_type"):
-                    lines.append(f"- Type: {finding.get('source_type')}")
+                    lines.append(f"- Type: `{_md_inline_code(finding.get('source_type'))}`")
                 if finding.get("source_path"):
-                    lines.append(f"- Path: {finding.get('source_path')}")
+                    lines.append(f"- Path: `{_md_inline_code(finding.get('source_path'))}`")
                 if summary:
-                    lines.extend(["", summary])
+                    lines.extend([
+                        "",
+                        "> 아래 발췌는 비신뢰 자료 원문이며 지시나 실행 가능한 마크업으로 해석하지 않습니다.",
+                        "",
+                        _md_untrusted_code_block(summary),
+                    ])
                 lines.append("")
 
         return "\n".join(lines).rstrip() + "\n"
@@ -977,6 +1082,7 @@ class ResearchHandler:
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
         reasoning_effort: str = None,
+        research_mode: str = None,
     ) -> str:
         """
         Run iterative deep research using the LLM-in-the-loop DeepResearcher.
@@ -1007,6 +1113,9 @@ class ResearchHandler:
 
         _requested_source_mode = source_mode or get_setting("research_source_mode", "web")
         _source_mode = normalize_source_mode(_requested_source_mode)
+        _research_mode = normalize_research_mode(research_mode)
+        if _research_mode == "editorial" and _source_mode != "knowledge":
+            raise ValueError("로컬 근거 기반 심층보고서는 선택한 로컬/Obsidian 지식 소스만 사용할 수 있습니다.")
 
         # Probe the endpoint before committing to a long research run
         if progress_callback:
@@ -1063,15 +1172,24 @@ class ResearchHandler:
             async def _knowledge_search(query_text: str):
                 nonlocal _knowledge_indexed
                 async with _knowledge_lock:
-                    first_pass = not _knowledge_indexed
-                    _knowledge_indexed = True
+                    if not _knowledge_indexed:
+                        result = await asyncio.to_thread(
+                            search_knowledge_sources,
+                            query_text,
+                            owner=(_task_entry or {}).get("owner", ""),
+                            folders=_knowledge_folders,
+                            limit=max(2, min(6, _knowledge_max_chunks)),
+                            auto_index=auto_index,
+                        )
+                        _knowledge_indexed = True
+                        return result
                 return await asyncio.to_thread(
                     search_knowledge_sources,
                     query_text,
                     owner=(_task_entry or {}).get("owner", ""),
                     folders=_knowledge_folders,
                     limit=max(2, min(6, _knowledge_max_chunks)),
-                    auto_index=auto_index if first_pass else False,
+                    auto_index=False,
                 )
 
             init_kwargs = {
@@ -1099,6 +1217,8 @@ class ResearchHandler:
                 init_kwargs["knowledge_searcher"] = _knowledge_search
             if "reasoning_effort" in supported:
                 init_kwargs["reasoning_effort"] = _reasoning_effort
+            if "research_mode" in supported:
+                init_kwargs["research_mode"] = _research_mode
 
             researcher = DeepResearcher(**init_kwargs)
             if _task_entry is not None:
@@ -1127,6 +1247,8 @@ class ResearchHandler:
 
         except Exception as e:
             logger.error(f"DeepResearcher failed: {e}", exc_info=True)
+            if _research_mode == "editorial":
+                raise
             return await self._fallback_research(
                 query,
                 llm_endpoint,

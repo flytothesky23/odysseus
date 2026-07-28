@@ -12,11 +12,13 @@ import hashlib
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote, unquote, urlparse
 
+from src.constants import DEEP_RESEARCH_DIR
 from src.settings import get_setting
 
 DEFAULT_EXCLUDED_DIRS = {
@@ -63,9 +65,14 @@ LOCAL_FOLDER_TOKEN_PREFIX = "local:"
 OBSIDIAN_FOLDER_TOKEN_PREFIX = "obsidian:"
 OBSIDIAN_ROOT_TOKEN = "obsidian:"
 MAX_FILE_TEXT_CHARS = 500_000
+MAX_STRUCTURED_FILE_BYTES = 2_000_000
 MAX_STRUCTURED_ROWS = 500
 MAX_STRUCTURED_SCALARS = 2000
 MAX_NOTE_IMAGES = 12
+KNOWLEDGE_INDEX_STATE_PATH = Path(DEEP_RESEARCH_DIR) / "knowledge-index-state.json"
+
+_INDEX_STATE_LOCK = threading.RLock()
+_INDEX_OWNER_LOCKS: Dict[str, threading.RLock] = {}
 
 _OBSIDIAN_IMAGE_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -544,6 +551,17 @@ def _truncate_text(text: str, max_chars: int = MAX_FILE_TEXT_CHARS) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "\n\n[truncated]"
 
 
+def _read_bounded_text(path: Path, max_bytes: Optional[int] = None) -> tuple[str, bool]:
+    """Read at most ``max_bytes`` before structured parsing."""
+    max_bytes = int(max_bytes or MAX_STRUCTURED_FILE_BYTES)
+    with path.open("rb") as handle:
+        raw = handle.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[:max_bytes]
+    return raw.decode("utf-8", errors="ignore"), truncated
+
+
 def _flatten_structured(value: Any, prefix: str = "", rows: Optional[List[str]] = None) -> List[str]:
     rows = rows if rows is not None else []
     if len(rows) >= MAX_STRUCTURED_SCALARS:
@@ -564,22 +582,34 @@ def _flatten_structured(value: Any, prefix: str = "", rows: Optional[List[str]] 
 
 
 def _read_json_text(path: Path) -> str:
-    rows = _flatten_structured(json.loads(path.read_text(encoding="utf-8", errors="ignore")))
+    raw, truncated = _read_bounded_text(path)
+    if truncated:
+        return _truncate_text(
+            f"# JSON data (parse skipped: file exceeds {MAX_STRUCTURED_FILE_BYTES} bytes): {path.name}\n"
+            f"{raw}\n[truncated before structured parse]"
+        )
+    rows = _flatten_structured(json.loads(raw))
     return _truncate_text(f"# JSON data: {path.name}\n" + "\n".join(rows))
 
 
 def _read_yaml_text(path: Path) -> str:
+    raw, truncated = _read_bounded_text(path)
+    if truncated:
+        return _truncate_text(
+            f"# YAML data (parse skipped: file exceeds {MAX_STRUCTURED_FILE_BYTES} bytes): {path.name}\n"
+            f"{raw}\n[truncated before structured parse]"
+        )
     try:
         import yaml  # type: ignore
-        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="ignore"))
+        data = yaml.safe_load(raw)
     except Exception:
-        return _truncate_text(path.read_text(encoding="utf-8", errors="ignore"))
+        return _truncate_text(raw)
     return _truncate_text(f"# YAML data: {path.name}\n" + "\n".join(_flatten_structured(data)))
 
 
 def _read_csv_text(path: Path) -> str:
-    with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
-        sample = f.read(MAX_FILE_TEXT_CHARS)
+    sample, byte_truncated = _read_bounded_text(path)
+    sample = sample[:MAX_FILE_TEXT_CHARS]
     reader = csv.DictReader(sample.splitlines())
     rows = [f"# CSV data: {path.name}"]
     if reader.fieldnames:
@@ -589,6 +619,8 @@ def _read_csv_text(path: Path) -> str:
             rows.append("[truncated csv rows]")
             break
         rows.append(f"row {i}: " + "; ".join(f"{key}={value}" for key, value in row.items()))
+    if byte_truncated:
+        rows.append("[truncated before complete csv parse]")
     return _truncate_text("\n".join(rows))
 
 
@@ -676,25 +708,175 @@ def _iter_supported_files(directory: Path):
                 yield resolved
 
 
+def _index_owner_key(owner: str) -> str:
+    return hashlib.sha256(str(owner or "").encode("utf-8")).hexdigest()
+
+
+def _owner_index_lock(owner: str) -> threading.RLock:
+    return _owner_index_lock_for_key(_index_owner_key(owner))
+
+
+def _owner_index_lock_for_key(owner_key: str) -> threading.RLock:
+    with _INDEX_STATE_LOCK:
+        return _INDEX_OWNER_LOCKS.setdefault(owner_key, threading.RLock())
+
+
+def _load_index_state() -> Dict[str, Any]:
+    path = Path(KNOWLEDGE_INDEX_STATE_PATH)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("owners"), dict):
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "owners": {}}
+
+
+def _save_index_state(state: Dict[str, Any]) -> None:
+    path = Path(KNOWLEDGE_INDEX_STATE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _delete_rag_source(rag, source: str, owner: str) -> int:
+    deleter = getattr(rag, "delete_by_source", None)
+    if not callable(deleter):
+        vector_rag = getattr(rag, "vector_rag", None)
+        deleter = getattr(vector_rag, "delete_by_source", None)
+    if not callable(deleter):
+        return 0
+    try:
+        return int(deleter(source, owner=owner or None) or 0)
+    except TypeError:
+        # Backward compatibility for small test/custom RAG shims. Production
+        # VectorRAG accepts owner and never crosses account boundaries.
+        return int(deleter(source) or 0)
+
+
+def _entry_belongs_to_selected_root(entry: Dict[str, Any], roots: List[Path]) -> bool:
+    return _path_is_under_any(str(entry.get("source") or ""), roots)
+
+
+def _entry_source_is_configured(entry: Dict[str, Any]) -> bool:
+    kind = entry.get("source_kind")
+    if kind == "obsidian":
+        root = configured_vault_root()
+        return root is not None and _path_is_under_any(str(entry.get("source") or ""), [root])
+    if kind == "local":
+        root_id = str(entry.get("root_id") or "")
+        for root in configured_local_roots():
+            if root["id"] == root_id:
+                return _path_is_under_any(str(entry.get("source") or ""), [Path(root["path"])])
+        return False
+    return False
+
+
 def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = "") -> Dict[str, Any]:
-    sources = _resolve_selected_sources(folders)
-    vault_root = configured_vault_root()
-    indexed = 0
-    failed = 0
-    files_seen = 0
-    for source_root in sources:
-        for path in _iter_supported_files(source_root.path):
-            files_seen += 1
+    """Incrementally synchronize selected private sources into the vector index.
+
+    The manifest prevents unchanged files from being re-embedded and gives
+    modified/deleted files an explicit lifecycle. It is local app data only and
+    is owner-hashed at the top level; report exports never include it.
+    """
+    owner_key = _index_owner_key(owner)
+
+    with _owner_index_lock(owner):
+        # Resolve configuration only after entering the owner barrier. A root
+        # removed while this call was waiting must not be re-indexed from a
+        # stale pre-lock source snapshot.
+        sources = _resolve_selected_sources(folders)
+        vault_root = configured_vault_root()
+        roots = [source.path for source in sources]
+        with _INDEX_STATE_LOCK:
+            state = _load_index_state()
+            owner_entries = dict((state.get("owners") or {}).get(owner_key) or {})
+
+        current_files: Dict[str, KnowledgeSourceRoot] = {}
+        for source_root in sources:
+            for path in _iter_supported_files(source_root.path):
+                current_files[str(path)] = source_root
+
+        indexed = 0
+        failed = 0
+        unchanged = 0
+        replaced = 0
+        removed = 0
+
+        # Remove deleted files in the selected scope and entries whose configured
+        # root has itself been removed. Deselecting a still-configured root does
+        # not erase it, but it is excluded at query time by metadata filtering.
+        for entry_key, entry in list(owner_entries.items()):
+            source = str(entry.get("source") or "")
+            selected_and_missing = (
+                _entry_belongs_to_selected_root(entry, roots)
+                and source not in current_files
+            )
+            root_removed = not _entry_source_is_configured(entry)
+            if selected_and_missing or root_removed:
+                _delete_rag_source(rag, source, owner)
+                owner_entries.pop(entry_key, None)
+                removed += 1
+
+        for source, source_root in sorted(current_files.items()):
+            path = Path(source)
+            entry_key = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            stored = owner_entries.get(entry_key) or {}
+            try:
+                stat = path.stat()
+            except OSError:
+                failed += 1
+                continue
+
+            signature_matches = (
+                stored.get("mtime_ns") == stat.st_mtime_ns
+                and stored.get("size") == stat.st_size
+                and stored.get("knowledge_source_token") == source_root.token
+                and stored.get("source_kind") == source_root.source_kind
+            )
+            if signature_matches:
+                unchanged += 1
+                continue
+
             try:
                 content = _read_file_text(path)
             except Exception:
                 failed += 1
                 continue
             if not content.strip():
+                if stored:
+                    _delete_rag_source(rag, source, owner)
+                    owner_entries.pop(entry_key, None)
+                    removed += 1
                 continue
+
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            metadata_changed = (
+                stored.get("knowledge_source_token") != source_root.token
+                or stored.get("source_kind") != source_root.source_kind
+            )
+            if stored and stored.get("content_hash") == content_hash and not metadata_changed:
+                stored.update({"mtime_ns": stat.st_mtime_ns, "size": stat.st_size})
+                owner_entries[entry_key] = stored
+                unchanged += 1
+                continue
+
+            # First synchronization also removes possible legacy text-only IDs,
+            # so the new source-aware IDs do not coexist with stale chunks.
+            _delete_rag_source(rag, source, owner)
+            if stored:
+                replaced += 1
+
             rel = _relative(source_root.display_root, path)
+            root_id = ""
+            if source_root.source_kind == "local":
+                root_id, _ = _split_local_folder_token(source_root.token)
             meta = {
-                "source": str(path),
+                "source": source,
                 "filename": path.name,
                 "directory": str(path.parent),
                 "vault_relative_path": rel,
@@ -712,14 +894,87 @@ def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = 
                 chunks = rag._split_into_chunks(content)
             except Exception:
                 chunks = [content]
+
+            file_failed = False
             for i, chunk in enumerate(chunks):
+                document_key = f"knowledge:{source}:{content_hash}:{i}"
                 try:
-                    ok = rag.add_document(chunk, {**meta, "chunk_id": i})
+                    ok = rag.add_document(
+                        chunk,
+                        {
+                            **meta,
+                            "chunk_id": i,
+                            "document_key": document_key,
+                        },
+                    )
                 except Exception:
                     ok = False
                 indexed += 1 if ok else 0
                 failed += 0 if ok else 1
-    return {"success": True, "folders": [source.token for source in sources], "files_seen": files_seen, "indexed_count": indexed, "failed_count": failed}
+                file_failed = file_failed or not ok
+
+            if file_failed:
+                _delete_rag_source(rag, source, owner)
+                owner_entries.pop(entry_key, None)
+                continue
+            owner_entries[entry_key] = {
+                "source": source,
+                "owner": owner,
+                "source_kind": source_root.source_kind,
+                "root_id": root_id,
+                "knowledge_source_token": source_root.token,
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+                "content_hash": content_hash,
+                "chunk_count": len(chunks),
+            }
+
+        with _INDEX_STATE_LOCK:
+            latest = _load_index_state()
+            latest.setdefault("owners", {})[owner_key] = owner_entries
+            _save_index_state(latest)
+
+    return {
+        "success": failed == 0,
+        "folders": [source.token for source in sources],
+        "files_seen": len(current_files),
+        "indexed_count": indexed,
+        "unchanged_count": unchanged,
+        "replaced_count": replaced,
+        "removed_count": removed,
+        "failed_count": failed,
+    }
+
+
+def prune_removed_knowledge_roots(rag) -> int:
+    """Delete indexed chunks whose configured root no longer exists."""
+    removed = 0
+    with _INDEX_STATE_LOCK:
+        owner_keys = list((_load_index_state().get("owners") or {}).keys())
+
+    for owner_key in owner_keys:
+        with _owner_index_lock_for_key(owner_key):
+            with _INDEX_STATE_LOCK:
+                state = _load_index_state()
+                owner_entries = dict(
+                    (state.setdefault("owners", {}).get(owner_key) or {})
+                )
+            next_entries = dict(owner_entries or {})
+            for entry_key, entry in list(next_entries.items()):
+                if _entry_source_is_configured(entry):
+                    continue
+                _delete_rag_source(
+                    rag,
+                    str(entry.get("source") or ""),
+                    str(entry.get("owner") or ""),
+                )
+                next_entries.pop(entry_key, None)
+                removed += 1
+            with _INDEX_STATE_LOCK:
+                latest = _load_index_state()
+                latest.setdefault("owners", {})[owner_key] = next_entries
+                _save_index_state(latest)
+    return removed
 
 
 def _path_is_under_any(path: str, roots: List[Path]) -> bool:
@@ -855,13 +1110,33 @@ def search_knowledge_sources(
         index_knowledge_folders(rag, folders, owner=owner)
 
     limit = max(1, min(int(limit or 12), 50))
-    raw = rag.search(query, k=max(limit * 8, 40), owner=owner or None)
+    selected_tokens = [source.token for source in sources]
+    metadata_filter = {
+        "knowledge_source_token": {"$in": selected_tokens}
+    }
+    try:
+        raw = rag.search(
+            query,
+            k=max(limit * 8, 40),
+            owner=owner or None,
+            where=metadata_filter,
+        )
+    except TypeError:
+        # Compatibility for third-party/test RAG shims. The production manager
+        # filters inside Chroma before ranking, which preserves selected-root
+        # recall even when unrelated roots dominate the global top-k.
+        raw = rag.search(query, k=max(limit * 8, 40), owner=owner or None)
     items: List[Dict[str, Any]] = []
     seen = set()
     for result in raw:
         meta = result.get("metadata") or {}
         source = meta.get("source") or ""
         if not source or not _path_is_under_any(source, roots):
+            continue
+        try:
+            if not Path(source).is_file():
+                continue
+        except OSError:
             continue
         matched_root: Optional[KnowledgeSourceRoot] = None
         try:
