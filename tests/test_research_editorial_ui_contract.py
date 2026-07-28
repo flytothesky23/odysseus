@@ -16,8 +16,16 @@ def test_editorial_workflow_and_designed_artifact_are_persisted_in_ui_contract()
     assert "kind === 'html_designed' ? 'designed'" in panel
     assert "Legacy HTML" in panel
     assert "Design HTML" in panel
+    assert 'id="research-design-image-mode"' in panel
+    assert '<option value="none" selected>없음 (기본)</option>' in panel
+    assert '<option value="cover">표지·배경만</option>' in panel
+    assert '<option value="editorial">표지 + 섹션 일러스트</option>' in panel
+    assert "design_image_mode: _normalizeDesignImageMode(" in panel
+    assert "_syncDesignImageControls();" in panel
     assert "research_mode: settings?.research_mode || 'research'" in jobs
     assert "if (data.research_mode) job.research_mode = data.research_mode" in jobs
+    assert "design_image_mode: settings?.design_image_mode || 'none'" in jobs
+    assert "if (data.design_image_mode) job.design_image_mode = data.design_image_mode" in jobs
 
 
 def test_editorial_ui_requires_explicit_local_selection():

@@ -2127,6 +2127,7 @@ def setup_model_routes(model_discovery):
         from src.auth_helpers import get_current_user as _gcu_dedup
         _caller = _gcu_dedup(request) or None
         _incoming_api_key = api_key.strip()
+        incoming_model_type = (model_type or "").strip() or "llm"
         _db_dedup = SessionLocal()
         try:
             _same_url_rows = (
@@ -2139,6 +2140,11 @@ def setup_model_routes(model_discovery):
             existing = None
             _empty_key_existing = None
             for _candidate in _same_url_rows:
+                candidate_model_type = (
+                    getattr(_candidate, "model_type", None) or "llm"
+                )
+                if candidate_model_type != incoming_model_type:
+                    continue
                 _candidate_key = (getattr(_candidate, "api_key", None) or "").strip()
                 if _candidate_key == _incoming_api_key:
                     existing = _candidate
@@ -2171,10 +2177,6 @@ def setup_model_routes(model_discovery):
                     changed = True
                 if refresh_timeout is not None:
                     existing.model_refresh_timeout = refresh_timeout
-                    changed = True
-                incoming_model_type = (model_type or "").strip() or "llm"
-                if incoming_model_type and (getattr(existing, "model_type", None) or "llm") != incoming_model_type:
-                    existing.model_type = incoming_model_type
                     changed = True
                 if api_key.strip() and not existing.api_key:
                     existing.api_key = api_key.strip()

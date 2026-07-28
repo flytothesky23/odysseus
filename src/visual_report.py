@@ -12,6 +12,7 @@ and wraps them in an editorial-quality HTML document with:
 - Collapsible compact sources list
 - Print/Share toolbar
 """
+import base64
 import html
 import json
 import logging
@@ -21,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
+from src.report_design import DesignSpec, build_design_spec
 from src.research_utils import strip_thinking
 from urllib.parse import urlparse
 
@@ -876,7 +878,10 @@ body::after {{
 {designed_css}
 </style>
 </head>
-<body class="{body_class}" data-report-style="{report_style}">
+<body class="{body_class}" data-report-style="{report_style}" data-design-preset="{design_preset}" data-design-variation-id="{design_variation_id}" data-design-image-mode="{design_image_mode}" data-design-assets-status="{design_assets_status}">
+
+{ambient_layer_html}
+{design_manifest_html}
 
 <!-- Toolbar: Export + Restore hidden images -->
 <div class="toolbar">
@@ -893,12 +898,7 @@ body::after {{
   </div>
 </div>
 
-<div class="hero">
-  <div class="hero-label">Odysseus &mdash; Deep Research Report</div>
-  <h1>{question_html}</h1>
-</div>
-
-{hero_image_html}
+{hero_composition_html}
 
 <div class="stats-bar">
   {stats_html}
@@ -1078,7 +1078,12 @@ body::after {{
       var target = document.getElementById(id);
       if (!target) return;
       e.preventDefault();
-      target.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+      var reduceMotion = window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      target.scrollIntoView({{
+        behavior: reduceMotion ? 'auto' : 'smooth',
+        block: 'start'
+      }});
       history.replaceState(null, '', '#' + id);
     }});
   }});
@@ -1197,11 +1202,16 @@ if (document.body.classList.contains('category-comparison')) {{
 # Public API
 # ---------------------------------------------------------------------------
 
-def _designed_report_css(category: Optional[str]) -> str:
+def _designed_report_css(category: Optional[str], design_spec: Optional[DesignSpec] = None) -> str:
     """Standalone editorial tokens layered over, never replacing, content flow."""
     management = str(category or "").strip().lower() == "management"
-    accent = "#365b6d" if management else "#8a4f3d"
-    accent_soft = "#dbe7eb" if management else "#f1dfd7"
+    tokens = design_spec.tokens if design_spec else None
+    accent = tokens.accent if tokens else "#365b6d" if management else "#8a4f3d"
+    accent_soft = tokens.accent_soft if tokens else "#dbe7eb" if management else "#f1dfd7"
+    paper = tokens.paper if tokens else "#f7f4ed"
+    ink = tokens.ink if tokens else "#1f2529"
+    body_size = tokens.body_size_px if tokens else 17
+    line_height = tokens.line_height if tokens else 1.82
     return f"""
 /* DESIGNED_REPORT_TOKENS */
 /* Offline editorial layer: typography, rhythm and navigation only.
@@ -1210,13 +1220,13 @@ body[data-report-style="designed"] {{
   --accent: {accent};
   --accent-light: {accent};
   --accent-bg: color-mix(in srgb, {accent_soft} 72%, transparent);
-  --designed-paper: #f7f4ed;
-  --designed-ink: #1f2529;
+  --designed-paper: {paper};
+  --designed-ink: {ink};
   --designed-rule: color-mix(in srgb, var(--accent) 28%, var(--border));
   background: var(--designed-paper);
   color: var(--designed-ink);
-  font-size: 17px;
-  line-height: 1.82;
+  font-size: {body_size}px;
+  line-height: {line_height};
 }}
 body[data-report-style="designed"]::before {{
   animation: none;
@@ -1256,6 +1266,173 @@ body[data-report-style="designed"] .hero h1 {{
   word-break: keep-all;
   overflow-wrap: anywhere;
   hyphens: none;
+}}
+body[data-report-style="designed"] .designed-ambient-layer {{
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--designed-paper);
+}}
+body[data-report-style="designed"] .designed-ambient-layer img {{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.09;
+  filter: saturate(0.62) contrast(0.84) blur(1px);
+  transform: scale(1.035);
+}}
+body[data-report-style="designed"].has-generated-ambient .content {{
+  padding: clamp(1.3rem, 3vw, 2.5rem);
+  background: color-mix(in srgb, var(--designed-paper) 94%, transparent);
+  box-shadow: 0 18px 60px color-mix(in srgb, var(--designed-ink) 9%, transparent);
+}}
+body[data-report-style="designed"] .hero.designed-hero-composer {{
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  align-items: center;
+  width: min(1280px, calc(100% - 2.5rem));
+  max-width: none;
+  min-height: clamp(390px, 46vw, 610px);
+  margin: clamp(1rem, 3vw, 2.5rem) auto 2rem;
+  padding: clamp(2.5rem, 6vw, 5.5rem);
+  overflow: hidden;
+  border-radius: 18px;
+  color: #fffaf2;
+  text-align: left;
+  box-shadow: 0 24px 70px rgba(22, 24, 31, 0.25);
+  background: #1b1e27;
+}}
+body[data-report-style="designed"] .hero.designed-hero-composer::before {{
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border: 0;
+  background:
+    linear-gradient(
+      90deg,
+      rgba(12, 15, 24, var(--hero-overlay)) 0%,
+      rgba(12, 15, 24, calc(var(--hero-overlay) * .92)) 38%,
+      rgba(12, 15, 24, .18) 72%,
+      rgba(12, 15, 24, .05) 100%
+    );
+}}
+body[data-report-style="designed"] .hero.designed-hero-composer::after {{
+  content: "";
+  display: block;
+  position: absolute;
+  inset: auto 0 0;
+  z-index: -1;
+  height: 34%;
+  background: linear-gradient(0deg, rgba(8, 10, 15, .58), transparent);
+}}
+body[data-report-style="designed"] .designed-hero-composer > img {{
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: var(--focal-x) var(--focal-y);
+  filter: saturate(.94) contrast(1.04);
+}}
+body[data-report-style="designed"] .designed-hero-copy {{
+  width: min(58%, 720px);
+  text-shadow: 0 2px 20px rgba(0, 0, 0, .42);
+}}
+body[data-report-style="designed"] .designed-hero-composer .hero-label {{
+  margin: 0 0 1.1rem;
+  color: #f2c99f;
+}}
+body[data-report-style="designed"] .designed-hero-composer h1 {{
+  max-width: 720px;
+  color: #fffaf2;
+  font-size: clamp(2.45rem, 5.3vw, 5.25rem);
+}}
+body[data-report-style="designed"] .designed-hero-deck {{
+  max-width: 620px;
+  margin: 1.3rem 0 0;
+  color: rgba(255, 250, 242, .86);
+  font-size: clamp(.94rem, 1.5vw, 1.15rem);
+  line-height: 1.65;
+}}
+body[data-report-style="designed"] .designed-hero-meta {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: .55rem 1.1rem;
+  margin-top: 1.5rem;
+  color: rgba(255, 250, 242, .72);
+  font-size: .75rem;
+  letter-spacing: .04em;
+}}
+body[data-report-style="designed"] .designed-hero-disclosure {{
+  position: absolute;
+  right: 1rem;
+  bottom: .8rem;
+  color: rgba(255, 255, 255, .64);
+  font-size: .65rem;
+  letter-spacing: .03em;
+}}
+body[data-report-style="designed"] .designed-hero-visual {{
+  width: min(1180px, calc(100% - 3rem));
+  margin: 0 auto clamp(2rem, 5vw, 4.5rem);
+  border-block: 1px solid var(--designed-rule);
+  padding-block: 1rem;
+  break-inside: avoid;
+}}
+body[data-report-style="designed"] .designed-hero-visual img {{
+  display: block;
+  width: 100%;
+  max-height: 660px;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  object-position: center;
+  filter: saturate(0.92) contrast(1.02);
+}}
+body[data-report-style="designed"] .designed-hero-visual figcaption,
+body[data-report-style="designed"] .designed-section-visual figcaption {{
+  margin: 0;
+  padding: .55rem .7rem;
+  border-left: 5px solid var(--accent);
+  background: color-mix(in srgb, var(--designed-paper) 96%, var(--accent));
+  color: color-mix(in srgb, var(--designed-ink) 58%, var(--accent));
+  font-size: 0.74rem;
+  line-height: 1.45;
+  letter-spacing: 0.04em;
+}}
+body[data-report-style="designed"] .designed-section-visual {{
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  margin: 1.5rem 0 2.7rem;
+  padding: 0;
+  break-inside: avoid;
+}}
+body[data-report-style="designed"] .designed-section-visual img {{
+  display: block;
+  width: 100%;
+  max-height: 440px;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  object-position: center;
+  border-left: 5px solid var(--accent);
+}}
+body[data-report-style="designed"] .designed-section-title {{
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  padding: clamp(1.1rem, 4vw, 2.5rem);
+  color: #fff;
+  font-size: clamp(1.25rem, 3vw, 2.35rem);
+  font-weight: 760;
+  line-height: 1.12;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, .62);
+  background: linear-gradient(0deg, rgba(10, 13, 20, .78), transparent 66%);
 }}
 body[data-report-style="designed"] .stats-bar {{
   max-width: 1040px;
@@ -1337,8 +1514,77 @@ body[data-report-style="designed"] .chat-cta {{
     line-height: 1.12;
     letter-spacing: -0.035em;
   }}
+  body[data-report-style="designed"] .hero.designed-hero-composer {{
+    align-items: end;
+    width: calc(100% - 1rem);
+    min-height: min(72vh, 610px);
+    margin: .5rem auto 1.3rem;
+    padding: 2rem 1.25rem 2.6rem;
+    border-radius: 12px;
+  }}
+  body[data-report-style="designed"] .hero.designed-hero-composer::before {{
+    background:
+      linear-gradient(
+        0deg,
+        rgba(10, 12, 19, .92) 0%,
+        rgba(10, 12, 19, .68) 42%,
+        rgba(10, 12, 19, .08) 78%
+      );
+  }}
+  body[data-report-style="designed"] .designed-hero-copy {{
+    width: 100%;
+  }}
+  body[data-report-style="designed"] .designed-hero-composer h1 {{
+    max-width: none;
+    font-size: clamp(2rem, 10.7vw, 3.25rem);
+    line-height: 1.08;
+  }}
+  body[data-report-style="designed"] .designed-hero-disclosure {{
+    left: 1.25rem;
+    right: auto;
+    bottom: .7rem;
+  }}
+  body[data-report-style="designed"].has-generated-ambient .content {{
+    padding: 1.15rem;
+  }}
+  body[data-report-style="designed"] .stats-bar {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .7rem 1rem;
+    padding: 1rem 1.25rem;
+    text-align: left;
+  }}
   body[data-report-style="designed"] .content {{
     max-width: none;
+  }}
+  body[data-report-style="designed"] .designed-hero-visual {{
+    width: calc(100% - 2rem);
+    margin-bottom: 2.4rem;
+    padding-block: 0.65rem;
+  }}
+  body[data-report-style="designed"] .designed-hero-visual img,
+  body[data-report-style="designed"] .designed-section-visual img {{
+    max-height: none;
+    aspect-ratio: 4 / 3;
+  }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  body[data-report-style="designed"] *,
+  body[data-report-style="designed"] *::before,
+  body[data-report-style="designed"] *::after {{
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }}
+}}
+@media (prefers-reduced-motion: no-preference) {{
+  body[data-report-style="designed"] .designed-hero-composer > img {{
+    animation: designed-hero-breathe 18s ease-in-out both;
+  }}
+  @keyframes designed-hero-breathe {{
+    from {{ transform: scale(1.025); }}
+    to {{ transform: scale(1); }}
   }}
 }}
 @media print {{
@@ -1351,6 +1597,24 @@ body[data-report-style="designed"] .chat-cta {{
   body[data-report-style="designed"] .hero {{
     padding: 1.5rem 0 1.25rem;
     break-after: avoid;
+  }}
+  body[data-report-style="designed"] .designed-ambient-layer {{
+    display: none !important;
+  }}
+  body[data-report-style="designed"] .hero.designed-hero-composer {{
+    display: grid;
+    width: 100%;
+    min-height: 78mm;
+    margin: 0 0 10mm;
+    padding: 14mm;
+    border-radius: 0;
+    color: #fff !important;
+    box-shadow: none;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }}
+  body[data-report-style="designed"] .designed-hero-composer h1 {{
+    color: #fff !important;
   }}
   body[data-report-style="designed"] .hero::before {{
     border-top-color: #111;
@@ -1374,6 +1638,21 @@ body[data-report-style="designed"] .chat-cta {{
   }}
   body[data-report-style="designed"] .content table {{
     font-size: 9pt;
+  }}
+  body[data-report-style="designed"] .designed-hero-visual,
+  body[data-report-style="designed"] .designed-section-visual {{
+    width: 100%;
+    margin: 0 0 12pt;
+    padding: 0;
+    border-color: #bbb;
+    break-inside: avoid;
+  }}
+  body[data-report-style="designed"] .designed-hero-visual img,
+  body[data-report-style="designed"] .designed-section-visual img {{
+    max-height: 72mm;
+    object-fit: contain;
+    filter: grayscale(0.18) contrast(0.98);
+    border-left: 0;
   }}
 }}
 """
@@ -2066,6 +2345,204 @@ def _is_icon_or_logo_url(url: str) -> bool:
     return bool(_ICON_LOGO_RE.search(url or ""))
 
 
+def _load_designed_visual_assets(
+    assets: Optional[List[Dict]],
+    *,
+    max_asset_bytes: int = 6 * 1024 * 1024,
+    max_total_bytes: int = 12 * 1024 * 1024,
+    max_assets: int = 3,
+) -> List[Dict]:
+    """Load only confined, locally generated images as offline data URIs."""
+    from src.generated_images import resolve_generated_image_path
+
+    safe_assets = []
+    seen_roles = set()
+    total_bytes = 0
+    mime_by_suffix = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+
+    def _unit_float(value: object, default: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(1.0, number))
+
+    for asset in assets or []:
+        if not isinstance(asset, dict):
+            continue
+        role = str(asset.get("role") or "").strip().lower()
+        if role not in {"hero", "section", "ambient"} or role in seen_roles:
+            continue
+        filename = str(asset.get("filename") or "")
+        try:
+            path = resolve_generated_image_path(filename)
+            mime_type = mime_by_suffix.get(path.suffix.lower())
+            if not mime_type:
+                continue
+            byte_size = path.stat().st_size
+            if byte_size <= 0 or byte_size > max_asset_bytes:
+                continue
+            if total_bytes + byte_size > max_total_bytes:
+                continue
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except Exception:
+            continue
+        safe_assets.append({
+            "role": role,
+            "visual_role": str(asset.get("visual_role") or "")[:80],
+            "data_uri": f"data:{mime_type};base64,{encoded}",
+            "alt": str(asset.get("alt") or "")[:240],
+            "byte_size": byte_size,
+            "model": str(asset.get("model") or "")[:120],
+            "focal_x": _unit_float(asset.get("focal_x"), 0.5),
+            "focal_y": _unit_float(asset.get("focal_y"), 0.5),
+            "safe_area": str(asset.get("safe_area") or "none")[:16],
+            "desktop_aspect": str(asset.get("desktop_aspect") or "21/9")[:16],
+            "mobile_aspect": str(asset.get("mobile_aspect") or "4/5")[:16],
+            "overlay_strength": _unit_float(asset.get("overlay_strength"), 0.55),
+            "palette": str(asset.get("palette") or "editorial-neutral")[:80],
+        })
+        seen_roles.add(role)
+        total_bytes += byte_size
+        if len(safe_assets) >= max_assets:
+            break
+    return safe_assets
+
+
+def _designed_generated_figure(asset: Dict, *, hero: bool = False) -> str:
+    """Render an explicit non-evidence label around an offline generated image."""
+    class_name = "designed-hero-visual" if hero else "designed-section-visual"
+    alt_text = html.escape(asset.get("alt") or "", quote=True)
+    # Designed reports contain at most two bounded local assets. Eager loading
+    # avoids blank chapter dividers in print/full-page captures while staying
+    # offline and below the asset budget.
+    loading_attribute = 'fetchpriority="high"' if hero else 'loading="eager"'
+    return (
+        f'<figure class="{class_name}" data-generated-image="true">'
+        f'<img src="{asset["data_uri"]}" alt="{alt_text}" '
+        f'{loading_attribute}>'
+        '<figcaption>AI 생성 개념 이미지 · 사실 근거나 데이터 시각화가 아닙니다.</figcaption>'
+        '</figure>'
+    )
+
+
+def _designed_hero_composer(
+    asset: Dict,
+    *,
+    title: str,
+    category: Optional[str],
+    timestamp: str,
+) -> str:
+    """Compose an accessible HTML title over a composition-aware local image."""
+    category_labels = {
+        "management": "경영분석",
+        "comparison": "비교 분석",
+        "factcheck": "사실 검증",
+        "howto": "실행 가이드",
+        "product": "제품 분석",
+    }
+    label = category_labels.get(
+        str(category or "").strip().lower(),
+        "로컬 근거 기반 심층보고서",
+    )
+    focal_x = max(0.0, min(1.0, float(asset.get("focal_x", 0.5)))) * 100
+    focal_y = max(0.0, min(1.0, float(asset.get("focal_y", 0.5)))) * 100
+    overlay = max(
+        0.35,
+        min(0.9, float(asset.get("overlay_strength", 0.6))),
+    )
+    alt_text = html.escape(asset.get("alt") or "", quote=True)
+    return (
+        '<section class="hero designed-hero-composer" '
+        'data-visual-role="editorial_hero" '
+        f'style="--focal-x:{focal_x:.1f}%;--focal-y:{focal_y:.1f}%;'
+        f'--hero-overlay:{overlay:.2f}">'
+        f'<img src="{asset["data_uri"]}" alt="{alt_text}" '
+        'fetchpriority="high">'
+        '<div class="designed-hero-copy">'
+        f'<div class="hero-label">Odysseus · {html.escape(label)}</div>'
+        f'<h1>{html.escape(title)}</h1>'
+        '<p class="designed-hero-deck">'
+        '선택한 근거만을 반복 검색·대조하고, 상충과 불확실성을 숨기지 않은 '
+        '출판형 분석 결과입니다.</p>'
+        '<div class="designed-hero-meta">'
+        f'<span>{html.escape(timestamp)}</span>'
+        '<span>Local evidence · Editorial synthesis</span>'
+        '</div></div>'
+        '<span class="designed-hero-disclosure">'
+        'AI 생성 개념 이미지 · 사실 근거 또는 데이터 시각화가 아님'
+        '</span></section>'
+    )
+
+
+def _designed_ambient_layer(asset: Optional[Dict]) -> str:
+    if not asset:
+        return ""
+    return (
+        '<div class="designed-ambient-layer" '
+        'data-visual-role="page_ambient_background" aria-hidden="true">'
+        f'<img src="{asset["data_uri"]}" alt="" aria-hidden="true">'
+        '</div>'
+    )
+
+
+def _designed_section_background(asset: Dict, title: str) -> str:
+    alt_text = html.escape(asset.get("alt") or "", quote=True)
+    return (
+        '<figure class="designed-section-visual" '
+        'data-generated-image="true" data-visual-role="section_background">'
+        f'<img src="{asset["data_uri"]}" alt="{alt_text}" loading="eager">'
+        f'<div class="designed-section-title">{html.escape(title)}</div>'
+        '<figcaption>AI 생성 개념 이미지 · 사실 근거나 데이터 시각화가 아닙니다.</figcaption>'
+        '</figure>'
+    )
+
+
+def _inject_designed_section_figure(report_html: str, asset: Dict) -> str:
+    """Place one editorial divider at the section its concept represents."""
+    semantic_target = re.search(
+        r"<h[23]\b[^>]*>[^<]*(?:상충|충돌|불확실|한계|conflict|uncertaint)[^<]*</h[23]>",
+        report_html,
+        flags=re.IGNORECASE,
+    )
+    if semantic_target:
+        title = re.sub(r"<[^>]+>", "", semantic_target.group(0))
+        figure_html = _designed_section_background(asset, html.unescape(title))
+        return (
+            report_html[:semantic_target.end()]
+            + figure_html
+            + report_html[semantic_target.end():]
+        )
+    closing_headings = list(re.finditer(r"</h2>", report_html, flags=re.IGNORECASE))
+    if not closing_headings:
+        return _designed_section_background(asset, "핵심 근거의 대조") + report_html
+    target = closing_headings[1] if len(closing_headings) > 1 else closing_headings[0]
+    heading_open = report_html.rfind("<h2", 0, target.start())
+    heading_html = report_html[heading_open:target.end()] if heading_open >= 0 else ""
+    title = re.sub(r"<[^>]+>", "", heading_html) or "핵심 근거의 대조"
+    figure_html = _designed_section_background(asset, html.unescape(title))
+    return report_html[:target.end()] + figure_html + report_html[target.end():]
+
+
+def _strip_generated_summary_wrapper(markdown_text: str) -> str:
+    """Remove handler-added stats duplicated by the designed report stats bar."""
+    return re.sub(
+        r"^\s*---\s*\n+"
+        r"##\s+Research Summary\s*\n+"
+        r"(?:\*\*(?:Duration|Rounds|Queries|URLs Analyzed):\*\*[^|\n]+(?:\s*\|\s*)?){4}\s*\n+"
+        r"---\s*\n+",
+        "",
+        markdown_text,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+
+
 def generate_visual_report(
     question: str,
     report_markdown: str,
@@ -2076,15 +2553,27 @@ def generate_visual_report(
     hidden_images: Optional[List[str]] = None,
     report_style: str = "legacy",
     research_mode: str = "research",
+    design_image_mode: str = "none",
+    designed_visual_assets: Optional[List[Dict]] = None,
+    design_assets_status: Optional[str] = None,
 ) -> str:
     sources = sources or []
     stats = stats or {}
     hidden_images_set = set(hidden_images or [])
     report_style = "designed" if str(report_style or "").strip().lower() == "designed" else "legacy"
     research_mode = "editorial" if str(research_mode or "").strip().lower() == "editorial" else "research"
+    design_image_mode = (
+        str(design_image_mode or "none").strip().lower()
+        if report_style == "designed"
+        else "none"
+    )
+    if design_image_mode not in {"none", "cover", "editorial"}:
+        design_image_mode = "none"
 
     # Strip thinking artifacts
     report_markdown = strip_thinking(report_markdown)
+    if report_style == "designed":
+        report_markdown = _strip_generated_summary_wrapper(report_markdown)
 
     # Use the report's first heading as the title (synthesized by the LLM)
     # rather than the raw user query. Fall back to the query if absent.
@@ -2140,7 +2629,50 @@ def generate_visual_report(
             f'{_IMG_OVERLAY_BTNS}'
             f'</div>'
         )
-
+    designed_assets = (
+        _load_designed_visual_assets(designed_visual_assets)
+        if report_style == "designed" and design_image_mode != "none"
+        else []
+    )
+    designed_hero = next((a for a in designed_assets if a["role"] == "hero"), None)
+    designed_section = next((a for a in designed_assets if a["role"] == "section"), None)
+    designed_ambient = next((a for a in designed_assets if a["role"] == "ambient"), None)
+    loaded_roles = {asset["role"] for asset in designed_assets}
+    expected_roles = (
+        set()
+        if design_image_mode == "none"
+        else {"hero"}
+        if design_image_mode == "cover"
+        else {"hero", "section", "ambient"}
+    )
+    if not expected_roles:
+        rendered_design_assets_status = "disabled"
+    elif not loaded_roles:
+        rendered_design_assets_status = "fallback"
+    elif expected_roles.issubset(loaded_roles):
+        rendered_design_assets_status = "ready"
+    else:
+        rendered_design_assets_status = "partial"
+    persisted_design_assets_status = str(
+        design_assets_status or ""
+    ).strip().lower()
+    if (
+        persisted_design_assets_status == "partial"
+        and rendered_design_assets_status == "ready"
+    ):
+        # Preserve a generation warning even if the available roles happen to
+        # render successfully; the job metadata remains the source of truth.
+        rendered_design_assets_status = "partial"
+    design_spec = (
+        build_design_spec(
+            category=category,
+            headings=headings,
+            image_mode=design_image_mode,
+            assets=designed_assets,
+        )
+        if report_style == "designed"
+        else None
+    )
     # Product quick-links bar
     if category == "product" and headings:
         product_headings = [h for h in headings if h["level"] == 3]
@@ -2157,6 +2689,11 @@ def generate_visual_report(
     section_pool = all_images[1:]
     report_html, _consumed = _inject_images(report_html, section_pool)
     spare_images = section_pool[_consumed:]
+    if designed_section and design_image_mode == "editorial":
+        report_html = _inject_designed_section_figure(
+            report_html,
+            designed_section,
+        )
 
     # Build TOC
     toc_lines = []
@@ -2208,6 +2745,33 @@ def generate_visual_report(
         )
 
     timestamp = datetime.now().strftime("%B %d, %Y at %H:%M")
+    if report_style == "designed" and designed_hero:
+        hero_composition_html = _designed_hero_composer(
+            designed_hero,
+            title=synthesized,
+            category=category,
+            timestamp=timestamp,
+        )
+    else:
+        hero_composition_html = (
+            '<div class="hero">'
+            '<div class="hero-label">Odysseus &mdash; Deep Research Report</div>'
+            f'<h1>{html.escape(synthesized)}</h1>'
+            '</div>'
+            f'{hero_image_html}'
+        )
+    ambient_layer_html = (
+        _designed_ambient_layer(designed_ambient)
+        if report_style == "designed" and design_image_mode == "editorial"
+        else ""
+    )
+    design_manifest_html = (
+        '<script id="odysseus-design-manifest" type="application/json">'
+        f'{_json_for_script(design_spec.to_dict())}'
+        '</script>'
+        if design_spec
+        else ""
+    )
 
     # Build description for OG/meta tags (first 160 chars of plain text)
     desc_text = re.sub(r'[#*_\[\]()]', '', report_markdown)[:160].strip()
@@ -2253,8 +2817,9 @@ def generate_visual_report(
         title=html.escape(title_text),
         description=html.escape(desc_text),
         og_image_meta=og_image_meta,
-        question_html=html.escape(synthesized),
-        hero_image_html=hero_image_html,
+        hero_composition_html=hero_composition_html,
+        ambient_layer_html=ambient_layer_html,
+        design_manifest_html=design_manifest_html,
         stats_html=stats_html,
         toc_html=toc_html,
         report_html=report_html,
@@ -2262,7 +2827,11 @@ def generate_visual_report(
         chat_cta_html=chat_cta_html,
         restore_btn_html=restore_btn_html,
         timestamp=timestamp,
-        designed_css=_designed_report_css(category) if report_style == "designed" else "",
+        designed_css=(
+            _designed_report_css(category, design_spec)
+            if report_style == "designed"
+            else ""
+        ),
         category_css=_category_css(category),
         body_class=" ".join(
             part
@@ -2276,10 +2845,24 @@ def generate_visual_report(
                     if report_style == "designed"
                     else ""
                 ),
+                (
+                    "has-generated-ambient"
+                    if report_style == "designed" and designed_ambient
+                    else ""
+                ),
             )
             if part
         ),
         report_style=report_style,
+        design_preset=html.escape(design_spec.preset if design_spec else "legacy", quote=True),
+        design_variation_id=html.escape(
+            design_spec.manifest.variation_id
+            if design_spec and design_spec.manifest
+            else "legacy",
+            quote=True,
+        ),
+        design_image_mode=html.escape(design_image_mode, quote=True),
+        design_assets_status=rendered_design_assets_status,
         session_id_js=json_dumps_str(session_id or ""),
         spare_images_js=_json_for_script(spare_images),
     )

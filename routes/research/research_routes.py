@@ -18,6 +18,7 @@ from core.middleware import INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
 from src.research_handler import (
     normalize_artifact_formats,
+    normalize_design_image_mode,
     normalize_reasoning_effort,
     normalize_research_mode,
 )
@@ -299,6 +300,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(entry.get("research_mode")),
+                    "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
+                    "design_assets_status": entry.get("design_assets_status") or "disabled",
                 })
         return {"active": active}
 
@@ -341,6 +344,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "raw_findings": raw_findings,
             "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
             "research_mode": normalize_research_mode(task.get("research_mode")),
+            "design_image_mode": normalize_design_image_mode(task.get("design_image_mode")),
+            "design_assets_status": task.get("design_assets_status") or "disabled",
         }
 
     def _assert_owns_research(session_id: str, user: str) -> None:
@@ -501,6 +506,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(d.get("research_mode")),
+                    "design_image_mode": normalize_design_image_mode(d.get("design_image_mode")),
+                    "design_assets_status": d.get("design_assets_status") or "disabled",
                     "started_at": d.get("started_at", 0),
                     "completed_at": d.get("completed_at", 0),
                     "archived": bool(d.get("archived")),
@@ -701,6 +708,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
         reasoning_effort: Optional[str] = None
         research_mode: Optional[str] = None
+        design_image_mode: Optional[str] = None
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
@@ -801,6 +809,9 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             raise HTTPException(400, str(e))
         artifact_formats = normalize_artifact_formats(body.artifact_formats)
         reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
+        design_image_mode = normalize_design_image_mode(body.design_image_mode)
+        if "html_designed" not in artifact_formats:
+            design_image_mode = "none"
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
@@ -821,6 +832,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             artifact_formats=artifact_formats,
             reasoning_effort=reasoning_effort,
             research_mode=research_mode,
+            design_image_mode=design_image_mode,
             owner=user,
         )
         return {
@@ -830,6 +842,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "artifact_formats": artifact_formats,
             "reasoning_effort": reasoning_effort,
             "research_mode": research_mode,
+            "design_image_mode": design_image_mode,
+            "design_assets_status": "pending" if design_image_mode != "none" else "disabled",
         }
 
     @router.get("/api/research/stream/{session_id}")
@@ -885,6 +899,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(d.get("research_mode")),
+                    "design_image_mode": normalize_design_image_mode(d.get("design_image_mode")),
+                    "design_assets_status": d.get("design_assets_status") or "disabled",
                 }
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
@@ -898,6 +914,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
             "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
             "research_mode": normalize_research_mode(task.get("research_mode")),
+            "design_image_mode": normalize_design_image_mode(task.get("design_image_mode")),
+            "design_assets_status": task.get("design_assets_status") or "disabled",
         }
 
     @router.post("/api/research/spinoff/{session_id}")

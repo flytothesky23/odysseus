@@ -8,6 +8,7 @@ if needed.
 Includes a task registry so research survives page refreshes and can be cancelled.
 """
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 RESEARCH_DATA_DIR = Path(DEEP_RESEARCH_DIR)
 _RESEARCH_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
 _ARTIFACT_FORMATS = ("html", "html_designed", "md_json")
+_DESIGN_IMAGE_MODES = ("none", "cover", "editorial")
 _ARTIFACT_ALIASES = {
     "html": "html",
     "visual": "html",
@@ -39,6 +41,12 @@ _ARTIFACT_ALIASES = {
     "md_json": "md_json",
     "markdown_json": "md_json",
     "obsidian": "md_json",
+}
+
+_DESIGN_IMAGE_ALT = {
+    "hero": "흩어진 근거가 하나의 논지로 정리되는 과정을 표현한 생성형 표지 일러스트",
+    "section": "상충하는 기록과 불확실성을 대조하는 과정을 표현한 생성형 편집 일러스트",
+    "ambient": "보고서 전체의 차분한 편집 분위기를 만드는 저대비 생성형 종이 질감",
 }
 
 
@@ -71,6 +79,181 @@ def normalize_research_mode(value: Optional[str]) -> str:
     }:
         return "editorial"
     return "research"
+
+
+def normalize_design_image_mode(value: Optional[str]) -> str:
+    """Normalize the opt-in visual layer without silently enabling generation."""
+    mode = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "off": "none",
+        "disabled": "none",
+        "hero": "cover",
+        "cover_background": "cover",
+        "cover_and_background": "cover",
+        "sections": "editorial",
+        "full": "editorial",
+        "illustrated": "editorial",
+    }
+    mode = aliases.get(mode, mode)
+    return mode if mode in _DESIGN_IMAGE_MODES else "none"
+
+
+def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]:
+    """Return generic, non-identifying art direction prompts.
+
+    Private report text, user queries, source titles, figures, names, and paths
+    are deliberately excluded. The selected report category only chooses a
+    broad visual vocabulary.
+    """
+    image_mode = normalize_design_image_mode(mode)
+    if image_mode == "none":
+        return []
+    category_key = str(category or "").strip().lower()
+    category_direction = {
+        "management": (
+            "an evidence-grounded operational management briefing, disciplined "
+            "document flow, measured comparison, no financial dashboard or chart"
+        ),
+        "comparison": "careful comparison of multiple evidence paths without a forced winner",
+        "factcheck": "claim verification, source cross-checking, and visible uncertainty",
+        "howto": "a clear sequence from raw material to an audited finished publication",
+        "product": "a rigorous product assessment built from traceable evidence",
+    }.get(
+        category_key,
+        "a research-grade editorial synthesis built from private notes and traceable evidence",
+    )
+    palette = (
+        "midnight indigo, warm parchment, oxidized copper, muted sage, "
+        "one restrained coral accent"
+    )
+    common = (
+        f"Concept: {category_direction}. Style: sophisticated contemporary editorial "
+        "illustration using tactile paper collage, vellum, fine ink lines, and subtle "
+        f"print texture. Palette: {palette}. No readable text, letters, numbers, logos, "
+        "people, real companies, realistic evidence photographs, data charts, dashboard "
+        "UI, or watermark. The image is interpretive decoration, never factual evidence."
+    )
+    specs = [{
+        "role": "hero",
+        "visual_role": "editorial_hero",
+        "size": "1536x1024",
+        "focal_x": 0.78,
+        "focal_y": 0.5,
+        "safe_area": "left",
+        "desktop_aspect": "21/9",
+        "mobile_aspect": "4/5",
+        "overlay_strength": 0.62,
+        "palette": "midnight-parchment-copper",
+        "prompt": (
+            "Wide cinematic report hero, 21:9 composition. Keep the left 45 percent "
+            "calm, dark, and low-detail as title-safe negative space; place the focal "
+            "archival composition inside the right 40 percent: scattered note fragments are sorted, "
+            "cross-checked, and woven into one coherent publication path. "
+            + common
+        ),
+    }]
+    if image_mode == "editorial":
+        specs.append({
+            "role": "section",
+            "visual_role": "section_background",
+            "size": "1536x1024",
+            "focal_x": 0.5,
+            "focal_y": 0.5,
+            "safe_area": "left",
+            "desktop_aspect": "16/7",
+            "mobile_aspect": "4/3",
+            "overlay_strength": 0.54,
+            "palette": "midnight-parchment-copper",
+            "prompt": (
+                "Wide 16:7 chapter-divider composition with the left third quiet enough "
+                "for a short HTML heading: layered translucent paper paths "
+                "represent verified fact, personal perspective, revision over time, "
+                "and one deliberately unresolved evidence gap meeting in a quiet "
+                "comparison field. "
+                + common
+            ),
+        })
+        specs.append({
+            "role": "ambient",
+            "visual_role": "page_ambient_background",
+            "size": "1024x1024",
+            "focal_x": 0.5,
+            "focal_y": 0.5,
+            "safe_area": "none",
+            "desktop_aspect": "1/1",
+            "mobile_aspect": "1/1",
+            "overlay_strength": 0.88,
+            "palette": "warm-paper-sage",
+            "prompt": (
+                "Seamless, very low-contrast editorial paper atmosphere for a long "
+                "reading page: warm parchment fibers, faint indigo ink bloom, muted "
+                "sage vellum shadows, sparse copper flecks, no focal object, no hard "
+                "edge, no text, suitable behind opaque reading surfaces. "
+                + common
+            ),
+        })
+    return specs
+
+
+def _design_asset_cache_key(spec: dict, requested_model: str, quality: str) -> str:
+    """Build a privacy-safe deterministic cache key for a generated asset."""
+    payload = {
+        "prompt": spec["prompt"],
+        "role": spec["role"],
+        "visual_role": spec["visual_role"],
+        "size": spec["size"],
+        "quality": quality,
+        "requested_model": requested_model or "auto",
+        "art_direction": "private-evidence-editorial-v2",
+        "renderer": "hero-composer-v1",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _find_cached_design_asset(
+    cache_key: str,
+    role: str,
+    owner: Optional[str],
+) -> Optional[dict]:
+    """Reuse only a same-owner confined asset from an earlier completed job."""
+    from src.generated_images import resolve_generated_image_path
+
+    owner_key = str(owner or "")
+    try:
+        candidates = sorted(
+            RESEARCH_DATA_DIR.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:200]
+    except Exception:
+        return None
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(data.get("owner") or "") != owner_key:
+            continue
+        for asset in data.get("designed_visual_assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            if asset.get("cache_key") != cache_key or asset.get("role") != role:
+                continue
+            try:
+                image_path = resolve_generated_image_path(
+                    str(asset.get("filename") or "")
+                )
+                byte_size = image_path.stat().st_size
+            except Exception:
+                continue
+            if 0 < byte_size <= 6 * 1024 * 1024:
+                cached = dict(asset)
+                cached["byte_size"] = byte_size
+                cached["cache_reused"] = True
+                return cached
+    return None
 
 
 def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
@@ -311,6 +494,163 @@ class ResearchHandler:
             logger.warning(f"Research plan generation failed: {e}")
             return None
 
+    async def _generate_designed_visual_assets(
+        self,
+        session_id: str,
+        entry: dict,
+    ) -> dict:
+        """Generate optional local assets without making report success depend on them."""
+        mode = normalize_design_image_mode(entry.get("design_image_mode"))
+        if mode == "none" or "html_designed" not in normalize_artifact_formats(
+            entry.get("artifact_formats")
+        ):
+            return {
+                "status": "disabled",
+                "mode": "none",
+                "assets": [],
+                "error_codes": [],
+            }
+
+        from src.ai_interaction import do_generate_image
+        from src.generated_images import resolve_generated_image_path
+        try:
+            from src.settings import load_settings
+            image_settings = load_settings()
+        except Exception:
+            image_settings = {}
+        requested_model = str(image_settings.get("image_model") or "")[:160]
+        quality = str(image_settings.get("image_quality") or "medium")[:40]
+
+        assets = []
+        error_codes = []
+        total_bytes = 0
+        specs = _design_image_prompt_specs(entry.get("category"), mode)
+        for spec in specs:
+            prompt = spec["prompt"]
+            cache_key = _design_asset_cache_key(spec, requested_model, quality)
+            cached = _find_cached_design_asset(
+                cache_key,
+                spec["role"],
+                entry.get("owner") or None,
+            )
+            if cached and total_bytes + int(cached["byte_size"]) <= 12 * 1024 * 1024:
+                assets.append(cached)
+                total_bytes += int(cached["byte_size"])
+                continue
+            result = await do_generate_image(
+                f"{prompt}\n\n{spec['size']}\n{quality}",
+                session_id=session_id,
+                owner=entry.get("owner") or None,
+            )
+            if not isinstance(result, dict) or result.get("error"):
+                error_text = str((result or {}).get("error") or "").lower()
+                code = (
+                    "image_model_unavailable"
+                    if "no image model" in error_text or "no endpoint found" in error_text
+                    else "generation_failed"
+                )
+                error_codes.append(code)
+                continue
+
+            image_url = str(result.get("image_url") or "")
+            prefix = "/api/generated-image/"
+            if not image_url.startswith(prefix):
+                error_codes.append("non_local_asset_rejected")
+                continue
+            filename = image_url[len(prefix):]
+            try:
+                image_path = resolve_generated_image_path(filename)
+                byte_size = image_path.stat().st_size
+            except Exception:
+                error_codes.append("invalid_local_asset")
+                continue
+            if byte_size <= 0 or byte_size > 6 * 1024 * 1024:
+                error_codes.append("asset_size_limit")
+                continue
+            if total_bytes + byte_size > 12 * 1024 * 1024:
+                error_codes.append("asset_total_size_limit")
+                continue
+            mime_type = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+            }.get(image_path.suffix.lower())
+            if not mime_type:
+                error_codes.append("invalid_local_asset")
+                continue
+
+            assets.append({
+                "role": spec["role"],
+                "visual_role": spec["visual_role"],
+                "filename": filename,
+                "mime_type": mime_type,
+                "byte_size": byte_size,
+                "alt": _DESIGN_IMAGE_ALT[spec["role"]],
+                "model": str(result.get("image_model") or "")[:120],
+                "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "cache_key": cache_key,
+                "art_direction": "private-evidence-editorial-v2",
+                "focal_x": spec["focal_x"],
+                "focal_y": spec["focal_y"],
+                "safe_area": spec["safe_area"],
+                "desktop_aspect": spec["desktop_aspect"],
+                "mobile_aspect": spec["mobile_aspect"],
+                "overlay_strength": spec["overlay_strength"],
+                "palette": spec["palette"],
+            })
+            total_bytes += byte_size
+
+        if len(assets) == len(specs) and not error_codes:
+            status = "ready"
+        elif assets:
+            status = "partial"
+        else:
+            status = "fallback"
+        return {
+            "status": status,
+            "mode": mode,
+            "assets": assets,
+            "error_codes": sorted(set(error_codes)),
+        }
+
+    async def _generate_designed_visual_assets_bounded(
+        self,
+        session_id: str,
+        entry: dict,
+        *,
+        timeout_seconds: float,
+    ) -> dict:
+        """Keep optional image work bounded and degrade to the text design."""
+        try:
+            return await asyncio.wait_for(
+                self._generate_designed_visual_assets(session_id, entry),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Designed visual generation timed out after %ss for session %s",
+                timeout_seconds,
+                session_id,
+            )
+            return {
+                "status": "fallback",
+                "mode": normalize_design_image_mode(entry.get("design_image_mode")),
+                "assets": [],
+                "error_codes": ["generation_timeout"],
+            }
+        except Exception:
+            logger.exception(
+                "Designed visual generation failed for session %s; preserving text report",
+                session_id,
+            )
+            return {
+                "status": "fallback",
+                "mode": normalize_design_image_mode(entry.get("design_image_mode")),
+                "assets": [],
+                "error_codes": ["generation_failed"],
+            }
+
     # ------------------------------------------------------------------
     # Task registry — background research with persistence
     # ------------------------------------------------------------------
@@ -354,6 +694,7 @@ class ResearchHandler:
         artifact_formats: list = None,
         reasoning_effort: str = None,
         research_mode: str = None,
+        design_image_mode: str = None,
         owner: str = "",
     ) -> dict:
         """Start research as a background task. Returns task info dict.
@@ -386,11 +727,30 @@ class ResearchHandler:
                     maximum=86400,
                 )
 
+        from src.settings import get_setting
+        try:
+            raw_design_timeout = int(
+                get_setting("research_design_image_timeout_seconds", 360)
+            )
+        except (TypeError, ValueError):
+            raw_design_timeout = 360
+        design_image_timeout = _bounded_int(
+            raw_design_timeout,
+            default=360,
+            minimum=15,
+            maximum=1800,
+        )
+
         # Cancel any existing research for this session
         if session_id in self._active_tasks:
             existing = self._active_tasks[session_id]
             if existing.get("status") == "running":
                 self.cancel_research(session_id)
+
+        normalized_artifacts = normalize_artifact_formats(artifact_formats)
+        normalized_image_mode = normalize_design_image_mode(design_image_mode)
+        if "html_designed" not in normalized_artifacts:
+            normalized_image_mode = "none"
 
         entry = {
             "task": None,
@@ -403,9 +763,15 @@ class ResearchHandler:
             "category": category,
             "source_mode": source_mode,
             "knowledge_folders": list(knowledge_folders or []),
-            "artifact_formats": normalize_artifact_formats(artifact_formats),
+            "artifact_formats": normalized_artifacts,
             "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
             "research_mode": normalize_research_mode(research_mode),
+            "design_image_mode": normalized_image_mode,
+            "design_assets_status": (
+                "pending" if normalized_image_mode != "none" else "disabled"
+            ),
+            "designed_visual_assets": [],
+            "design_asset_error_codes": [],
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -477,6 +843,40 @@ class ResearchHandler:
                     timeout=hard_timeout,
                 )
                 entry["result"] = result
+                if entry["design_image_mode"] != "none":
+                    entry["design_assets_status"] = "generating"
+                    on_progress({
+                        "phase": "designing",
+                        "message": "보고서 본문 완료 — 비식별 생성형 시각 자산을 만드는 중입니다.",
+                    })
+                    # Persist a terminal text-report checkpoint before the
+                    # optional image phase. The in-memory job stays running,
+                    # while a server restart can still recover a complete
+                    # text-first designed report instead of a zombie job.
+                    checkpoint = dict(entry)
+                    checkpoint["design_assets_status"] = "fallback"
+                    checkpoint["design_asset_error_codes"] = [
+                        "generation_interrupted"
+                    ]
+                    self._save_result(
+                        session_id,
+                        checkpoint,
+                        persisted_status="done",
+                        emit_completed_event=False,
+                    )
+                    visual_result = await self._generate_designed_visual_assets_bounded(
+                        session_id,
+                        entry,
+                        timeout_seconds=design_image_timeout,
+                    )
+                    entry["design_assets_status"] = visual_result["status"]
+                    entry["designed_visual_assets"] = visual_result["assets"]
+                    entry["design_asset_error_codes"] = visual_result["error_codes"]
+                    if visual_result["status"] == "fallback":
+                        on_progress({
+                            "phase": "design_fallback",
+                            "message": "이미지 생성 없이 텍스트 중심 Design HTML로 안전하게 마감했습니다.",
+                        })
                 entry["status"] = "done"
                 self._save_result(session_id, entry)
                 # Persist to DB via callback (ensures result survives even if SSE disconnected)
@@ -549,6 +949,8 @@ class ResearchHandler:
             "artifact_formats": entry["artifact_formats"],
             "reasoning_effort": entry["reasoning_effort"],
             "research_mode": entry["research_mode"],
+            "design_image_mode": entry["design_image_mode"],
+            "design_assets_status": entry["design_assets_status"],
         }
 
     def get_status(self, session_id: str) -> Optional[dict]:
@@ -563,6 +965,8 @@ class ResearchHandler:
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                 "research_mode": normalize_research_mode(entry.get("research_mode")),
+                "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
+                "design_assets_status": entry.get("design_assets_status") or "disabled",
             }
             if entry.get("editorial_stage_errors"):
                 result["editorial_stage_errors"] = list(
@@ -596,6 +1000,8 @@ class ResearchHandler:
                     "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
                     "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(data.get("research_mode")),
+                    "design_image_mode": normalize_design_image_mode(data.get("design_image_mode")),
+                    "design_assets_status": data.get("design_assets_status") or "disabled",
                     "editorial_stage_errors": data.get("editorial_stage_errors") or [],
                 }
             except Exception:
@@ -773,7 +1179,14 @@ class ResearchHandler:
             except Exception:
                 pass
 
-    def _save_result(self, session_id: str, entry: dict):
+    def _save_result(
+        self,
+        session_id: str,
+        entry: dict,
+        *,
+        persisted_status: str = None,
+        emit_completed_event: bool = True,
+    ):
         """Persist completed research result to disk."""
         try:
             path = _research_json_path(session_id)
@@ -791,7 +1204,7 @@ class ResearchHandler:
 
             data = {
                 "query": entry["query"],
-                "status": entry["status"],
+                "status": persisted_status or entry["status"],
                 "result": entry["result"],
                 "raw_report": entry.get("raw_report", ""),
                 "sources": sources,
@@ -803,6 +1216,10 @@ class ResearchHandler:
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                 "research_mode": normalize_research_mode(entry.get("research_mode")),
+                "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
+                "design_assets_status": entry.get("design_assets_status") or "disabled",
+                "designed_visual_assets": entry.get("designed_visual_assets") or [],
+                "design_asset_error_codes": entry.get("design_asset_error_codes") or [],
                 "editorial_stage_errors": entry.get("editorial_stage_errors") or [],
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
@@ -811,7 +1228,7 @@ class ResearchHandler:
             }
             path.write_text(json.dumps(data), encoding="utf-8")
             logger.info(f"Research result saved to {path}")
-            if entry.get("status") == "done":
+            if emit_completed_event and data["status"] == "done":
                 try:
                     from src.event_bus import fire_event
                     fire_event("research_completed", entry.get("owner") or None)
@@ -856,6 +1273,9 @@ class ResearchHandler:
                 hidden_images=data.get("hidden_images") or [],
                 report_style=report_style,
                 research_mode=normalize_research_mode(data.get("research_mode")),
+                design_image_mode=normalize_design_image_mode(data.get("design_image_mode")),
+                designed_visual_assets=data.get("designed_visual_assets") or [],
+                design_assets_status=data.get("design_assets_status"),
             )
             logger.info(f"Visual report generated for {session_id}")
             return html_content
@@ -898,6 +1318,10 @@ class ResearchHandler:
             "knowledge_folders": data.get("knowledge_folders") or [],
             "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
             "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
+            "design_image_mode": normalize_design_image_mode(data.get("design_image_mode")),
+            "design_assets_status": data.get("design_assets_status") or "disabled",
+            "designed_visual_assets": data.get("designed_visual_assets") or [],
+            "design_asset_error_codes": data.get("design_asset_error_codes") or [],
             "started_at": data.get("started_at", 0),
             "completed_at": data.get("completed_at", 0),
             "artifact_urls": artifact_urls,

@@ -1,12 +1,15 @@
 import json
 
 import markdown as markdown_lib
+import pytest
 from bs4 import BeautifulSoup
 
 from src import research_handler
+from src import generated_images
 from src.research_handler import (
     ResearchHandler,
     normalize_artifact_formats,
+    normalize_design_image_mode,
     normalize_reasoning_effort,
 )
 
@@ -69,6 +72,13 @@ def test_normalize_reasoning_effort_drops_invalid_values():
     assert normalize_reasoning_effort("HIGH") == "high"
     assert normalize_reasoning_effort(" medium ") == "medium"
     assert normalize_reasoning_effort("expensive") is None
+
+
+def test_design_image_mode_is_opt_in_and_bounded():
+    assert normalize_design_image_mode(None) == "none"
+    assert normalize_design_image_mode("hero") == "cover"
+    assert normalize_design_image_mode("EDITORIAL") == "editorial"
+    assert normalize_design_image_mode("arbitrary-html") == "none"
 
 
 def test_markdown_export_is_obsidian_friendly(tmp_path, monkeypatch):
@@ -156,3 +166,252 @@ def test_designed_html_is_a_separate_artifact(tmp_path, monkeypatch):
     assert legacy != designed
     assert "https://fonts." not in designed
     assert "<script src=" not in designed
+
+
+def test_designed_html_embeds_only_confined_local_generated_assets(tmp_path, monkeypatch):
+    handler, data_dir = _handler(tmp_path, monkeypatch)
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", image_dir)
+    hero_name = "0123456789abcdef.png"
+    section_name = "fedcba9876543210.png"
+    (image_dir / hero_name).write_bytes(b"\x89PNG\r\n\x1a\nhero")
+    (image_dir / section_name).write_bytes(b"\x89PNG\r\n\x1a\nsection")
+    data = _write_result(data_dir)
+    data.update({
+        "artifact_formats": ["html", "html_designed"],
+        "design_image_mode": "editorial",
+        "design_assets_status": "ready",
+        "designed_visual_assets": [
+            {"role": "hero", "filename": hero_name, "alt": "생성 표지"},
+            {"role": "section", "filename": section_name, "alt": "생성 섹션"},
+            {"role": "hero", "filename": "../escape.png", "alt": "탈출 시도"},
+        ],
+    })
+    (data_dir / "rp-export.json").write_text(json.dumps(data), encoding="utf-8")
+
+    designed = handler.get_report_html("rp-export", report_style="designed")
+    legacy = handler.get_report_html("rp-export")
+    soup = BeautifulSoup(designed, "html.parser")
+
+    assert soup.body["data-design-image-mode"] == "editorial"
+    rendered_images = soup.select(
+        '.designed-hero-composer > img, figure[data-generated-image="true"] img'
+    )
+    assert len(rendered_images) == 2
+    assert all(img["src"].startswith("data:image/png;base64,") for img in rendered_images)
+    assert all(not img["src"].startswith(("http:", "https:")) for img in rendered_images)
+    assert "../escape.png" not in designed
+    assert 'data-design-image-mode="none"' in legacy
+    assert 'data-generated-image="true"' not in legacy
+
+
+@pytest.mark.asyncio
+async def test_design_image_generation_failure_keeps_text_report_available(tmp_path, monkeypatch):
+    handler, _ = _handler(tmp_path, monkeypatch)
+
+    async def _fail(*args, **kwargs):
+        return {"error": "No image model configured"}
+
+    monkeypatch.setattr("src.ai_interaction.do_generate_image", _fail)
+    outcome = await handler._generate_designed_visual_assets(
+        "rp-fallback",
+        {
+            "category": "comparison",
+            "artifact_formats": ["html_designed"],
+            "design_image_mode": "editorial",
+            "owner": "alice",
+        },
+    )
+
+    assert outcome["status"] == "fallback"
+    assert outcome["assets"] == []
+    assert outcome["error_codes"] == ["image_model_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_design_image_timeout_and_exception_degrade_to_text_report(tmp_path, monkeypatch):
+    handler, _ = _handler(tmp_path, monkeypatch)
+
+    async def _slow(*args, **kwargs):
+        import asyncio
+        await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(handler, "_generate_designed_visual_assets", _slow)
+    timed_out = await handler._generate_designed_visual_assets_bounded(
+        "rp-timeout",
+        {"design_image_mode": "editorial"},
+        timeout_seconds=0.01,
+    )
+    assert timed_out["status"] == "fallback"
+    assert timed_out["error_codes"] == ["generation_timeout"]
+
+    async def _raise(*args, **kwargs):
+        raise RuntimeError("provider failed")
+
+    monkeypatch.setattr(handler, "_generate_designed_visual_assets", _raise)
+    failed = await handler._generate_designed_visual_assets_bounded(
+        "rp-error",
+        {"design_image_mode": "cover"},
+        timeout_seconds=1,
+    )
+    assert failed["status"] == "fallback"
+    assert failed["error_codes"] == ["generation_failed"]
+
+
+def test_image_phase_checkpoint_recovers_as_done_after_restart(tmp_path, monkeypatch):
+    handler, data_dir = _handler(tmp_path, monkeypatch)
+    entry = {
+        "query": "선택 노트 분석",
+        "status": "running",
+        "result": "# 본문 완료\n\n근거 기반 본문",
+        "started_at": 100,
+        "artifact_formats": ["html_designed"],
+        "research_mode": "editorial",
+        "design_image_mode": "editorial",
+        "design_assets_status": "fallback",
+        "design_asset_error_codes": ["generation_interrupted"],
+        "owner": "alice",
+    }
+
+    handler._save_result(
+        "rp-restart",
+        entry,
+        persisted_status="done",
+        emit_completed_event=False,
+    )
+
+    saved = json.loads((data_dir / "rp-restart.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "done"
+    assert saved["design_assets_status"] == "fallback"
+    assert saved["design_asset_error_codes"] == ["generation_interrupted"]
+
+    restarted = ResearchHandler.__new__(ResearchHandler)
+    restarted._active_tasks = {}
+    status = restarted.get_status("rp-restart")
+    assert status["status"] == "done"
+    assert status["design_assets_status"] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_matching_design_assets_are_reused_without_generation_calls(tmp_path, monkeypatch):
+    handler, data_dir = _handler(tmp_path, monkeypatch)
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", image_dir)
+    monkeypatch.setattr(
+        "src.settings.load_settings",
+        lambda: {"image_model": "gpt-image-1.5", "image_quality": "medium"},
+    )
+
+    cached_assets = []
+    for index, spec in enumerate(
+        research_handler._design_image_prompt_specs(None, "editorial"),
+        start=1,
+    ):
+        filename = f"{index:016x}.png"
+        (image_dir / filename).write_bytes(b"\x89PNG\r\n\x1a\ncached")
+        cached_assets.append({
+            "role": spec["role"],
+            "visual_role": spec["visual_role"],
+            "filename": filename,
+            "byte_size": 14,
+            "alt": f"cached {spec['role']}",
+            "model": "gpt-image-1.5",
+            "cache_key": research_handler._design_asset_cache_key(
+                spec,
+                "gpt-image-1.5",
+                "medium",
+            ),
+        })
+    (data_dir / "prior.json").write_text(
+        json.dumps({
+            "owner": "alice",
+            "designed_visual_assets": cached_assets,
+        }),
+        encoding="utf-8",
+    )
+
+    async def _must_not_generate(*args, **kwargs):
+        raise AssertionError("matching cached assets must be reused")
+
+    monkeypatch.setattr("src.ai_interaction.do_generate_image", _must_not_generate)
+    outcome = await handler._generate_designed_visual_assets(
+        "rp-cache",
+        {
+            "category": None,
+            "artifact_formats": ["html_designed"],
+            "design_image_mode": "editorial",
+            "owner": "alice",
+        },
+    )
+
+    assert outcome["status"] == "ready"
+    assert [asset["role"] for asset in outcome["assets"]] == [
+        "hero",
+        "section",
+        "ambient",
+    ]
+    assert all(asset["cache_reused"] is True for asset in outcome["assets"])
+
+
+@pytest.mark.asyncio
+async def test_design_asset_cache_does_not_cross_owner_boundary(tmp_path, monkeypatch):
+    handler, data_dir = _handler(tmp_path, monkeypatch)
+    image_dir = tmp_path / "generated_images"
+    image_dir.mkdir()
+    monkeypatch.setattr(generated_images, "GENERATED_IMAGE_DIR", image_dir)
+    monkeypatch.setattr(
+        "src.settings.load_settings",
+        lambda: {"image_model": "gpt-image-1.5", "image_quality": "medium"},
+    )
+
+    spec = research_handler._design_image_prompt_specs(None, "cover")[0]
+    filename = "00000000000000ff.png"
+    (image_dir / filename).write_bytes(b"\x89PNG\r\n\x1a\nbob")
+    (data_dir / "bob-prior.json").write_text(
+        json.dumps({
+            "owner": "bob",
+            "designed_visual_assets": [{
+                "role": spec["role"],
+                "visual_role": spec["visual_role"],
+                "filename": filename,
+                "byte_size": 11,
+                "alt": "bob cached hero",
+                "model": "gpt-image-1.5",
+                "cache_key": research_handler._design_asset_cache_key(
+                    spec,
+                    "gpt-image-1.5",
+                    "medium",
+                ),
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    generated = []
+
+    async def _generate_for_alice(*args, **kwargs):
+        generated.append(kwargs.get("owner"))
+        alice_name = "0000000000000aaa.png"
+        (image_dir / alice_name).write_bytes(b"\x89PNG\r\n\x1a\nalice")
+        return {
+            "image_url": f"/api/generated-image/{alice_name}",
+            "image_model": "gpt-image-1.5",
+        }
+
+    monkeypatch.setattr("src.ai_interaction.do_generate_image", _generate_for_alice)
+    outcome = await handler._generate_designed_visual_assets(
+        "rp-cache-owner",
+        {
+            "category": None,
+            "artifact_formats": ["html_designed"],
+            "design_image_mode": "cover",
+            "owner": "alice",
+        },
+    )
+
+    assert generated == ["alice"]
+    assert outcome["status"] == "ready"
+    assert outcome["assets"][0]["filename"] == "0000000000000aaa.png"
+    assert outcome["assets"][0].get("cache_reused") is not True

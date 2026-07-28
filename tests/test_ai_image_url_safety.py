@@ -41,7 +41,7 @@ def _patch_generation(monkeypatch, image_url):
     monkeypatch.setattr(
         ai_interaction,
         "_resolve_model",
-        lambda model_spec, owner=None: (
+        lambda model_spec, owner=None, model_type=None: (
             "https://api.openai.example/v1/chat/completions",
             "dall-e-3",
             {"Authorization": "Bearer test"},
@@ -102,3 +102,29 @@ async def test_generate_image_rejects_unsafe_provider_url_without_download(monke
         "link-local address blocked (SSRF metadata risk): 169.254.169.254"
     )
     assert events == [("check", unsafe_url, False)]
+
+
+async def test_generate_image_never_falls_back_to_text_endpoint(monkeypatch):
+    import src.settings as settings
+
+    calls = []
+
+    def _resolve(model_spec, owner=None, model_type=None):
+        calls.append(model_type)
+        if model_type == "image":
+            raise ValueError("no image endpoint")
+        return (
+            "https://text-oauth.example/v1/chat/completions",
+            "gpt-image-looking-name",
+            {},
+        )
+
+    monkeypatch.setattr(settings, "load_settings", lambda: {
+        "image_model": "gpt-image-looking-name",
+    })
+    monkeypatch.setattr(ai_interaction, "_resolve_model", _resolve)
+
+    result = await ai_interaction.do_generate_image("abstract report cover")
+
+    assert result["error"].startswith("No endpoint found with image model")
+    assert calls == ["image"]

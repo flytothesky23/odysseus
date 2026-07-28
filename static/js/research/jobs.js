@@ -74,6 +74,8 @@ async function _reconnectActive(options = {}) {
           artifact_formats: task.artifact_formats || ['html'],
           reasoning_effort: task.reasoning_effort || '',
           research_mode: task.research_mode || 'research',
+          design_image_mode: task.design_image_mode || 'none',
+          design_assets_status: task.design_assets_status || 'disabled',
           settings: {}, _es: null, _timerInterval: null,
         };
         _jobs.push(job);
@@ -116,6 +118,8 @@ async function _syncLibrary(options = {}) {
             artifact_formats: item.artifact_formats || existing.artifact_formats || ['html'],
             reasoning_effort: item.reasoning_effort || existing.reasoning_effort || '',
             research_mode: item.research_mode || existing.research_mode || 'research',
+            design_image_mode: item.design_image_mode || existing.design_image_mode || 'none',
+            design_assets_status: item.design_assets_status || existing.design_assets_status || 'disabled',
             _fromLibrary: true,
           };
           for (const [key, value] of Object.entries(updates)) {
@@ -137,6 +141,8 @@ async function _syncLibrary(options = {}) {
           artifact_formats: item.artifact_formats || ['html'],
           reasoning_effort: item.reasoning_effort || '',
           research_mode: item.research_mode || 'research',
+          design_image_mode: item.design_image_mode || 'none',
+          design_assets_status: item.design_assets_status || 'disabled',
           errorMsg: null, avgDuration: null, modelName: null,
           settings: { max_rounds: item.rounds || 8 },
           _es: null, _timerInterval: null, _fromLibrary: true,
@@ -261,6 +267,8 @@ export function formatPhase(progress, maxRounds) {
     case 'reading': return `${rn}Reading ${p.total_sources || 0} sources`;
     case 'analyzing': return `${rn}Analyzing ${p.total_findings || 0} findings`;
     case 'writing': return `Writing report -- ${p.total_sources || 0} sources`;
+    case 'designing': return 'Designing offline editorial visuals...';
+    case 'design_fallback': return 'Finishing text-first Design HTML...';
     default: return p.phase;
   }
 }
@@ -275,6 +283,8 @@ function _makeJob(query, settings) {
     artifact_formats: settings?.artifact_formats || ['html'],
     reasoning_effort: settings?.reasoning_effort || '',
     research_mode: settings?.research_mode || 'research',
+    design_image_mode: settings?.design_image_mode || 'none',
+    design_assets_status: settings?.design_image_mode && settings.design_image_mode !== 'none' ? 'pending' : 'disabled',
     errorMsg: null, avgDuration: null,
     modelName: null, endpointName: null,
     _es: null, _timerInterval: null,
@@ -310,6 +320,8 @@ async function _launchJob(job) {
   if (data.artifact_formats) job.artifact_formats = data.artifact_formats;
   if (data.reasoning_effort !== undefined) job.reasoning_effort = data.reasoning_effort || job.reasoning_effort || '';
   if (data.research_mode) job.research_mode = data.research_mode;
+  if (data.design_image_mode) job.design_image_mode = data.design_image_mode;
+  if (data.design_assets_status) job.design_assets_status = data.design_assets_status;
   _connectStream(job);
   _notify();
 }
@@ -355,6 +367,8 @@ async function _pollFallback(job) {
     if (d.avg_duration) job.avgDuration = d.avg_duration;
     if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     if (d.research_mode) job.research_mode = d.research_mode;
+    if (d.design_image_mode) job.design_image_mode = d.design_image_mode;
+    if (d.design_assets_status) job.design_assets_status = d.design_assets_status;
     if (d.status !== 'running') {
       _finishJob(job, d.status === 'done' ? 'done' : 'error');
       if (d.status === 'done') _fetchResult(job);
@@ -395,6 +409,8 @@ async function _fetchResult(job) {
     if (d.artifact_formats) job.artifact_formats = d.artifact_formats;
     if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     if (d.research_mode) job.research_mode = d.research_mode;
+    if (d.design_image_mode) job.design_image_mode = d.design_image_mode;
+    if (d.design_assets_status) job.design_assets_status = d.design_assets_status;
     _notify();
   } catch {}
 }

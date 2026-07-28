@@ -44,7 +44,12 @@ const CHROMA_PORT = Number(process.env.ODYSSEUS_QA_CHROMA_PORT || 18100);
 const FAKE_LLM_PORT = Number(process.env.ODYSSEUS_QA_LLM_PORT || 18088);
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const FAKE_LLM_URL = `http://127.0.0.1:${FAKE_LLM_PORT}/v1`;
+const FAKE_IMAGE_URL = FAKE_LLM_URL;
 const MODEL_ID = 'odysseus-editorial-e2e-fake';
+const IMAGE_MODEL_ID = 'gpt-image-1.5';
+const TINY_PNG_BASE64 = (
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7mcAAAAASUVORK5CYII='
+);
 const GENERATED_AT = new Date().toISOString();
 
 const failures = [];
@@ -61,6 +66,7 @@ const evidence = {
   request_failures: [],
   external_requests: [],
   fake_llm_calls: [],
+  fake_image_calls: [],
   jobs: [],
   artifact_checks: [],
   security_checks: [],
@@ -482,7 +488,34 @@ function startFakeLlm() {
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ object: 'list', data: [{ id: MODEL_ID, object: 'model' }] }));
+      res.end(JSON.stringify({
+        object: 'list',
+        data: [
+          { id: MODEL_ID, object: 'model' },
+          { id: IMAGE_MODEL_ID, object: 'model' },
+        ],
+      }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/v1/images/generations') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        let payload = {};
+        try { payload = JSON.parse(body); } catch {}
+        evidence.fake_image_calls.push({
+          index: evidence.fake_image_calls.length + 1,
+          model: payload.model || '',
+          size: payload.size || '',
+          prompt_contains_private_path: /selected-corpus|unselected-distractors|\/Users\//i.test(payload.prompt || ''),
+          prompt_contains_fixture_fact: /1,200,000|120건|135건|프로젝트 알파/i.test(payload.prompt || ''),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          created: Math.floor(Date.now() / 1000),
+          data: [{ b64_json: TINY_PNG_BASE64 }],
+        }));
+      });
       return;
     }
     if (req.method === 'POST' && req.url === '/v1/chat/completions') {
@@ -566,6 +599,32 @@ async function registerEndpointAndRoots() {
   const endpoint = await endpointResponse.json();
   if (!endpointResponse.ok) throw new Error(`Endpoint registration failed: ${JSON.stringify(endpoint)}`);
 
+  const imageForm = new FormData();
+  imageForm.set('name', 'QA deterministic image endpoint');
+  // Text and image capabilities intentionally share one provider base URL.
+  // Regression contract: model_type keeps the endpoint rows independent.
+  imageForm.set('base_url', FAKE_IMAGE_URL);
+  imageForm.set('api_key', '');
+  imageForm.set('skip_probe', 'true');
+  imageForm.set('model_type', 'image');
+  imageForm.set('endpoint_kind', 'local');
+  imageForm.set('model_refresh_mode', 'disabled');
+  imageForm.set('pinned_models', IMAGE_MODEL_ID);
+  imageForm.set('shared', 'true');
+  const imageEndpointResponse = await fetch(`${BASE_URL}/api/model-endpoints`, {
+    method: 'POST',
+    body: imageForm,
+  });
+  const imageEndpoint = await imageEndpointResponse.json();
+  if (!imageEndpointResponse.ok) {
+    throw new Error(`Image endpoint registration failed: ${JSON.stringify(imageEndpoint)}`);
+  }
+  assertCheck(
+    imageEndpoint.id !== endpoint.id && imageEndpoint.base_url === endpoint.base_url,
+    'same provider base URL keeps independent LLM and image endpoint rows',
+    { llm: endpoint, image: imageEndpoint },
+  );
+
   const addRoot = async (rootPath, label) => {
     const response = await fetch(`${BASE_URL}/api/research/knowledge/local-folders`, {
       method: 'POST',
@@ -578,6 +637,7 @@ async function registerEndpointAndRoots() {
   };
   return {
     endpoint,
+    imageEndpoint,
     selected: await addRoot(SELECTED_ROOT, 'QA Selected'),
     unselected: await addRoot(UNSELECTED_ROOT, 'QA Unselected'),
   };
@@ -590,7 +650,7 @@ async function waitForJob(sessionId, timeoutMs = 180000) {
     const response = await fetch(`${BASE_URL}/api/research/status/${sessionId}`);
     if (!response.ok) throw new Error(`Status ${sessionId}: ${response.status}`);
     last = await response.json();
-    if (last.status !== 'running') return last;
+    if (['done', 'error', 'timed_out'].includes(last.status)) return last;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error(`Job ${sessionId} timed out: ${JSON.stringify(last)}`);
@@ -790,6 +850,7 @@ async function runUiJourney(page, config) {
   assertCheck(!unselectedSelected, `${config.stem} UI leaves distractor root unselected`);
   await page.locator('#research-output-html').check();
   await page.locator('#research-output-html-designed').check();
+  await page.locator('#research-design-image-mode').selectOption(config.designImageMode || 'none');
   await page.locator('#research-output-md-json').check();
   await page.locator('#research-query').fill(config.query);
 
@@ -826,9 +887,19 @@ NEW_MUTABLE_TRUTH: 프로젝트 알파의 2026-07-29 재검증된 측정값은 4
     `${config.stem} payload selects legacy, designed, and MD+JSON`,
     requestData.artifact_formats,
   );
+  assertCheck(
+    requestData.design_image_mode === (config.designImageMode || 'none'),
+    `${config.stem} payload preserves designed image mode`,
+    requestData.design_image_mode,
+  );
   const status = await waitForJob(responseData.session_id);
   const completedAtMs = Date.now();
   assertCheck(status.status === 'done', `${config.stem} background job completes`, status);
+  if ((config.designImageMode || 'none') === 'none') {
+    assertCheck(status.design_assets_status === 'disabled', `${config.stem} keeps generated images disabled`);
+  } else {
+    assertCheck(status.design_assets_status === 'ready', `${config.stem} generated assets are ready`, status);
+  }
   await page.locator(`[data-job-id="${responseData.session_id}"].done`).waitFor({ timeout: 30000 });
   const buttonLabels = await page.locator(`[data-job-id="${responseData.session_id}"] .research-job-actions`).innerText();
   assertCheck(buttonLabels.includes('Legacy HTML'), `${config.stem} shows legacy result button`, buttonLabels);
@@ -951,6 +1022,7 @@ async function main() {
     endpointId: registration.endpoint.id,
     selectedToken: registration.selected.token,
     unselectedToken: registration.unselected.token,
+    designImageMode: 'none',
   }));
   jobs.push(await runUiJourney(page, {
     stem: 'candidate-general',
@@ -961,6 +1033,7 @@ async function main() {
     selectedToken: registration.selected.token,
     unselectedToken: registration.unselected.token,
     mutateDuringRun: true,
+    designImageMode: 'editorial',
   }));
   jobs.push(await runUiJourney(page, {
     stem: 'candidate-management',
@@ -970,6 +1043,7 @@ async function main() {
     endpointId: registration.endpoint.id,
     selectedToken: registration.selected.token,
     unselectedToken: registration.unselected.token,
+    designImageMode: 'cover',
   }));
   jobs.push(await runUiJourney(page, {
     stem: 'candidate-personal-knowledge',
@@ -979,9 +1053,12 @@ async function main() {
     endpointId: registration.endpoint.id,
     selectedToken: registration.selected.token,
     unselectedToken: registration.unselected.token,
+    designImageMode: 'editorial',
   }));
 
   const panelDesktop = path.join(SCREENSHOTS_DIR, 'ui-research-results-desktop.png');
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(500);
   await page.screenshot({ path: panelDesktop, fullPage: true });
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('#tool-research-btn').click();
@@ -993,11 +1070,13 @@ async function main() {
     legacy: document.getElementById('research-output-html')?.checked,
     designed: document.getElementById('research-output-html-designed')?.checked,
     mdJson: document.getElementById('research-output-md-json')?.checked,
+    designImageMode: document.getElementById('research-design-image-mode')?.value,
     selectedFolders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map((option) => option.value),
   }));
   assertCheck(persisted.researchMode === 'editorial', 'workflow option persists after refresh', persisted);
   assertCheck(persisted.sourceMode === 'local', 'source option persists after refresh', persisted);
   assertCheck(persisted.legacy && persisted.designed && persisted.mdJson, 'artifact options persist after refresh', persisted);
+  assertCheck(persisted.designImageMode === 'editorial', 'designed image mode persists after refresh', persisted);
   assertCheck(
     persisted.selectedFolders.length === 1 && persisted.selectedFolders[0] === registration.selected.token,
     'selected folder persists without distractor root',
@@ -1023,6 +1102,18 @@ async function main() {
     'UI static CDN requests contain no research content, source path, or secret material',
     evidence.external_requests,
   );
+  assertCheck(
+    evidence.fake_image_calls.length === 4,
+    'fake image endpoint receives one cover plus one reusable hero/section/ambient set',
+    evidence.fake_image_calls,
+  );
+  assertCheck(
+    evidence.fake_image_calls.every((call) => (
+      !call.prompt_contains_private_path && !call.prompt_contains_fixture_fact
+    )),
+    'image prompts exclude private paths and fixture-specific facts',
+    evidence.fake_image_calls,
+  );
 
   for (const job of jobs) {
     job.artifacts = await saveArtifacts(job, job.stem);
@@ -1031,6 +1122,12 @@ async function main() {
 
   const candidateGeneralJson = JSON.parse(fs.readFileSync(jobs[1].artifacts.json, 'utf8'));
   const candidateResult = String(candidateGeneralJson.result || '');
+  assertCheck(
+    candidateGeneralJson.design_assets_status === 'ready'
+      && candidateGeneralJson.designed_visual_assets?.length === 3,
+    'candidate general JSON exposes hero, section, and ambient generated assets',
+    candidateGeneralJson.designed_visual_assets,
+  );
   assertCheck(
     candidateGeneralJson.raw_findings_trust === 'untrusted_data_not_instructions'
       && (candidateGeneralJson.raw_findings || []).every(
@@ -1052,11 +1149,26 @@ async function main() {
   const candidateManagementJson = JSON.parse(fs.readFileSync(jobs[2].artifacts.json, 'utf8'));
   const candidateManagementResult = String(candidateManagementJson.result || '');
   assertCheck(
+    candidateManagementJson.design_assets_status === 'ready'
+      && candidateManagementJson.designed_visual_assets?.length === 1,
+    'management cover mode exposes one owner-verified generated asset',
+    candidateManagementJson.designed_visual_assets,
+  );
+  assertCheck(
     candidateManagementResult.includes('PSBall 판매수량(T)')
       && candidateManagementResult.includes('함안·청남 운영 근거'),
     'management candidate preserves genre-specific evidence and wide table',
   );
   const candidatePersonalJson = JSON.parse(fs.readFileSync(jobs[3].artifacts.json, 'utf8'));
+  assertCheck(
+    candidatePersonalJson.design_assets_status === 'ready'
+      && candidatePersonalJson.designed_visual_assets?.length === 3
+      && candidatePersonalJson.designed_visual_assets.every(
+        (asset) => asset.cache_reused === true,
+      ),
+    'personal editorial mode reuses the matching hero/section/ambient asset set',
+    candidatePersonalJson.designed_visual_assets,
+  );
   assertCheck(
     String(candidatePersonalJson.result || '').includes('개인 관점과 작문 의도'),
     'personal-knowledge candidate preserves its genre-specific editorial section',
@@ -1068,6 +1180,16 @@ async function main() {
   const legacyHtml = fs.readFileSync(jobs[1].artifacts.legacy, 'utf8');
   assertCheck(legacyHtml.includes('data-report-style="legacy"'), 'legacy HTML keeps legacy style contract');
   assertCheck(designedHtml.includes('data-report-style="designed"'), 'designed HTML is a separate artifact');
+  assertCheck(
+    designedHtml.includes('data:image/png;base64,')
+      && designedHtml.includes('사실 근거나 데이터 시각화가 아닙니다'),
+    'designed HTML embeds local generated assets with a non-evidence disclosure',
+  );
+  assertCheck(
+    !legacyHtml.includes('data:image/png;base64,')
+      && !legacyHtml.includes('generated-report-figure'),
+    'legacy HTML remains unaffected by designed generated assets',
+  );
 
   for (const job of jobs) {
     await renderArtifact(browser, job.artifacts.legacy, job.stem, 'legacy');
@@ -1093,6 +1215,7 @@ async function main() {
     unselected_files: fs.readdirSync(UNSELECTED_ROOT).length,
     indexed_manifest_sources: ownerEntries.length,
     fake_llm_call_count: evidence.fake_llm_calls.length,
+    fake_image_call_count: evidence.fake_image_calls.length,
     fake_llm_stage_counts: fakeCallStages,
     web_provider_call_count: webProviderCalls,
     selected_root_manifest_sources: ownerEntries.filter((entry) => String(entry.source || '').startsWith(SELECTED_ROOT)).length,
@@ -1146,14 +1269,26 @@ async function main() {
     .sort()
     .map((name) => `- [${name}](screenshots/${name})`)
     .join('\n');
+  let semanticGate = '**NOT TESTED** — 별도 제한 샘플 gate가 필요함';
+  const semanticRealSummary = path.join(QA_ROOT, 'semantic-real', 'summary.json');
+  if (fs.existsSync(semanticRealSummary)) {
+    try {
+      const semantic = JSON.parse(fs.readFileSync(semanticRealSummary, 'utf8'));
+      semanticGate = semantic.pass
+        ? `**PASS** — ${semantic.generator_model || 'real generator'} / ${semantic.critic_model || 'independent critic'}`
+        : '**FAIL** — semantic-real/summary.json 참조';
+    } catch {}
+  }
   writeFile(path.join(QA_ROOT, 'README.md'), `# Odysseus 로컬 근거 기반 심층보고서 검증 패키지
 
 - 생성 시각: ${GENERATED_AT}
 - fixture: \`editorial-research-synthetic-v1\`
 - E2E 모델: \`${MODEL_ID}\` (결정론적 fake endpoint)
 - 자동 판정: **${failures.length === 0 ? 'PASS' : 'FAIL'}**
-- 실제 OAuth 모델 의미 품질: **NOT TESTED** — 별도 제한 샘플 gate에서 수행
+- 실제 OAuth 모델 의미 품질: ${semanticGate}
 - 실제 개인 Vault/이메일/OAuth/token/비밀값: **사용하지 않음**
+
+먼저 읽기: [무엇이 달라졌는지 쉬운 설명](WHAT_CHANGED_KO.md)
 
 ## 입력 fixture
 
@@ -1174,6 +1309,16 @@ async function main() {
 - [혼합 개인 지식 후보 Legacy HTML](reports/candidate-personal-knowledge-legacy.html)
 - [혼합 개인 지식 후보 Design HTML](reports/candidate-personal-knowledge-designed.html)
 
+### 생성 이미지·Figma 디자인 검수
+
+- [이미지 없는 Design HTML](generated-image-design/candidate-designed-no-images.html)
+- [실제 생성 이미지 포함 offline Design HTML](generated-image-design/candidate-designed-generated-images.html)
+- [생성 이미지 디자인 검수 인덱스](generated-image-design/README.md)
+- [Round 0 참고 이미지 배치형](generated-image-design/round-0-reference-figure.html)
+- [Figma DesignSpec](generated-image-design/figma/design-spec-final.png)
+- [Figma 보고서 캡처](generated-image-design/figma/report-capture.png)
+- [새 Figma 디자인 랩](https://www.figma.com/design/Cnr0NahXXPzkBHe0X3SRkn) — 파일 생성 성공, 연결 팀 좌석이 \`View\`여서 새 편집 variant는 **NOT TESTED**
+
 ## 시각 검증
 
 - [UI desktop](screenshots/ui-research-results-desktop.png)
@@ -1186,6 +1331,9 @@ async function main() {
 - [경영분석 Design print](screenshots/candidate-management-designed-print.png)
 - [개인 지식 Design desktop](screenshots/candidate-personal-knowledge-designed-desktop.png)
 - [개인 지식 Design mobile](screenshots/candidate-personal-knowledge-designed-mobile.png)
+- [통합 Hero Composer desktop](generated-image-design/screenshots/round-2-overlay-desktop-full.png)
+- [통합 Hero Composer mobile](generated-image-design/screenshots/round-2-overlay-mobile-full.png)
+- [통합 Hero Composer print](generated-image-design/screenshots/round-2-overlay-print-page.png)
 
 ### 실제 PDF 페이지 렌더링
 
@@ -1195,6 +1343,9 @@ ${printPageLinks}
 
 - [E2E·보안·성능 구조화 증거](e2e-evidence.json)
 - [baseline 대 후보 의미 품질 비교](semantic-ab.json)
+- [실제 OAuth 모델 blind A/B](semantic-real/summary.json)
+- [실제 OAuth baseline](semantic-real/A-baseline-single-pass.md)
+- [실제 OAuth 후보](semantic-real/B-candidate-research-grade.md)
 - [개인정보 제거 실행 요약](logs/sanitized-summary.json)
 
 MD의 Raw Findings 원문은 literal code block으로 격리되어 HTML·링크로 실행되지 않습니다.
@@ -1206,10 +1357,11 @@ JSON의 각 Raw Finding은 \`content_trust: "untrusted_data"\`와 상위
 - 선택 root 파일: ${evidence.performance.selected_files}개 / 비선택 distractor: ${evidence.performance.unselected_files}개
 - 실제 색인 manifest: 선택 ${evidence.performance.selected_root_manifest_sources}개 / 비선택 ${evidence.performance.unselected_root_manifest_sources}개
 - 전체 fake LLM 호출: ${evidence.performance.fake_llm_call_count}회
+- fake image endpoint 호출: ${evidence.performance.fake_image_call_count}회
 - 여정별 색인 barrier·후속 조사 시간: [구조화 증거의 \`performance.journey_timings\`](e2e-evidence.json)
 - 시간값은 endpoint probe를 제외한 UI 제출→첫 연구 LLM 호출을 필수 색인 완료 barrier의 관측 상한으로 기록하며, 이후 값은 검색·다단계 합성·artifact 생성·상태 polling을 포함합니다.
 
-이미지는 포함하지 않은 designed HTML만 이번 release-candidate 핵심 범위에서 검증했습니다. OAuth Codex 구독 경로의 이미지 생성 capability는 모델 목록과 tool capability에서 확인되지 않았으므로 별도 과금 API로 자동 전환하지 않았습니다.
+생성 이미지 경로는 결정론적 fake image endpoint로 UI→job→로컬 asset→offline designed HTML 전체 배선을 검증했습니다. 같은 base URL의 LLM/image endpoint가 서로 덮어쓰지 않고, image-type endpoint만 이미지 생성에 쓰이며, cache는 같은 owner 안에서만 재사용됩니다. 별도 사용자 검수본에서는 Codex Desktop의 내장 image generation 도구로 비식별 개념 이미지를 실제 생성하고 hero·section·ambient layer로 통합한 뒤 데스크톱·모바일·print·offline 렌더링을 시각 감사했습니다. 이는 Odysseus OAuth 텍스트 endpoint가 이미지 API를 노출한다는 뜻은 아니며, 지원하지 않는 환경에서는 텍스트 중심 designed HTML로 안전하게 fallback합니다. Google Stitch는 현재 callable connector가 없고 공식 MCP 경로가 별도 API key와 billing-enabled Cloud project를 요구하므로 **NOT TESTED**이며, 외부 디자인 랩은 RC의 필수 경로가 아닙니다.
 `);
 
   if (failures.length) {

@@ -87,6 +87,7 @@ function _saveSettingsToStorage() {
       reasoning_effort: document.getElementById('research-reasoning-effort')?.value || '',
       category: document.getElementById('research-category')?.value || '',
       artifact_formats: _selectedArtifactFormats(),
+      design_image_mode: document.getElementById('research-design-image-mode')?.value || 'none',
     }));
   } catch {}
 }
@@ -127,6 +128,19 @@ function _applyArtifactFormats(formats) {
   document.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
     el.checked = normalized.includes(el.value);
   });
+}
+
+function _normalizeDesignImageMode(value) {
+  const mode = String(value || 'none').trim().toLowerCase();
+  return ['none', 'cover', 'editorial'].includes(mode) ? mode : 'none';
+}
+
+function _syncDesignImageControls() {
+  const row = document.getElementById('research-design-image-setting');
+  const select = document.getElementById('research-design-image-mode');
+  const enabled = !!document.getElementById('research-output-html-designed')?.checked;
+  if (row) row.style.display = enabled ? '' : 'none';
+  if (select) select.disabled = !enabled;
 }
 
 function _ensureArtifactFormatSelection(changedEl) {
@@ -528,6 +542,15 @@ function _buildPanelHTML() {
             </div>
             <span class="research-setting-hint">Legacy HTML 계약은 그대로 유지됩니다. Design HTML은 별도 standalone 결과물입니다.</span>
           </div>
+          <label class="research-setting research-setting-wide research-design-image-setting" id="research-design-image-setting" style="display:none;">
+            <span class="research-setting-label">Design HTML 생성 이미지</span>
+            <select id="research-design-image-mode">
+              <option value="none" selected>없음 (기본)</option>
+              <option value="cover">표지·배경만</option>
+              <option value="editorial">표지 + 섹션 일러스트</option>
+            </select>
+            <span class="research-setting-hint">비식별 art direction만 이미지 모델에 전달합니다. 실패하거나 지원되지 않으면 보고서는 텍스트 중심 Design HTML로 안전하게 완성됩니다.</span>
+          </label>
           <div class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
             <div class="research-knowledge-source-header">
               <span class="research-setting-label">지식 소스 폴더</span>
@@ -617,6 +640,7 @@ function _wireEvents(pane) {
     _saveSettingsToStorage();
   });
   pane.querySelector('#research-reasoning-effort')?.addEventListener('change', _saveSettingsToStorage);
+  pane.querySelector('#research-design-image-mode')?.addEventListener('change', _saveSettingsToStorage);
   pane.querySelector('#research-add-local-folder')?.addEventListener('click', _handleAddLocalFolder);
   pane.querySelector('#research-local-folder-list')?.addEventListener('click', (e) => {
     const btn = e.target.closest?.('[data-remove-local-root]');
@@ -625,6 +649,7 @@ function _wireEvents(pane) {
   pane.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
     el.addEventListener('change', () => {
       _ensureArtifactFormatSelection(el);
+      _syncDesignImageControls();
       _saveSettingsToStorage();
     });
   });
@@ -651,7 +676,13 @@ function _readSettings() {
     reasoning_effort: document.getElementById('research-reasoning-effort')?.value || undefined,
     category: category || undefined,
     artifact_formats: _selectedArtifactFormats(),
+    design_image_mode: _normalizeDesignImageMode(
+      document.getElementById('research-design-image-mode')?.value
+    ),
   };
+  if (!settings.artifact_formats.includes('html_designed')) {
+    settings.design_image_mode = 'none';
+  }
   const epSel = document.getElementById('research-endpoint');
   if (epSel && epSel.value) {
     const opt = epSel.options[epSel.selectedIndex];
@@ -721,6 +752,8 @@ function _editJob(job) {
   const effortEl = document.getElementById('research-reasoning-effort');
   if (effortEl) effortEl.value = s.reasoning_effort || '';
   if (s.artifact_formats) _applyArtifactFormats(s.artifact_formats);
+  const imageModeEl = document.getElementById('research-design-image-mode');
+  if (imageModeEl) imageModeEl.value = _normalizeDesignImageMode(s.design_image_mode || job.design_image_mode);
   _syncResearchWorkflowControls();
   // Remove the old job so clicking Start/Queue makes a fresh one
   jobs.removeJob(job.id);
@@ -825,6 +858,8 @@ function _restoreSavedSettings() {
   const effort = document.getElementById('research-reasoning-effort');
   if (effort && saved.reasoning_effort !== undefined) effort.value = saved.reasoning_effort || '';
   if (saved.artifact_formats) _applyArtifactFormats(saved.artifact_formats);
+  const imageMode = document.getElementById('research-design-image-mode');
+  if (imageMode) imageMode.value = _normalizeDesignImageMode(saved.design_image_mode);
   _syncResearchWorkflowControls();
   const ep = document.getElementById('research-endpoint');
   if (ep && saved.endpoint_id) {
@@ -1031,6 +1066,7 @@ function _syncResearchWorkflowControls() {
     if (desc) desc.textContent = 'Multi-step web research with an LLM-in-the-loop agent';
   }
   _syncKnowledgeControls();
+  _syncDesignImageControls();
 }
 
 // ── Job rendering ──

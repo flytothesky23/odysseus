@@ -83,6 +83,41 @@ Genre-specific rubrics may emphasize analyst, researcher, nonfiction editor, or
 management-report editor behavior. Personal voice and intent are preserved when
 useful, but opinion is never silently relabeled as fact.
 
+## Dual closed-loop quality model
+
+The implementation keeps research/writing and presentation as two coupled but
+separately constrained loops.
+
+### Loop A — content quality
+
+`question decomposition -> iterative retrieval -> evidence/claim ledger ->
+duplicate/conflict/gap detection -> follow-up retrieval -> outline -> draft ->
+independent critic -> rewrite -> citation audit`
+
+The content loop owns facts, numbers, claims, opinions, inferences,
+uncertainties, citations, and source traceability. A presentation renderer
+cannot silently rewrite these fields.
+
+### Loop B — design quality
+
+`ContextProfile -> DesignSpec 후보 -> deterministic renderer -> DOM and
+screenshot audit -> visual finding -> 후보 선택/allowlisted token·layout·asset
+patch -> re-render`
+
+`src/report_design.py` is the current minimum schema boundary. It permits
+allowlisted layout primitives, tokens, scene roles, local asset assignments,
+seed, and variation IDs rather than arbitrary model-authored HTML/CSS/JS.
+The current calm editorial overlay and management briefing are baseline
+compositions, not the final limit of the system.
+
+### Loop C — joint fit audit
+
+The final audit verifies that visual emphasis follows the report thesis, tables
+and limitations remain legible, generated illustrations cannot be mistaken for
+evidence, and section order matches the argument. Any design suggestion that
+changes wording must return to Loop A and repeat the citation audit. Any content
+change that affects hierarchy or scenes must return to Loop B.
+
 ## Red-to-green contracts
 
 1. Parallel first searches wait for the same completed auto-index barrier.
@@ -174,54 +209,57 @@ required and the subjective long-form quality comparison is explicitly
 
 ## External workflow research
 
-GitHub public repository metadata was checked on 2026-07-29 KST. Star counts
-and pushed dates are time-sensitive. `NOASSERTION` means no code or skill text
-may be reused without a separate manual license review. This implementation
-adopts workflow ideas only and adds no external package/runtime dependency.
+GitHub public repository metadata was checked through the GitHub repository API
+on 2026-07-29 KST. Stars and pushed dates are time-sensitive. This
+implementation adopts workflow patterns only, copies no skill code, and adds no
+external package/runtime dependency.
 
 | Repository | Stars | License | Assessment and decision |
 | --- | ---: | --- | --- |
-| [academic-research-skills-codex](https://github.com/Imbad0202/academic-research-skills-codex) | 7,267 | NOASSERTION | Adopt source passport, integrity gates, staged local workflow; do not vendor. |
-| [academic-research-skills](https://github.com/Imbad0202/academic-research-skills) | 39,902 | NOASSERTION | Adopt claim audit, critic/re-review, citation verification patterns only. |
-| [Research-Paper-Writing-Skills](https://github.com/Master-cai/Research-Paper-Writing-Skills) | 5,604 | MIT | Adopt claim-evidence and section-flow rubric; localize for Korean long form. |
-| [econ-writing-skill](https://github.com/hanlulong/econ-writing-skill) | 497 | MIT | Adopt genre-specific scoring and anti-generic-prose rubric for management reports. |
-| [ComputationalReviewTemplate](https://github.com/AllenNeuralDynamics/ComputationalReviewTemplate) | 4 | MIT | Adopt actor/critic/citation-verifier separation; reject deployment scaffolding. |
-| [book-genesis-v4](https://github.com/felipelobomotta-blip/book-genesis-v4) | 81 | MIT | Adopt blind evaluation gate; reject book-specific automation. |
-| [write-prose](https://github.com/AnswerDotAI/skill-plugins/blob/main/plugins/codex-aai/skills/write-prose/SKILL.md) | 5 | Apache-2.0 | Use only as final prose-polish rubric, never as the research engine. |
-| [Cat_synthesis_lab](https://github.com/jy1529098645-gif/Cat_synthesis_lab) | 0 | MIT | Retain citation-cross-check idea; reject as a core reference due to weak adoption evidence. |
-| [hermes-agent](https://github.com/NousResearch/hermes-agent) | 221,780 | MIT | Use selected reviewer vocabulary only; repository-wide stars do not validate its writing workflow. |
-| [Codex-Academic-Skills](https://github.com/Epsilon617/Codex-Academic-Skills) | 157 | MIT | Keep as a discovery watchlist, not an implementation model. |
+| [WenyuChiou/ai-research-skills](https://github.com/WenyuChiou/ai-research-skills) | 177 | MIT | Adopt staged handoff, gap schema, and unsupported-claim boundaries; reject Zotero/Python runtime coupling. |
+| [jin-s13/ai-research-writing-skill](https://github.com/jin-s13/ai-research-writing-skill) | 13 | MIT | Adopt claim/evidence engineering and reviewer critique despite low stars; structure matters more than popularity. |
+| [pedrohcgs/claude-code-my-workflow](https://github.com/pedrohcgs/claude-code-my-workflow) | 1,432 | MIT | Adopt adversarial critic/fixer convergence; reject LaTeX/R/Beamer assumptions. |
+| [wanshuiyin/Auto-claude-code-research-in-sleep](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep) | 13,967 | MIT | Adopt Markdown-only stage artifacts and cross-review; reject autonomous experiment/GPU scope. |
+| [AlterLab-IEU/AlterLab-Academic-Skills](https://github.com/AlterLab-IEU/AlterLab-Academic-Skills) | 53 | MIT | Adapt deterministic citation checking to selected local sources; reject external academic APIs as a local-only dependency. |
+| [VoltAgent/awesome-agent-skills](https://github.com/VoltAgent/awesome-agent-skills) | 29,137 | MIT | Discovery index only; listed skills are not automatically trusted or suitable for private data. |
+| [VoltAgent/awesome-claude-code-subagents](https://github.com/VoltAgent/awesome-claude-code-subagents) | 23,811 | MIT | Adopt researcher/critic/verifier role separation; do not copy Claude-specific subagents. |
+| [openai/codex](https://github.com/openai/codex) | 102,139 | Apache-2.0 | Reference for local Codex/skill hosting only; it is not a report-writing workflow. |
+| [oso95/scroll-world](https://github.com/oso95/scroll-world) | 5,606 | MIT | Adopt scene continuity, portrait mobile composition, reduced-motion and portable vanilla-JS ideas for a later renderer; reject Higgsfield/ffmpeg as core dependencies. |
 
 The selected pattern is source inventory/passport -> claim/evidence extraction
 -> iterative local retrieval -> duplicate/conflict/uncertainty ledger ->
 outline -> draft -> independent critic -> rewrite -> citation audit -> prose
 polish.
 
-## Optional generative-image milestone
+## Opt-in generative-image layer
 
-Status for this release-candidate scope: `NOT IMPLEMENTED — CAPABILITY NOT
-CONFIRMED ON THE OAUTH SUBSCRIPTION PATH`.
+Status for this release-candidate scope:
+`IMPLEMENTED AND E2E VERIFIED; OAUTH TEXT-ENDPOINT IMAGE CAPABILITY NOT
+CONFIRMED`.
 
 A read-only capability probe was performed against the configured
 `/backend-api/codex/models` catalog on 2026-07-29. The catalog exposed
 `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, and related Codex
 models. Several accept image input and web search, but every model reported an
 empty `experimental_supported_tools` list and no image-generation output tool.
-Image input modality is not evidence of image generation capability. No image
-generation request was sent.
+Image input modality is not evidence of image generation capability. The
+Odysseus OAuth text endpoint was not treated as an image API and no API-key
+billed fallback was added.
 
 OpenAI's official
 [image generation guide](https://developers.openai.com/api/docs/guides/image-generation)
 documents `gpt-image-2` through the Image API and an `image_generation` tool in
 the public Responses API. That public API is a separately authenticated API
 surface and cannot be substituted automatically for the current ChatGPT/Codex
-OAuth subscription bridge. The app's subscription payload builder currently
-supports text Responses inputs and reasoning only; the separate gallery path
-uses image-type endpoints and `/images/generations`.
+OAuth subscription bridge.
 
-If a future subscription model catalog or explicitly documented endpoint
-exposes an image-generation tool, implement it as a designed-HTML-only option
-with levels `없음 / 표지·배경 / 섹션 일러스트 포함`. The milestone must:
+The implemented designed-HTML-only option provides
+`없음 / 표지·배경만 / 표지 + 섹션 일러스트`. It uses the existing configured
+image-type endpoint contract and `/images/generations`; environments without an
+image model finish with a text-first designed report and an explicit fallback
+status. The legacy artifact never consumes these assets.
+
+The image layer:
 
 - produce a privacy-scrubbed art-direction summary before any prompt leaves the
   app and never transmit private note text, names, internal figures, or paths;
@@ -235,14 +273,152 @@ with levels `없음 / 표지·배경 / 섹션 일러스트 포함`. The mileston
   the illustration layer;
 - store metadata-stripped local assets, meaningful Korean alt text, decorative
   `aria-hidden` treatment, offline rendering, prompt/model-version cache keys,
-  asset-count/byte caps, and text-first graceful fallback;
+  same-owner cache isolation, asset-count/byte caps, and text-first graceful
+  fallback;
 - never auto-switch to an API-key-billed image endpoint;
 - add image-free/image-enabled reports, adopted/rejected candidates, assets,
   art direction, and desktop/mobile/print screenshots to the user review
   package.
 
-This milestone must not delay or mask the core local research, writer,
-security, E2E, and semantic-quality gates.
+The deterministic browser E2E passed four fake image-generation calls through
+the real UI -> API -> background job -> local asset -> offline HTML boundary.
+The generated-image review sample used the Codex Desktop built-in image tool to
+create three privacy-safe editorial assets, stripped metadata, embedded all
+three locally as hero, section background, and ambient background, and passed
+desktop, mobile, print, offline,
+console, network, alt-text, and non-evidence-caption checks. This proves the
+visual workflow and output, not OAuth image-API support inside Odysseus.
+
+### Visual-role and layering contract
+
+`VisualAssetSpec.visual_role` distinguishes:
+
+- evidence figures;
+- explanatory simulations;
+- data dashboards backed by structured data;
+- editorial heroes;
+- section backgrounds;
+- page ambient backgrounds;
+- decorative accents.
+
+Generated images are never treated as quantitative charts or documentary
+evidence. Hero and section titles remain semantic HTML text over separate image
+layers. Focal point, safe area, desktop/mobile aspect, overlay strength,
+palette, alt text, print fallback, and reduced-motion behavior are carried by
+the validated `DesignSpec`. The current Hero Composer uses a full-width local
+image, real HTML typography, contrast scrim, responsive focal crop, explicit
+generated-image disclosure, and static print fallback.
+
+### Figma design-laboratory result
+
+Figma was used as a design laboratory for the report capture, hierarchy, token,
+and image-placement inspection. The connected account successfully created a
+new design-lab file, but the authenticated team seat reported `View`; both
+plugin execution and HTML-to-design capture returned `INVALID_ARGUMENT`.
+Therefore new editable composition variants are `NOT TESTED` in Figma rather
+than silently claimed as complete. The production renderer does not depend on
+Figma, and the actual offline HTML was still audited through browser screenshots.
+The earlier report capture and DesignSpec capture remain in the review package.
+Figma's official MCP access table gives Starter and View/Collab seats up to six
+read tool calls per month, with per-minute limits in addition; only selected
+write tools are exempt. Figma lookup and analysis therefore cannot be a
+per-report or always-on pipeline even when a write operation is available.
+
+Figma is not a required adapter. Google Stitch is the preferred design-lab
+candidate for a later capability probe, but it is also optional. Google
+Codelabs' 2026 Stitch MCP guide requires a Stitch account, a separately issued
+Stitch API key, Node.js 18+, and a billing-enabled Google Cloud project.
+Signing into the Stitch UI with Google OAuth is therefore not proof that MCP is
+authenticated or free of charge. The current Codex tool catalog exposes no
+callable Stitch connector, so Stitch design generation is `NOT TESTED`.
+
+No billable call, Cloud billing activation, or new API-key provisioning is
+performed in this release candidate. A future Stitch adapter may receive only
+an explicitly approved, privacy-scrubbed `ContextProfile` and design brief. It
+must never receive raw private notes, email content, names, internal figures,
+absolute paths, OAuth/session data, or secrets. Stitch API keys and Cloud
+project identifiers remain in OS keychain/environment boundaries and never
+enter source, logs, artifacts, screenshots, or Second Brain records.
+Driving the Stitch website through Computer Use may be acceptable for an
+occasional, explicitly approved prototype, but it is slower and vulnerable to
+UI changes. It cannot become a production report-generation dependency.
+
+Official capability references checked on 2026-07-29:
+
+- Figma MCP plan access and limits:
+  https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/
+- Google Stitch MCP setup codelab:
+  https://codelabs.developers.google.com/design-to-code-with-antigravity-stitch
+- Google Stitch iteration and Antigravity export overview:
+  https://blog.google/innovation-and-ai/models-and-research/google-labs/stitch-updates/
+
+## Generative Report Design System direction
+
+The long-term invariant is not one premium theme or a small list of color
+presets. Each report produces a deterministic `ContextProfile` that records its
+genre, audience, purpose, tone, narrative shape, evidence density, source
+modality, emotional temperature, data/image weight, uncertainty treatment,
+accessibility requirements, and useful visual metaphor.
+
+That profile selects and combines a validated design grammar:
+
+- layout topology such as editorial spread, split narrative, cinematic hero,
+  timeline, atlas, dossier, product showcase, technical blueprint, data-led
+  brief, or minimal paper;
+- Korean display/body typography and line-breaking rules;
+- grid, density, spacing, rhythm, palette, and surface treatment;
+- hero, transition, quote, table, source, conflict, and limitation grammar;
+- image role, focal crop, safe-area, and overlay rules;
+- restrained motion plus mobile, print, and reduced-motion fallbacks.
+
+`DesignManifest` stores the selected composition, alternatives, context-based
+rationale, reproducible seed, and variation ID. A future design planner may
+propose multiple schema-valid candidates, but the renderer remains
+deterministic and cannot receive arbitrary HTML, CSS, or JavaScript. Candidate
+screenshots, DOM metrics, accessibility/performance rules, and an independent
+visual critic decide whether to select, hybridize, or repair a design.
+
+The current vertical slice proves two structurally distinct report families:
+the image-integrated editorial overlay and the traditional management document
+briefing. Product cinematic banner, evidence dossier/split narrative, minimal
+paper, and scroll-story primitives remain explicit follow-up milestones. The
+five-context diversity fixture—academic evidence report, operations management,
+personal knowledge essay, future product simulation, and event timeline—must
+prove differences in layout, typography, image strategy, rhythm, and motion,
+not mere palette swaps, before the design grammar is considered generalized.
+
+External design labs implement a vendor-neutral adapter contract:
+
+```text
+design_lab.propose(redacted_context_profile, redacted_design_brief)
+  -> candidate DesignSpec/DesignManifest
+```
+
+Figma, Stitch, Pencil, or another future laboratory can provide candidates,
+but none can replace the deterministic fallback renderer or become a runtime
+requirement. Disconnection, quota exhaustion, adapter failure, or user opt-out
+must still produce the self-contained designed HTML. Acceptance includes
+Stitch-unavailable fallback, secret redaction, and zero private-source egress.
+Successful external experiments are generalized into local design tokens,
+composition primitives, prompt fragments, and renderer rules, then reused
+without another vendor call.
+
+## Renderer polymorphism and Scroll World direction
+
+Research is performed once. A structured report model and its evidence
+contract should be consumed by one or more presentation renderers:
+
+- `문서형`: current legacy renderer and the management default;
+- `에디토리얼 디자인형`: current deterministic designed renderer;
+- `스크롤 스토리형`: later progressive-enhancement renderer mapping major
+  sections to sticky visual scenes;
+- `시네마틱형`: later capability-gated renderer, never a core dependency;
+- future timeline, atlas/gallery, and executive-brief presets.
+
+The user may eventually select multiple renderers for the same report. Style
+recommendations can be model-assisted but the selected styles and generated
+artifacts must remain explicit. The current interface is documented in
+`docs/plans/2026-07-29-report-renderer-ir.md`.
 
 ## Verification gate
 

@@ -2035,6 +2035,54 @@ def test_explicit_proxy_add_fetches_and_caches_models_with_long_timeout(monkeypa
     assert db.rows[0].model_refresh_mode == "manual"
 
 
+def test_same_base_url_keeps_llm_and_image_endpoints_separate(monkeypatch):
+    llm_endpoint = _route_ep(
+        "llm-existing",
+        "https://provider.example.test/v1",
+        cached_models=["gpt-5.6-sol"],
+        endpoint_kind="api",
+    )
+    db = _RouteDb([llm_endpoint])
+    router = model_routes.setup_model_routes(model_discovery=None)
+
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_load_settings", lambda: {})
+    monkeypatch.setattr(model_routes, "_save_settings", lambda settings: None)
+    monkeypatch.setattr("src.auth_helpers.get_current_user", lambda request: None)
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda *a, **k: [])
+    monkeypatch.setattr(
+        model_routes,
+        "_ping_endpoint",
+        lambda *a, **k: {"reachable": False, "error": "not probed"},
+    )
+
+    result = _route_endpoint(router, "/api/model-endpoints", "POST")(
+        _route_request(),
+        name="Image endpoint",
+        base_url="https://provider.example.test/v1",
+        api_key="",
+        skip_probe="true",
+        require_models="false",
+        model_type="image",
+        endpoint_kind="auto",
+        model_refresh_mode="",
+        model_refresh_interval="",
+        model_refresh_timeout="",
+        supports_tools="",
+        pinned_models="gpt-image-1.5",
+        container_local="false",
+        shared="true",
+    )
+
+    assert result.get("existing") is not True
+    assert llm_endpoint.model_type == "llm"
+    assert len(db.rows) == 2
+    assert db.rows[1].model_type == "image"
+    assert db.rows[1].base_url == llm_endpoint.base_url
+
+
 def test_manual_refresh_uses_long_timeout_and_saves_full_model_list(monkeypatch):
     ep = _route_ep(
         "proxy",
