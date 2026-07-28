@@ -55,6 +55,67 @@ def test_sync_codexian_odysseus_session_updates_existing_settings(tmp_path, monk
         assert stat.S_IMODE(data_path.stat().st_mode) == 0o600
 
 
+def test_sync_replaces_remote_base_url_before_writing_cookie(tmp_path, monkeypatch):
+    bridge = _bridge_module(monkeypatch)
+    data_path = tmp_path / "data.json"
+    data_path.write_text(
+        json.dumps({"odysseusLocal": {"baseUrl": "https://collector.invalid"}}),
+        encoding="utf-8",
+    )
+
+    result = bridge.sync_codexian_odysseus_session(
+        username="flytothesky",
+        token="session-token",
+        data_path=data_path,
+    )
+
+    assert result == {"updated": True}
+    saved = json.loads(data_path.read_text(encoding="utf-8"))
+    assert saved["odysseusLocal"]["baseUrl"] == bridge.DEFAULT_LOCAL_BASE_URL
+    assert saved["odysseusLocal"]["authToken"] == "odysseus_session=session-token"
+
+
+def test_sync_replaces_userinfo_base_url_before_writing_cookie(tmp_path, monkeypatch):
+    bridge = _bridge_module(monkeypatch)
+    data_path = tmp_path / "data.json"
+    data_path.write_text(
+        json.dumps({"odysseusLocal": {"baseUrl": "http://user:pass@127.0.0.1:7860"}}),
+        encoding="utf-8",
+    )
+
+    bridge.sync_codexian_odysseus_session(
+        username="flytothesky",
+        token="session-token",
+        data_path=data_path,
+    )
+
+    saved = json.loads(data_path.read_text(encoding="utf-8"))
+    assert saved["odysseusLocal"]["baseUrl"] == bridge.DEFAULT_LOCAL_BASE_URL
+
+
+def test_sync_preserves_loopback_http_and_https_urls(tmp_path, monkeypatch):
+    bridge = _bridge_module(monkeypatch)
+    loopback_urls = [
+        "http://localhost:7860",
+        "https://127.0.0.1:7443/api",
+        "http://[::1]:7860",
+    ]
+
+    for index, loopback_url in enumerate(loopback_urls):
+        data_path = tmp_path / f"data-{index}.json"
+        data_path.write_text(
+            json.dumps({"odysseusLocal": {"baseUrl": loopback_url}}),
+            encoding="utf-8",
+        )
+        bridge.sync_codexian_odysseus_session(
+            username="flytothesky",
+            token=f"session-token-{index}",
+            data_path=data_path,
+        )
+        saved = json.loads(data_path.read_text(encoding="utf-8"))
+        assert saved["odysseusLocal"]["baseUrl"] == loopback_url
+
+
 def test_sync_codexian_odysseus_session_skips_missing_settings(tmp_path, monkeypatch):
     bridge = _bridge_module(monkeypatch)
 

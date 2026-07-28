@@ -618,15 +618,49 @@ def _is_sensitive_file(path: Path) -> bool:
 
 
 def _iter_supported_files(directory: Path):
+    """Yield supported regular files confined to ``directory``.
+
+    Symlinks are excluded at both directory and file boundaries. The resolved
+    containment check is retained as defense in depth for unusual filesystem
+    behavior and future iterator changes.
+    """
+    try:
+        confined_root = directory.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return
+    if not confined_root.is_dir():
+        return
+
     excluded = excluded_dirs()
-    for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if not _is_excluded_dir(Path(root) / d, excluded)]
+    for root, dirs, files in os.walk(confined_root, followlinks=False):
+        root_path = Path(root)
+        safe_dirs = []
+        for dirname in dirs:
+            candidate = root_path / dirname
+            if candidate.is_symlink() or _is_excluded_dir(candidate, excluded):
+                continue
+            try:
+                candidate.resolve(strict=True).relative_to(confined_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            safe_dirs.append(dirname)
+        dirs[:] = safe_dirs
+
         for fname in files:
-            path = Path(root) / fname
+            path = root_path / fname
+            if path.is_symlink():
+                continue
             if _is_sensitive_file(path):
                 continue
-            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                yield path
+            if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(confined_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if resolved.is_file():
+                yield resolved
 
 
 def index_knowledge_folders(rag, folders: Optional[Iterable[str]], owner: str = "") -> Dict[str, Any]:

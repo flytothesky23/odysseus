@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.atomic_io import atomic_write_json
 from src.settings import get_setting
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 CODEXIAN_BRIDGE_ENV = "CODEXIAN_OBSIDIAN_COOKIE_BRIDGE"
 CODEXIAN_DATA_PATH_ENV = "CODEXIAN_OBSIDIAN_PLUGIN_DATA"
 SESSION_COOKIE_NAME = "odysseus_session"
+DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:7860"
 
 DEFAULT_CODEXIAN_DATA_PATH = (
     Path.home()
@@ -34,7 +37,7 @@ def sync_codexian_odysseus_session(
     *,
     username: str,
     token: str,
-    base_url: str = "http://127.0.0.1:7860",
+    base_url: str = DEFAULT_LOCAL_BASE_URL,
     data_path: Path | None = None,
 ) -> dict[str, Any]:
     """Persist the current Odysseus session cookie into Codexian settings."""
@@ -60,11 +63,12 @@ def sync_codexian_odysseus_session(
         cookie_value = f"{SESSION_COOKIE_NAME}={token}"
         next_odysseus_local = dict(odysseus_local)
         existing_base_url = next_odysseus_local.get("baseUrl")
-        normalized_base_url = (
+        candidate_base_url = (
             existing_base_url.strip()
             if isinstance(existing_base_url, str) and existing_base_url.strip()
             else base_url
         )
+        normalized_base_url = _safe_loopback_base_url(candidate_base_url, fallback=base_url)
         if (
             next_odysseus_local.get("enabled") is True
             and next_odysseus_local.get("baseUrl") == normalized_base_url
@@ -140,6 +144,32 @@ def _bridge_enabled() -> bool:
     if env_value in {"0", "false", "no", "off"}:
         return False
     return bool(get_setting("codexian_cookie_bridge_enabled", True))
+
+
+def _safe_loopback_base_url(value: str, *, fallback: str = DEFAULT_LOCAL_BASE_URL) -> str:
+    """Return a loopback HTTP(S) URL, replacing unsafe cookie destinations."""
+
+    def _is_safe(candidate: str) -> bool:
+        try:
+            parsed = urlsplit(candidate)
+            if parsed.scheme.lower() not in {"http", "https"}:
+                return False
+            if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                return False
+            # Force validation of malformed/out-of-range ports.
+            _ = parsed.port
+            hostname = parsed.hostname.rstrip(".").lower()
+            if hostname == "localhost":
+                return True
+            return ipaddress.ip_address(hostname).is_loopback
+        except (ValueError, UnicodeError):
+            return False
+
+    normalized = str(value or "").strip()
+    if _is_safe(normalized):
+        return normalized
+    safe_fallback = str(fallback or "").strip()
+    return safe_fallback if _is_safe(safe_fallback) else DEFAULT_LOCAL_BASE_URL
 
 
 def _read_settings(path: Path) -> dict[str, Any]:
