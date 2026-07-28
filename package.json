@@ -3,7 +3,11 @@
     "type": "git",
     "url": "https://github.com/odysseus-dev/odysseus.git"
   },
+  "scripts": {
+    "e2e:ko": "node scripts/e2e-ko-smoke.cjs"
+  },
   "devDependencies": {
-    "@antithesishq/bombadil": "^0.6.1"
+    "@antithesishq/bombadil": "^0.6.1",
+    "playwright": "^1.61.0"
   }
 }
