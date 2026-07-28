@@ -110,4 +110,7 @@ def test_login_offloads_bcrypt_bearing_calls(monkeypatch):
     auth.create_session_trusted.assert_called_once()
     # The whole point: the expensive bcrypt-bearing calls go through
     # asyncio.to_thread rather than running inline in the request coroutine.
-    assert calls == [auth.verify_password, auth.create_session_trusted]
+    # The local Codexian bridge is also file I/O, so it belongs on the
+    # threadpool after auth has succeeded.
+    assert calls[:2] == [auth.verify_password, auth.create_session_trusted]
+    assert getattr(calls[2], "__name__", "") == "sync_codexian_odysseus_session"

@@ -102,6 +102,24 @@ async def test_read_write_edit_confined_e2e(ws, admin):
     _, r = await execute_tool_block(_block("read_file", "note.txt"), owner="a", workspace=ws)
     assert r["exit_code"] == 0 and r["output"] == "hello"
 
+    json_payload = json.dumps({
+        "path": "json-note.md",
+        "content": "hello from json\n한글 내용",
+    }, ensure_ascii=False)
+    _, r = await execute_tool_block(_block("write_file", json_payload), owner="a", workspace=ws)
+    assert r["exit_code"] == 0 and os.path.isfile(os.path.join(ws, "json-note.md"))
+    with open(os.path.join(ws, "json-note.md"), encoding="utf-8") as f:
+        assert f.read() == "hello from json\n한글 내용"
+
+    alt_payload = json.dumps({
+        "file_path": "structured.json",
+        "body": {"ok": True, "label": "한글"},
+    }, ensure_ascii=False)
+    _, r = await execute_tool_block(_block("write_file", alt_payload), owner="a", workspace=ws)
+    assert r["exit_code"] == 0 and os.path.isfile(os.path.join(ws, "structured.json"))
+    with open(os.path.join(ws, "structured.json"), encoding="utf-8") as f:
+        assert json.load(f) == {"ok": True, "label": "한글"}
+
     with open(os.path.join(ws, "f.txt"), "w") as f:
         f.write("foo bar")
     _, r = await execute_tool_block(

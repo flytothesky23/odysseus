@@ -18,6 +18,25 @@ _CODENAV_MAX_HITS = 200
 _CODENAV_MAX_LINE = 400
 
 
+def _parse_write_payload(content: str) -> Tuple[str, str]:
+    raw = content or ""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            args = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            args = None
+        if isinstance(args, dict) and ("path" in args or "file_path" in args):
+            body = args.get("content", args.get("body", ""))
+            if body is None:
+                body = ""
+            elif not isinstance(body, str):
+                body = json.dumps(body, ensure_ascii=False)
+            return str(args.get("path") or args.get("file_path") or "").strip(), body
+    lines = raw.split("\n", 1)
+    return lines[0].strip(), lines[1] if len(lines) > 1 else ""
+
+
 def _glob_to_regex(pat: str) -> "re.Pattern":
     """Translate a forward-slash glob (**, *, ?) into a compiled regex.
     `**/` matches zero or more complete directories.
@@ -183,24 +202,7 @@ class ReadFileTool:
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
-        lines = content.split("\n", 1)
-        raw_path = lines[0].strip()
-        body = lines[1] if len(lines) > 1 else ""
-        # Decode JSON-object args (the fenced inline-args shape
-        # ```write_file {"path": "...", "content": "..."}```), matching
-        # ReadFileTool above. Without this the whole JSON string becomes the
-        # path and the file is written under a garbage name. This is the live
-        # path: there is no filesystem MCP server, so write_file always runs
-        # here via _direct_fallback, not through _build_mcp_args.
-        _stripped = content.strip()
-        if _stripped.startswith("{"):
-            try:
-                _a = json.loads(_stripped)
-                if isinstance(_a, dict) and "path" in _a:
-                    raw_path = str(_a.get("path", "")).strip()
-                    body = str(_a.get("content", ""))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+        raw_path, body = _parse_write_payload(content)
         try:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:

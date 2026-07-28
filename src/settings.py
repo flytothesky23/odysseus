@@ -37,6 +37,7 @@ DEFAULT_SETTINGS = {
     # have been observed inventing signatures and sending to real
     # recipients without confirmation.
     "agent_email_confirm": True,
+    "codexian_cookie_bridge_enabled": True,
     "image_gen_enabled": False,
     "image_model": "",
     "image_quality": "medium",

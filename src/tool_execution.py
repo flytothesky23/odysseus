@@ -389,7 +389,24 @@ def _parse_manage_memory(content: str) -> Dict:
 
 
 def _parse_write_file(content: str) -> Dict:
-    lines = content.split("\n", 1)
+    raw = content or ""
+    stripped = raw.strip()
+    if stripped.startswith("{"):
+        try:
+            args = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            args = None
+        if isinstance(args, dict) and ("path" in args or "file_path" in args):
+            body = args.get("content", args.get("body", ""))
+            if body is None:
+                body = ""
+            elif not isinstance(body, str):
+                body = json.dumps(body, ensure_ascii=False)
+            return {
+                "path": str(args.get("path") or args.get("file_path") or "").strip(),
+                "content": body,
+            }
+    lines = raw.split("\n", 1)
     return {"path": lines[0].strip(), "content": lines[1] if len(lines) > 1 else ""}
 
 
@@ -426,7 +443,7 @@ _MCP_JSON_PRIMARY_KEYS: Dict[str, tuple] = {
     "web_search":     ("query", "queries"),
     "web_fetch":      ("url",),
     "read_file":      ("path",),
-    "write_file":     ("path",),
+    "write_file":     ("path", "file_path"),
     "generate_image": ("prompt",),
 }
 
@@ -440,6 +457,8 @@ def _build_mcp_args(tool: str, content: str) -> Dict:
         except (json.JSONDecodeError, TypeError):
             decoded = None
         if isinstance(decoded, dict) and any(k in decoded for k in primaries):
+            if tool == "write_file":
+                return _parse_write_file(content)
             return decoded
     parser = _MCP_ARG_PARSERS.get(tool)
     return parser(content) if parser else {}

@@ -918,9 +918,11 @@ async def test_legacy_mcp_tools_decode_inline_json_args(monkeypatch):
         "web_fetch": ('{"url": "https://example.com"}', {"url": "https://example.com"}),
         "read_file": ('{"path": "/tmp/x.txt"}', {"path": "/tmp/x.txt"}),
         "write_file": ('{"path": "/tmp/x", "content": "hi"}', {"path": "/tmp/x", "content": "hi"}),
+        "write_file_alias": ('{"file_path": "/tmp/x", "body": {"ok": true}}', {"path": "/tmp/x", "content": '{"ok": true}'}),
         "generate_image": ('{"prompt": "a cat"}', {"prompt": "a cat"}),
     }
-    for tool, (content, expected) in cases.items():
+    for name, (content, expected) in cases.items():
+        tool = "write_file" if name == "write_file_alias" else name
         assert _build_mcp_args(tool, content) == expected, tool
 
     # Freeform (non-JSON) content keeps the line-based behavior.
@@ -977,6 +979,29 @@ async def test_write_file_inline_json_args(monkeypatch):
     assert captured.get("path") == "/tmp/wf.txt", (
         f"write_file did not decode inline JSON args; got path {captured.get('path')!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_write_file_inline_json_alias_args(monkeypatch, tmp_path):
+    """The live write_file path accepts the older JSON shape too: file_path
+    plus body, including a structured body that must be serialized."""
+    import src.tool_execution as tool_execution
+    from src.tool_execution import execute_tool_block
+
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(tool_execution, "is_public_blocked_tool", lambda t: False)
+    monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: None)
+
+    target = tmp_path / "payload.json"
+    payload = json.dumps({"file_path": target.name, "body": {"ok": True, "label": "한글"}}, ensure_ascii=False)
+    _, result = await execute_tool_block(
+        SimpleNamespace(tool_type="write_file", content=payload),
+        owner="admin",
+        workspace=str(tmp_path),
+    )
+
+    assert result["exit_code"] == 0
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True, "label": "한글"}
 
 
 @pytest.mark.asyncio

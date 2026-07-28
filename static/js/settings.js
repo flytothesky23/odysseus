@@ -2293,7 +2293,7 @@ function initAccount() {
     logoutBtn.addEventListener('mouseenter', () => { logoutBtn.style.opacity = '1'; logoutBtn.style.borderColor = 'var(--red)'; logoutBtn.style.color = 'var(--red)'; });
     logoutBtn.addEventListener('mouseleave', () => { logoutBtn.style.opacity = ''; logoutBtn.style.borderColor = ''; logoutBtn.style.color = ''; });
     logoutBtn.addEventListener('click', async () => {
-      try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
+      try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }); } catch (_) {}
       // SECURITY: wipe all client-side state on logout so the next user that
       // signs in on this browser doesn't inherit the previous account's
       // session id, last-used model, draft chat input, or any cached lists.
