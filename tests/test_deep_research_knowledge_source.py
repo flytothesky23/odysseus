@@ -14,6 +14,7 @@ from src.knowledge_base import (
     resolve_selected_folders,
     search_knowledge_sources,
 )
+from src.research_handler import ResearchHandler
 
 
 def test_knowledge_folders_stay_under_configured_vault(tmp_path, monkeypatch):
@@ -273,6 +274,61 @@ async def test_knowledge_only_research_does_not_call_web_search():
     assert findings[0]["url"].startswith("local-knowledge://")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_mode", ["local", "obsidian"])
+async def test_knowledge_only_failure_never_falls_back_to_web(source_mode, monkeypatch):
+    calls = {"deep_research": 0, "legacy": 0, "basic_web": 0}
+
+    class FailingDeepResearcher:
+        def __init__(
+            self,
+            source_mode=None,
+            knowledge_folders=None,
+            knowledge_searcher=None,
+            **kwargs,
+        ):
+            self.source_mode = source_mode
+
+        async def research(self, query, prior_report="", prior_findings=None, prior_urls=None):
+            calls["deep_research"] += 1
+            raise RuntimeError("forced private-source failure")
+
+    class FakeLegacyEngine:
+        def start_research(self, query, max_time):
+            calls["legacy"] += 1
+            return "legacy web result"
+
+    async def fake_probe(endpoint, model, headers=None):
+        return None
+
+    def fake_basic_web_search(query):
+        calls["basic_web"] += 1
+        return "basic web result"
+
+    monkeypatch.setattr("src.deep_research.DeepResearcher", FailingDeepResearcher)
+    monkeypatch.setattr(ResearchHandler, "_probe_endpoint", staticmethod(fake_probe))
+    monkeypatch.setattr("src.search.comprehensive_web_search", fake_basic_web_search)
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: default)
+
+    handler = ResearchHandler.__new__(ResearchHandler)
+    handler._legacy_engine = FakeLegacyEngine()
+    handler._active_tasks = {}
+
+    result = await handler.call_research_service(
+        "private quarterly forecast",
+        "http://local.test/v1/chat/completions",
+        "local-model",
+        source_mode=source_mode,
+        knowledge_folders=[
+            "local:local123" if source_mode == "local" else "obsidian:"
+        ],
+    )
+
+    assert calls == {"deep_research": 1, "legacy": 0, "basic_web": 0}
+    assert "Private Knowledge Research Unavailable" in result
+    assert "No web fallback was attempted" in result
+
+
 def test_local_knowledge_skips_secret_files_and_redacts_supported_content(tmp_path):
     (tmp_path / "credentials.json").write_text('{"api_key":"must-not-index"}', encoding="utf-8")
     (tmp_path / "weekly-data.json").write_text(
@@ -288,6 +344,36 @@ def test_local_knowledge_skips_secret_files_and_redacts_supported_content(tmp_pa
     assert "must-redact" not in text
     assert "also-redact" not in text
     assert text.count("[REDACTED]") == 2
+
+
+def test_local_knowledge_redacts_complete_auth_and_provider_token_values(tmp_path):
+    credential_file = tmp_path / "weekly-data.txt"
+    credential_file.write_text(
+        "\n".join([
+            "Authorization: Bearer sk-live-secret-token",
+            'Authorization: "Bearer sk-quoted-secret-token"',
+            "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==",
+            "Proxy-Authorization: 'Basic cXVvdGVkOnNlY3JldA=='",
+            "provider_token: hf_privateprovidersecrettoken",
+            "unstructured provider credential sk-unkeyed-provider-secret",
+        ]),
+        encoding="utf-8",
+    )
+
+    text = _read_file_text(credential_file)
+
+    for secret_fragment in (
+        "Bearer",
+        "Basic",
+        "sk-live-secret-token",
+        "sk-quoted-secret-token",
+        "dXNlcjpwYXNzd29yZA==",
+        "cXVvdGVkOnNlY3JldA==",
+        "hf_privateprovidersecrettoken",
+        "sk-unkeyed-provider-secret",
+    ):
+        assert secret_fragment not in text
+    assert text.count("[REDACTED]") == 6
 
 
 def test_local_knowledge_skips_file_and_directory_symlinks_outside_root(tmp_path, monkeypatch):

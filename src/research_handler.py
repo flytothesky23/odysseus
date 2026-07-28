@@ -1002,6 +1002,12 @@ class ResearchHandler:
         if is_continuation:
             logger.info(f"Prior: {len(prior_findings or [])} findings, {len(prior_urls or set())} URLs")
 
+        from src.knowledge_base import normalize_source_mode
+        from src.settings import get_setting
+
+        _requested_source_mode = source_mode or get_setting("research_source_mode", "web")
+        _source_mode = normalize_source_mode(_requested_source_mode)
+
         # Probe the endpoint before committing to a long research run
         if progress_callback:
             progress_callback({"phase": "probing", "model": llm_model})
@@ -1012,13 +1018,9 @@ class ResearchHandler:
 
             from src.knowledge_base import (
                 knowledge_folders_for_source_mode,
-                normalize_source_mode,
                 search_knowledge_sources,
             )
-            from src.settings import get_setting
             _max_report_tokens = int(get_setting("research_max_tokens", 16384))
-            _requested_source_mode = source_mode or get_setting("research_source_mode", "web")
-            _source_mode = normalize_source_mode(_requested_source_mode)
             _reasoning_effort = normalize_reasoning_effort(reasoning_effort)
             _knowledge_folders = knowledge_folders_for_source_mode(
                 _requested_source_mode,
@@ -1125,13 +1127,23 @@ class ResearchHandler:
 
         except Exception as e:
             logger.error(f"DeepResearcher failed: {e}", exc_info=True)
-            return await self._fallback_research(query, llm_endpoint, llm_model, max_time, str(e))
+            return await self._fallback_research(
+                query,
+                llm_endpoint,
+                llm_model,
+                max_time,
+                str(e),
+                source_mode=_source_mode,
+            )
 
     async def _fallback_research(
         self, query: str, llm_endpoint: str, llm_model: str,
-        max_time: int, primary_error: str,
+        max_time: int, primary_error: str, source_mode: str = "web",
     ) -> str:
-        """Fall back to legacy engine, then to basic web search."""
+        """Fall back to web-capable engines without crossing private mode."""
+        if source_mode == "knowledge":
+            return self._format_private_source_failure(query, primary_error)
+
         # Try legacy orchestrator
         if self._legacy_engine:
             try:
@@ -1148,7 +1160,7 @@ class ResearchHandler:
                 logger.error(f"Legacy engine also failed: {e}")
 
         # Fall back to basic web search
-        return self._handle_research_failure(query, primary_error)
+        return self._handle_research_failure(query, primary_error, source_mode=source_mode)
 
     def _get_legacy_stats(self) -> dict:
         """Get statistics from the legacy research engine."""
@@ -1209,8 +1221,29 @@ class ResearchHandler:
 - Review logs for initialization errors
 """
 
-    def _handle_research_failure(self, query: str, error: str) -> str:
+    def _format_private_source_failure(self, query: str, error: str) -> str:
+        """Report a knowledge-only failure without sending the query to web search."""
+        return f"""## Private Knowledge Research Unavailable
+
+**Query:** {query}
+
+**Error:** {error}
+
+**Privacy protection:** No web fallback was attempted because this research was restricted to private knowledge sources.
+
+Please check the selected local or Obsidian knowledge folders, indexing status, and the configured research model before retrying.
+"""
+
+    def _handle_research_failure(
+        self,
+        query: str,
+        error: str,
+        source_mode: str = "web",
+    ) -> str:
         """Handle research failure with fallback to basic search."""
+        if source_mode == "knowledge":
+            return self._format_private_source_failure(query, error)
+
         try:
             logger.info("Attempting fallback to basic web search...")
             from src.search import comprehensive_web_search

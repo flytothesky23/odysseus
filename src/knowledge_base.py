@@ -43,9 +43,21 @@ SENSITIVE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 SENSITIVE_CONTENT_RE = re.compile(
-    r"""(?im)(["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"""
-    r"""client[_-]?secret|password|authorization)["']?\s*[:=]\s*)"""
-    r"""(["']?)([^,\s"'{}]+)\2"""
+    r"""(?im)(?<![A-Z0-9_-])(["']?(?:proxy[_-]?authorization|authorization|"""
+    r"""x[_-]?api[_-]?key|api[_-]?key|access[_-]?token|refresh[_-]?token|"""
+    r"""provider[_-]?token|client[_-]?secret|password)["']?\s*[:=]\s*)"""
+    r"""(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,;}]+)"""
+)
+PROVIDER_TOKEN_RE = re.compile(
+    r"""(?ix)(?<![A-Z0-9_-])(?:"""
+    r"""sk-[A-Z0-9_-]{8,}|"""
+    r"""gh[pousr]_[A-Z0-9]{8,}|"""
+    r"""xox[baprs]-[A-Z0-9-]{8,}|"""
+    r"""hf_[A-Z0-9_-]{8,}|"""
+    r"""AIza[A-Z0-9_-]{16,}|"""
+    r"""glpat-[A-Z0-9_-]{8,}|"""
+    r"""npm_[A-Z0-9]{8,}"""
+    r""")(?![A-Z0-9_-])"""
 )
 LOCAL_FOLDER_TOKEN_PREFIX = "local:"
 OBSIDIAN_FOLDER_TOKEN_PREFIX = "obsidian:"
@@ -609,7 +621,8 @@ def _redact_sensitive_content(text: str) -> str:
         value,
         flags=re.DOTALL,
     )
-    return SENSITIVE_CONTENT_RE.sub(r"\1[REDACTED]", value)
+    value = SENSITIVE_CONTENT_RE.sub(r"\1[REDACTED]", value)
+    return PROVIDER_TOKEN_RE.sub("[REDACTED]", value)
 
 
 def _is_sensitive_file(path: Path) -> bool:
