@@ -21,8 +21,15 @@ def _redirect_research_dir(tmp_path, monkeypatch):
     )
 
 
-def _request(user: str):
-    return SimpleNamespace(state=SimpleNamespace(current_user=user))
+def _request(user: str, *, admin: bool = False):
+    auth_manager = SimpleNamespace(
+        is_configured=True,
+        is_admin=lambda candidate: admin and candidate == user,
+    )
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user=user),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
+    )
 
 
 def _route(router, path: str, method: str):
@@ -130,3 +137,70 @@ def test_delete_rejects_cross_owner_without_unlinking_report(tmp_path, monkeypat
     assert exc.value.status_code == 404
     assert path.exists()
     assert json.loads(path.read_text(encoding="utf-8"))["result"] == "bob secret"
+
+
+def test_markdown_export_rejects_cross_owner_before_generating(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "bob-report", owner="bob", result="bob secret")
+
+    handler = _research_handler()
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/report/{session_id}/markdown", "GET")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(session_id="bob-report", request=_request("alice"), download=False))
+
+    assert exc.value.status_code == 404
+    handler.get_report_markdown.assert_not_called()
+
+
+def test_local_folder_delete_only_removes_settings_not_files(tmp_path, monkeypatch):
+    local = tmp_path / "datasets"
+    local.mkdir()
+    kept_file = local / "metrics.json"
+    kept_file.write_text('{"ok": true}', encoding="utf-8")
+    settings = {"knowledge_local_roots": [{"id": "local123", "label": "Datasets", "path": str(local)}]}
+
+    monkeypatch.setattr("src.settings.load_settings", lambda: dict(settings))
+
+    def fake_save(updated):
+        settings.clear()
+        settings.update(updated)
+
+    monkeypatch.setattr("src.settings.save_settings", fake_save)
+
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/{root_id}", "DELETE")
+
+    out = asyncio.run(target(root_id="local123", request=_request("alice", admin=True)))
+
+    assert out == {"ok": True, "removed": True}
+    assert kept_file.exists()
+    assert settings["knowledge_local_roots"] == []
+
+
+def test_local_folder_delete_rejects_non_admin(tmp_path, monkeypatch):
+    local = tmp_path / "datasets"
+    local.mkdir()
+    settings = {"knowledge_local_roots": [{"id": "local123", "label": "Datasets", "path": str(local)}]}
+    monkeypatch.setattr("src.settings.load_settings", lambda: dict(settings))
+
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/local-folders/{root_id}", "DELETE")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(root_id="local123", request=_request("alice")))
+
+    assert exc.value.status_code == 403
+    assert settings["knowledge_local_roots"]
+
+
+def test_knowledge_settings_rejects_non_admin():
+    router = setup_research_routes(_research_handler())
+    target = _route(router, "/api/research/knowledge/settings", "GET")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(request=_request("alice")))
+
+    assert exc.value.status_code == 403

@@ -4,16 +4,19 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from core.middleware import INTERNAL_TOOL_USER
 from src.endpoint_resolver import resolve_endpoint
+from src.research_handler import normalize_artifact_formats, normalize_reasoning_effort
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
 from src.constants import DEEP_RESEARCH_DIR
@@ -221,6 +224,23 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             raise HTTPException(401, "Not authenticated")
         return user
 
+    def _require_admin_user(request: Request) -> str:
+        user = _require_user(request)
+        if _auth_disabled():
+            return user
+        app_state = getattr(getattr(request, "app", None), "state", None)
+        auth_mgr = getattr(app_state, "auth_manager", None)
+        if auth_mgr is None or not getattr(auth_mgr, "is_configured", False):
+            raise HTTPException(403, "Admin only")
+        try:
+            if not auth_mgr.is_admin(user):
+                raise HTTPException(403, "Admin only")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(403, "Admin only")
+        return user
+
     def _owns_in_memory(session_id: str, user: str) -> bool:
         """Ownership check for an in-flight (in-memory) research task.
         Falls back to the on-disk JSON if the task has already finished."""
@@ -272,6 +292,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "status": "running",
                     "progress": entry.get("progress", {}),
                     "started_at": entry.get("started_at", 0),
+                    "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                    "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                 })
         return {"active": active}
 
@@ -306,8 +328,14 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
         raw_findings = research_handler.get_raw_findings(session_id) or []
+        task = research_handler._active_tasks.get(session_id, {})
         research_handler.clear_result(session_id)
-        return {"result": result, "sources": sources, "raw_findings": raw_findings}
+        return {
+            "result": result,
+            "sources": sources,
+            "raw_findings": raw_findings,
+            "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
+        }
 
     def _assert_owns_research(session_id: str, user: str) -> None:
         """404-not-403 ownership gate for a research session's on-disk JSON.
@@ -319,6 +347,12 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             raise HTTPException(404, "Research not found")
         if owner != user:
             raise HTTPException(404, "Research not found")
+
+    def _download_headers(session_id: str, suffix: str, download: bool) -> dict:
+        if not download:
+            return {}
+        safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", session_id)
+        return {"Content-Disposition": f'attachment; filename="odysseus-research-{safe}{suffix}"'}
 
     @router.get("/api/research/report/{session_id}")
     async def research_report(session_id: str, request: Request):
@@ -336,6 +370,51 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             logger.warning(f"No report data found for session {session_id}")
             raise HTTPException(404, "No visual report available for this session")
         return HTMLResponse(content=html_content)
+
+    @router.get("/api/research/report/{session_id}/markdown")
+    async def research_report_markdown(
+        session_id: str,
+        request: Request,
+        download: bool = Query(False),
+    ):
+        """Serve an Obsidian-friendly Markdown export for a completed research session."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        try:
+            markdown = research_handler.get_report_markdown(session_id)
+        except Exception as e:
+            logger.error(f"Markdown report generation error: {e}", exc_info=True)
+            raise HTTPException(500, f"Markdown report generation failed: {e}")
+        if markdown is None:
+            raise HTTPException(404, "No markdown report available for this session")
+        return Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers=_download_headers(session_id, ".md", download),
+        )
+
+    @router.get("/api/research/report/{session_id}/session.json")
+    async def research_report_session_json(
+        session_id: str,
+        request: Request,
+        download: bool = Query(False),
+    ):
+        """Serve a structured JSON export for a completed research session."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        try:
+            data = research_handler.get_report_session_export(session_id)
+        except Exception as e:
+            logger.error(f"Research session JSON export error: {e}", exc_info=True)
+            raise HTTPException(500, f"Session JSON export failed: {e}")
+        if data is None:
+            raise HTTPException(404, "No session JSON available for this session")
+        return JSONResponse(
+            content=data,
+            headers=_download_headers(session_id, ".odysseus-session.json", download),
+        )
 
     class HideImageRequest(BaseModel):
         url: str
@@ -398,6 +477,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "status": d.get("status", "done"),
                     "duration": d.get("stats", {}).get("Duration", ""),
                     "rounds": d.get("stats", {}).get("Rounds", ""),
+                    "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                     "started_at": d.get("started_at", 0),
                     "completed_at": d.get("completed_at", 0),
                     "archived": bool(d.get("archived")),
@@ -473,6 +554,101 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             deleted = True
         return {"deleted": deleted}
 
+    @router.get("/api/research/knowledge/settings")
+    async def research_knowledge_settings(request: Request):
+        """Return configured knowledge-source status for the research UI."""
+        _require_admin_user(request)
+        from src.knowledge_base import configured_local_roots, configured_vault_root
+        from src.settings import get_setting
+
+        root = configured_vault_root()
+        local_roots = configured_local_roots()
+        source_mode = str(get_setting("research_source_mode", "web") or "web").strip() or "web"
+        return {
+            "configured": root is not None or bool(local_roots),
+            "root": str(root) if root else "",
+            "local_roots": local_roots,
+            "source_mode": source_mode,
+            "max_chunks": int(get_setting("research_knowledge_max_chunks", 12) or 12),
+            "auto_index": bool(get_setting("research_knowledge_auto_index", True)),
+        }
+
+    @router.get("/api/research/knowledge/folders")
+    async def research_knowledge_folders(
+        request: Request,
+        parent: str = Query(""),
+        recursive: bool = Query(True),
+        max_depth: int = Query(3, ge=1, le=6),
+    ):
+        """List selectable folders under configured Obsidian/local knowledge roots."""
+        _require_admin_user(request)
+        from src.knowledge_base import KnowledgeBaseError, list_knowledge_folders
+
+        try:
+            return list_knowledge_folders(parent, recursive=recursive, max_depth=max_depth)
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
+    class KnowledgeLocalFolderRequest(BaseModel):
+        path: str
+        label: Optional[str] = None
+
+    @router.post("/api/research/knowledge/local-folders")
+    async def research_add_local_knowledge_folder(body: KnowledgeLocalFolderRequest, request: Request):
+        """Persist a local folder as a selectable Deep Research knowledge source."""
+        _require_admin_user(request)
+        from src.knowledge_base import KnowledgeBaseError, add_local_knowledge_root
+
+        try:
+            folder = add_local_knowledge_root(body.path, label=body.label or "")
+            return {"ok": True, "folder": folder}
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
+    @router.delete("/api/research/knowledge/local-folders/{root_id}")
+    async def research_remove_local_knowledge_folder(root_id: str, request: Request):
+        """Remove a configured local knowledge folder without touching files on disk."""
+        _require_admin_user(request)
+        from src.knowledge_base import remove_local_knowledge_root
+
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{6,64}", root_id or ""):
+            raise HTTPException(400, "Invalid local folder id")
+        removed = remove_local_knowledge_root(root_id)
+        if not removed:
+            raise HTTPException(404, "Local knowledge folder not found")
+        return {"ok": True, "removed": True}
+
+    @router.post("/api/research/knowledge/local-folders/pick")
+    async def research_pick_local_knowledge_folder(request: Request):
+        """Open the macOS folder picker and add the selected folder."""
+        _require_admin_user(request)
+        if sys.platform != "darwin":
+            raise HTTPException(400, "Folder picker is only available on macOS.")
+        from src.knowledge_base import KnowledgeBaseError, add_local_knowledge_root
+
+        script = 'POSIX path of (choose folder with prompt "Odysseus Deep Research 지식 소스로 사용할 폴더를 선택하세요")'
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(408, "Folder picker timed out")
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip()
+            if "User canceled" in stderr or "사용자가 취소" in stderr:
+                return {"ok": False, "cancelled": True}
+            raise HTTPException(400, stderr or "Folder picker was cancelled")
+        selected = (proc.stdout or "").strip()
+        try:
+            folder = add_local_knowledge_root(selected)
+            return {"ok": True, "folder": folder}
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+
     # ------------------------------------------------------------------
     # Panel endpoints — launch research without a chat session
     # ------------------------------------------------------------------
@@ -488,11 +664,21 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         extraction_timeout: Optional[int] = Field(default=None, ge=15, le=3600)
         extraction_concurrency: Optional[int] = Field(default=None, ge=1, le=12)
         category: Optional[str] = None
+        source_mode: Optional[str] = None
+        knowledge_folders: List[str] = Field(default_factory=list)
+        artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
+        reasoning_effort: Optional[str] = None
 
     @router.post("/api/research/start")
     async def research_start(body: ResearchStartRequest, request: Request):
         """Launch a research job from the dedicated panel."""
         from src.auth_helpers import require_privilege
+        from src.knowledge_base import (
+            KnowledgeBaseError,
+            knowledge_folders_for_source_mode,
+            normalize_source_mode,
+        )
+        from src.settings import get_setting
         user = require_privilege(request, "can_use_research")
         if user == INTERNAL_TOOL_USER:
             tool_owner = (request.headers.get("X-Odysseus-Owner") or "").strip()
@@ -558,6 +744,19 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             if body.model:
                 ep_model = body.model
 
+        requested_source_mode = body.source_mode or get_setting("research_source_mode", "web")
+        if normalize_source_mode(requested_source_mode) in {"hybrid", "knowledge"}:
+            _require_admin_user(request)
+        try:
+            resolved_knowledge_folders = knowledge_folders_for_source_mode(
+                requested_source_mode,
+                body.knowledge_folders,
+            )
+        except KnowledgeBaseError as e:
+            raise HTTPException(400, str(e))
+        artifact_formats = normalize_artifact_formats(body.artifact_formats)
+        reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
+
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
         research_handler.start_research(
@@ -570,11 +769,21 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             max_rounds=effective_max_rounds,
             search_provider=body.search_provider or None,
             category=body.category or None,
+            source_mode=normalize_source_mode(requested_source_mode),
+            knowledge_folders=resolved_knowledge_folders,
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
+            artifact_formats=artifact_formats,
+            reasoning_effort=reasoning_effort,
             owner=user,
         )
-        return {"session_id": session_id, "status": "running", "query": body.query}
+        return {
+            "session_id": session_id,
+            "status": "running",
+            "query": body.query,
+            "artifact_formats": artifact_formats,
+            "reasoning_effort": reasoning_effort,
+        }
 
     @router.get("/api/research/stream/{session_id}")
     async def research_stream(session_id: str, request: Request):
@@ -626,11 +835,21 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "sources": d.get("sources", []),
                     "raw_findings": d.get("raw_findings", []),
                     "category": d.get("category") or "",
+                    "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                 }
             raise HTTPException(404, "No research result available")
         sources = research_handler.get_sources(session_id) or []
         raw_findings = research_handler.get_raw_findings(session_id) or []
-        return {"result": result, "sources": sources, "raw_findings": raw_findings, "category": ""}
+        task = research_handler._active_tasks.get(session_id, {})
+        return {
+            "result": result,
+            "sources": sources,
+            "raw_findings": raw_findings,
+            "category": "",
+            "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
+            "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
+        }
 
     @router.post("/api/research/spinoff/{session_id}")
     async def research_spinoff(session_id: str, request: Request):

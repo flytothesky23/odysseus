@@ -71,6 +71,8 @@ async function _reconnectActive(options = {}) {
           elapsed: task.started_at ? Date.now() - task.started_at * 1000 : 0,
           result: null, sources: null, findings: null,
           errorMsg: null, avgDuration: null, modelName: null,
+          artifact_formats: task.artifact_formats || ['html'],
+          reasoning_effort: task.reasoning_effort || '',
           settings: {}, _es: null, _timerInterval: null,
         };
         _jobs.push(job);
@@ -110,6 +112,8 @@ async function _syncLibrary(options = {}) {
             sourceCount: item.source_count || existing.sourceCount || 0,
             thumbnail: item.thumbnail || existing.thumbnail || '',
             category: item.category || existing.category || '',
+            artifact_formats: item.artifact_formats || existing.artifact_formats || ['html'],
+            reasoning_effort: item.reasoning_effort || existing.reasoning_effort || '',
             _fromLibrary: true,
           };
           for (const [key, value] of Object.entries(updates)) {
@@ -128,6 +132,8 @@ async function _syncLibrary(options = {}) {
           sourceCount: item.source_count || 0,
           thumbnail: item.thumbnail || '',
           category: item.category || '',
+          artifact_formats: item.artifact_formats || ['html'],
+          reasoning_effort: item.reasoning_effort || '',
           errorMsg: null, avgDuration: null, modelName: null,
           settings: { max_rounds: item.rounds || 8 },
           _es: null, _timerInterval: null, _fromLibrary: true,
@@ -263,6 +269,8 @@ function _makeJob(query, settings) {
     progress: {}, startedAt: null, elapsed: 0,
     result: null, sources: null, findings: null,
     category: settings?.category || '',
+    artifact_formats: settings?.artifact_formats || ['html'],
+    reasoning_effort: settings?.reasoning_effort || '',
     errorMsg: null, avgDuration: null,
     modelName: null, endpointName: null,
     _es: null, _timerInterval: null,
@@ -295,6 +303,8 @@ async function _launchJob(job) {
   job.id = data.session_id;
   job.status = 'running';
   job.startedAt = Date.now();
+  if (data.artifact_formats) job.artifact_formats = data.artifact_formats;
+  if (data.reasoning_effort !== undefined) job.reasoning_effort = data.reasoning_effort || job.reasoning_effort || '';
   _connectStream(job);
   _notify();
 }
@@ -338,6 +348,7 @@ async function _pollFallback(job) {
     const d = await res.json();
     job.progress = d.progress || {};
     if (d.avg_duration) job.avgDuration = d.avg_duration;
+    if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     if (d.status !== 'running') {
       _finishJob(job, d.status === 'done' ? 'done' : 'error');
       if (d.status === 'done') _fetchResult(job);
@@ -375,6 +386,8 @@ async function _fetchResult(job) {
     job.sources = d.sources;
     job.findings = d.raw_findings;
     if (d.category && !job.category) job.category = d.category;
+    if (d.artifact_formats) job.artifact_formats = d.artifact_formats;
+    if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     _notify();
   } catch {}
 }

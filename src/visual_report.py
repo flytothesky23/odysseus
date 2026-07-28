@@ -182,6 +182,21 @@ def _apply_heading_ids(report_html: str, headings: List[Dict[str, str]]) -> str:
     return str(soup)
 
 
+def _wrap_report_tables(report_html: str) -> str:
+    """Wrap markdown tables so wide operational boards can scroll horizontally."""
+    if "<table" not in report_html:
+        return report_html
+
+    soup = BeautifulSoup(report_html, "html.parser")
+    for table in soup.find_all("table"):
+        if table.parent and "table-scroll" in (table.parent.get("class") or []):
+            continue
+        wrapper = soup.new_tag("div")
+        wrapper["class"] = "table-scroll"
+        table.wrap(wrapper)
+    return str(soup)
+
+
 # Overlay buttons shown on each image: reroll (swap for the next unused
 # scraped image) + hide (remove and skip on future renders). Reroll is
 # wired up in the page script using the embedded spare-image pool.
@@ -746,6 +761,19 @@ body::after {{
 .content code {{ font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-surface-alt); padding: 0.15em 0.4em; border-radius: 4px; }}
 .content pre {{ background: var(--bg-surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; overflow-x: auto; margin: 1.25rem 0; font-size: 0.86rem; line-height: 1.6; }}
 .content pre code {{ background: none; padding: 0; }}
+.table-scroll {{
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  -webkit-overflow-scrolling: touch;
+}}
+.table-scroll table {{ margin: 0; box-shadow: none; }}
+.table-scroll::-webkit-scrollbar {{ height: 10px; }}
+.table-scroll::-webkit-scrollbar-track {{ background: var(--bg-surface-alt); border-radius: 999px; }}
+.table-scroll::-webkit-scrollbar-thumb {{ background: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); border-radius: 999px; }}
 .content table {{ width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-sm); }}
 .content th {{ text-align: left; padding: 0.7rem 1rem; background: var(--accent-bg); font-weight: 600; border-bottom: 2px solid var(--border-strong); }}
 .content td {{ padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }}
@@ -1256,6 +1284,43 @@ body.category-product {
   --font-body: 'Inter', system-ui, sans-serif;
 }
 
+/* Management: default report typography with a wider rail for dense tables */
+body.category-management {
+  --max-w: 1120px;
+}
+body.category-management .layout {
+  grid-template-columns: minmax(150px, 12vw) minmax(0, 1fr);
+  width: min(96vw, 1480px);
+  max-width: none;
+}
+body.category-management .toc-sidebar {
+  padding-left: 0.9rem;
+  padding-right: 0.55rem;
+  font-size: 0.74rem;
+}
+body.category-management .content {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  padding-left: clamp(1.2rem, 2.2vw, 3rem);
+  padding-right: clamp(1.2rem, 2.2vw, 3rem);
+}
+body.category-management .hero h1 {
+  max-width: min(980px, 90vw);
+}
+@media (min-width: 1500px) {
+  body.category-management .layout {
+    width: min(98vw, 1680px);
+    grid-template-columns: minmax(160px, 11vw) minmax(0, 1fr);
+  }
+}
+@media (max-width: 900px) {
+  body.category-management .layout {
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Source Serif sits visually larger than Inter at the same px — pull it
    back one notch for the categories that use it as body so line length
    and rhythm stay comparable across categories. */
@@ -1517,6 +1582,38 @@ body.category-product .content h3 + table {
   margin-top: 0.8rem;
   padding-left: 4px;
 }
+
+/* ── MANAGEMENT: traditional report layout with wide tables ─────────────── */
+body.category-management .content {
+  font-feature-settings: 'tnum' on, 'ss01';
+}
+body.category-management .table-scroll {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+body.category-management .content table {
+  font-size: 0.9rem;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+body.category-management .content th {
+  letter-spacing: 0;
+  min-width: 7.5rem;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+body.category-management .content td {
+  min-width: 7.5rem;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  line-height: 1.6;
+}
+body.category-management .content th:first-child,
+body.category-management .content td:first-child {
+  min-width: 8rem;
+}
 """
     styles = {
         "product": """
@@ -1664,6 +1761,37 @@ body.category-product .content h3 + table {
   font-size:1.1em;
 }
 """,
+        "management": """
+/* Management analysis category */
+.category-management .content {
+  font-variant-numeric: tabular-nums;
+}
+.category-management .table-scroll {
+  margin:1.25em 0 1.6em;
+  border:1px solid var(--border);
+  background:var(--bg-surface);
+}
+.category-management .content table {
+  width:max-content; min-width:100%; table-layout:auto;
+  border-collapse:collapse; margin:0;
+}
+.category-management .content table th {
+  padding:9px 12px; text-align:left;
+  min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; letter-spacing:0;
+}
+.category-management .content table td {
+  padding:9px 12px; border-bottom:1px solid var(--border);
+  min-width:7.5rem; word-break:keep-all; overflow-wrap:normal; line-height:1.6;
+}
+.category-management .content table th:first-child,
+.category-management .content table td:first-child {
+  min-width:8rem;
+}
+.category-management .content h2 + ul,
+.category-management .content h2 + p {
+  margin-top:0.8rem;
+}
+""",
     }
     # Always emit the per-category palette block when ANY category is set —
     # it contains body.category-X scoped rules so it only re-skins the page
@@ -1759,6 +1887,7 @@ def generate_visual_report(
 
     headings = _extract_headings(report_markdown)
     report_html = _apply_heading_ids(report_html, headings)
+    report_html = _wrap_report_tables(report_html)
 
     # Collect all OG images from sources (skip icons, tiny images, known junk)
     _IMAGE_BLOCKLIST = {
