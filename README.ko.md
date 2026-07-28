@@ -34,6 +34,17 @@ docker compose logs odysseus
 
 native 설치, GPU 설정, Windows/macOS 실행, HTTPS, 환경변수는 원본 [setup guide](docs/setup.md)를 기준으로 확인하세요.
 
+## 현재 한국어 fork 릴리스
+
+최신 안정 태그는 [`v0.1.9-ko`](https://github.com/flytothesky23/odysseus/releases/tag/v0.1.9-ko)입니다.
+
+- 원본 기본 브랜치 `upstream/dev`의 `d96c7af`까지 반영했습니다.
+- 한국어 UI와 문서, Codex CLI/Codexian 연동, 개인 지식 기반 Deep Research, 경영분석 출력 계약을 새 upstream 구조에 다시 연결했습니다.
+- ChatGPT Subscription OAuth 사용자는 Codex 5.6 Sol·Terra·Luna와 모델별 추론 정도를 선택할 수 있습니다.
+- 기억, 이메일, OAuth, 세션, 벡터 지식 같은 개인화 데이터는 Git에 포함되지 않으며 [별도 로컬 마이그레이션 절차](docs/releases/v0.1.9-ko.md)에 따라 보존해야 합니다.
+
+기존 `v0.1.8-ko`에서 업데이트할 때는 코드만 새 태그로 전환하고 기존 `.env`와 `data/`를 삭제하지 마세요. `app.db`와 `data/.app_key`는 반드시 같은 snapshot의 한 쌍으로 보관해야 합니다.
+
 ## 무엇을 할 수 있나
 
 - **Chat + Agents** - local/API model, tool, MCP, file, shell, skill, memory를 연결합니다.

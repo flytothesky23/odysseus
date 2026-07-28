@@ -1,4 +1,6 @@
 import socket
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -57,20 +59,23 @@ async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_path):
+async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
-    socket_path = tmp_path / "docker.sock"
 
-    with socket.socket(socket.AF_UNIX) as unix_socket:
-        unix_socket.bind(str(socket_path))
-        available = await cookbook_routes._binary_available(
-            "docker",
-            None,
-            None,
-            in_container=True,
-            environ={"ODYSSEUS_ENABLE_HOST_DOCKER": "true"},
-            socket_path=str(socket_path),
-        )
+    # macOS pytest temp roots can exceed AF_UNIX's path limit.
+    short_tmp_root = "/tmp" if Path("/tmp").is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="ody-sock-", dir=short_tmp_root) as socket_dir:
+        socket_path = Path(socket_dir) / "docker.sock"
+        with socket.socket(socket.AF_UNIX) as unix_socket:
+            unix_socket.bind(str(socket_path))
+            available = await cookbook_routes._binary_available(
+                "docker",
+                None,
+                None,
+                in_container=True,
+                environ={"ODYSSEUS_ENABLE_HOST_DOCKER": "true"},
+                socket_path=str(socket_path),
+            )
 
     assert available is True
 

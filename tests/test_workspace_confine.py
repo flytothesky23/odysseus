@@ -231,7 +231,9 @@ async def test_glob_confined_e2e(ws, admin):
     assert r["exit_code"] == 0 and "found.py" in r["output"]
 
     # a secret outside the workspace must not be discoverable via glob
-    outside = tempfile.mkdtemp()
+    # Resolve macOS's /var -> /private/var alias before constructing the
+    # escaping pattern so the assertion compares one canonical path form.
+    outside = os.path.realpath(tempfile.mkdtemp())
     secret = os.path.join(outside, "secret.txt")
     with open(secret, "w") as f:
         f.write("nope")

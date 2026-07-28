@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -294,30 +295,34 @@ class TestHostDockerAccess:
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
         monkeypatch,
-        tmp_path,
         flag,
     ):
-        socket_path = tmp_path / "docker.sock"
-        with socket.socket(socket.AF_UNIX) as unix_socket:
-            unix_socket.bind(str(socket_path))
-            if flag is None:
-                monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
-            else:
-                monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", flag)
+        # macOS pytest temp roots can exceed AF_UNIX's path limit.
+        short_tmp_root = "/tmp" if Path("/tmp").is_dir() else None
+        with tempfile.TemporaryDirectory(prefix="ody-sock-", dir=short_tmp_root) as socket_dir:
+            socket_path = Path(socket_dir) / "docker.sock"
+            with socket.socket(socket.AF_UNIX) as unix_socket:
+                unix_socket.bind(str(socket_path))
+                if flag is None:
+                    monkeypatch.delenv("ODYSSEUS_ENABLE_HOST_DOCKER", raising=False)
+                else:
+                    monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", flag)
 
-            assert _host_docker_access_enabled(str(socket_path)) is False
+                assert _host_docker_access_enabled(str(socket_path)) is False
 
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
-        tmp_path,
     ):
-        socket_path = tmp_path / "docker.sock"
-        with socket.socket(socket.AF_UNIX) as unix_socket:
-            unix_socket.bind(str(socket_path))
-            monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
+        # macOS pytest temp roots can exceed AF_UNIX's path limit.
+        short_tmp_root = "/tmp" if Path("/tmp").is_dir() else None
+        with tempfile.TemporaryDirectory(prefix="ody-sock-", dir=short_tmp_root) as socket_dir:
+            socket_path = Path(socket_dir) / "docker.sock"
+            with socket.socket(socket.AF_UNIX) as unix_socket:
+                unix_socket.bind(str(socket_path))
+                monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
 
-            assert _host_docker_access_enabled(str(socket_path)) is True
+                assert _host_docker_access_enabled(str(socket_path)) is True
 
 
 class TestPackageProbeStatus:
