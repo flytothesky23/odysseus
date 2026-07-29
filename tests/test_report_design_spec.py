@@ -13,7 +13,7 @@ def test_management_design_spec_preserves_document_preset_and_maps_one_scene():
     )
 
     assert spec.preset == "document-briefing"
-    assert spec.tokens.accent == "#365b6d"
+    assert spec.tokens.accent == "#285e67"
     assert spec.image_mode == "editorial"
     assert [scene.visual_role for scene in spec.scenes] == [
         "typography",
@@ -96,3 +96,33 @@ def test_context_profile_changes_structure_for_management_and_product():
     )
     assert management.manifest.rationale != product.manifest.rationale
     assert management.manifest.seed != product.manifest.seed
+
+
+def test_context_palettes_change_surface_and_secondary_color_not_only_accent():
+    common = {
+        "headings": [{"level": 2, "slug": "summary", "text": "요약"}],
+        "image_mode": "editorial",
+        "assets": [{"role": "hero"}],
+    }
+
+    editorial = build_design_spec(category=None, **common)
+    product = build_design_spec(category="product", **common)
+    comparison = build_design_spec(category="comparison", **common)
+    howto = build_design_spec(category="howto", **common)
+
+    palettes = {
+        (
+            spec.tokens.paper,
+            spec.tokens.surface,
+            spec.tokens.surface_alt,
+            spec.tokens.accent,
+            spec.tokens.accent_secondary,
+            spec.tokens.hero_scrim,
+        )
+        for spec in (editorial, product, comparison, howto)
+    }
+
+    assert len(palettes) == 4
+    assert product.tokens.paper != editorial.tokens.paper
+    assert comparison.tokens.accent_secondary != product.tokens.accent_secondary
+    assert howto.tokens.surface != comparison.tokens.surface

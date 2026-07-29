@@ -26,8 +26,17 @@ VISUAL_ROLES = frozenset({
 class DesignTokens:
     accent: str
     accent_soft: str
+    accent_secondary: str = "#315f72"
+    accent_secondary_soft: str = "#dbe6ea"
     paper: str = "#f7f4ed"
+    surface: str = "#fffdf8"
+    surface_alt: str = "#eee6da"
     ink: str = "#1f2529"
+    ink_muted: str = "#64615c"
+    hero_scrim: str = "#17232c"
+    hero_text: str = "#fffaf2"
+    hero_kicker: str = "#f2c99f"
+    ambient_opacity: float = 0.08
     body_size_px: int = 17
     line_height: float = 1.82
 
@@ -103,11 +112,111 @@ class DesignSpec:
 _PRESETS = {
     "management": (
         "document-briefing",
-        DesignTokens(accent="#365b6d", accent_soft="#dbe7eb"),
+        DesignTokens(
+            accent="#285e67",
+            accent_soft="#d7e6e3",
+            accent_secondary="#9a6b33",
+            accent_secondary_soft="#efe0c7",
+            paper="#edf3f1",
+            surface="#fbfdfc",
+            surface_alt="#dfe9e5",
+            ink="#173034",
+            ink_muted="#52686b",
+            hero_scrim="#102b31",
+            hero_text="#f7fffd",
+            hero_kicker="#e4bd75",
+            ambient_opacity=0.065,
+        ),
+    ),
+    "product": (
+        "cinematic-banner",
+        DesignTokens(
+            accent="#007c7e",
+            accent_soft="#cde8e5",
+            accent_secondary="#c85e47",
+            accent_secondary_soft="#f2d8d1",
+            paper="#edf5f3",
+            surface="#f8fffc",
+            surface_alt="#d9ebe6",
+            ink="#142d2e",
+            ink_muted="#526a68",
+            hero_scrim="#062e36",
+            hero_text="#f4fffd",
+            hero_kicker="#ffbf8f",
+            ambient_opacity=0.075,
+        ),
+    ),
+    "comparison": (
+        "evidence-dossier",
+        DesignTokens(
+            accent="#744a8d",
+            accent_soft="#e6d9ed",
+            accent_secondary="#b77a21",
+            accent_secondary_soft="#f1e1c6",
+            paper="#f4f0f7",
+            surface="#fdfaff",
+            surface_alt="#e8deed",
+            ink="#2d2033",
+            ink_muted="#685d70",
+            hero_scrim="#25162f",
+            hero_text="#fff9ff",
+            hero_kicker="#f2c66d",
+            ambient_opacity=0.07,
+        ),
+    ),
+    "factcheck": (
+        "evidence-dossier",
+        DesignTokens(
+            accent="#2d6083",
+            accent_soft="#d7e4ee",
+            accent_secondary="#b34f48",
+            accent_secondary_soft="#efd8d5",
+            paper="#edf2f7",
+            surface="#fbfdff",
+            surface_alt="#dce5ee",
+            ink="#172635",
+            ink_muted="#5b6976",
+            hero_scrim="#11283a",
+            hero_text="#f7fbff",
+            hero_kicker="#efb47b",
+            ambient_opacity=0.065,
+        ),
+    ),
+    "howto": (
+        "technical-blueprint",
+        DesignTokens(
+            accent="#3e7447",
+            accent_soft="#d9e8d7",
+            accent_secondary="#b77920",
+            accent_secondary_soft="#f0e1c7",
+            paper="#eff5ec",
+            surface="#fbfff8",
+            surface_alt="#dfeadb",
+            ink="#1d3020",
+            ink_muted="#5b6c5c",
+            hero_scrim="#17351f",
+            hero_text="#f7fff5",
+            hero_kicker="#f0c478",
+            ambient_opacity=0.075,
+        ),
     ),
     "default": (
         "editorial-overlay",
-        DesignTokens(accent="#8a4f3d", accent_soft="#f1dfd7"),
+        DesignTokens(
+            accent="#a24f38",
+            accent_soft="#f0ddd4",
+            accent_secondary="#2f6470",
+            accent_secondary_soft="#d8e7e9",
+            paper="#f5efe5",
+            surface="#fffaf3",
+            surface_alt="#e8ddcf",
+            ink="#25272b",
+            ink_muted="#676058",
+            hero_scrim="#1d2931",
+            hero_text="#fff9ef",
+            hero_kicker="#f0c08c",
+            ambient_opacity=0.08,
+        ),
     ),
 }
 
@@ -253,7 +362,7 @@ def build_design_spec(
     """Create a deterministic, allowlisted design plan from report structure."""
     category_key = str(category or "").strip().lower()
     _base_preset, tokens = _PRESETS[
-        "management" if category_key == "management" else "default"
+        category_key if category_key in _PRESETS else "default"
     ]
     normalized_mode = str(image_mode or "none").strip().lower()
     if normalized_mode not in {"none", "cover", "editorial"}:

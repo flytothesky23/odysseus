@@ -44,6 +44,7 @@ async function render(browser, file, prefix, width, height) {
     const html = document.documentElement;
     const hero = document.querySelector('.designed-hero-composer');
     const heroTitle = hero?.querySelector('h1');
+    const sectionImage = document.querySelector('.designed-section-visual > img');
     const generatedImages = Array.from(document.querySelectorAll(
       '.designed-hero-composer > img, .designed-section-visual > img, .designed-ambient-layer > img',
     ));
@@ -52,6 +53,7 @@ async function render(browser, file, prefix, width, height) {
       .map((anchor) => anchor.getAttribute('href'))
       .filter((href) => href && href.length > 1 && !document.querySelector(href));
     const titleStyle = heroTitle ? getComputedStyle(heroTitle) : null;
+    const bodyStyle = getComputedStyle(body);
     const overlay = hero
       ? Number.parseFloat(hero.style.getPropertyValue('--hero-overlay') || '0')
       : 0;
@@ -68,7 +70,19 @@ async function render(browser, file, prefix, width, height) {
         (image) => !(image.getAttribute('alt') || '').trim(),
       ).length,
       hero_overlay_strength: overlay,
+      hero_height_px: hero ? Math.round(hero.getBoundingClientRect().height) : 0,
+      section_image_height_px: sectionImage
+        ? Math.round(sectionImage.getBoundingClientRect().height)
+        : 0,
       hero_title_color: titleStyle?.color || '',
+      palette_tokens: {
+        paper: bodyStyle.getPropertyValue('--designed-paper').trim(),
+        surface: bodyStyle.getPropertyValue('--designed-surface').trim(),
+        surface_alt: bodyStyle.getPropertyValue('--designed-surface-alt').trim(),
+        accent: bodyStyle.getPropertyValue('--accent').trim(),
+        accent_secondary: bodyStyle.getPropertyValue('--accent-secondary').trim(),
+        hero_scrim: bodyStyle.getPropertyValue('--hero-scrim').trim(),
+      },
       design_preset: body.dataset.designPreset || '',
       variation_id: body.dataset.designVariationId || '',
       design_status: body.dataset.designAssetsStatus || '',
@@ -96,21 +110,21 @@ async function main() {
     rows.push(await render(browser, baseline, 'round-0-reference-desktop', 1440, 900));
     rows.push(await render(browser, baseline, 'round-0-reference-mobile', 390, 844));
   }
-  rows.push(await render(browser, target, 'round-2-overlay-desktop', 1440, 900));
-  rows.push(await render(browser, target, 'round-2-overlay-mobile', 390, 844));
+  rows.push(await render(browser, target, 'round-3-compact-palette-desktop', 1440, 900));
+  rows.push(await render(browser, target, 'round-3-compact-palette-mobile', 390, 844));
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   await page.emulateMedia({ media: 'print', reducedMotion: 'reduce' });
   await page.goto(pathToFileURL(target).href, { waitUntil: 'load' });
-  const pdf = path.join(screenshotDir, 'round-2-overlay-print.pdf');
-  const printPreview = path.join(screenshotDir, 'round-2-overlay-print-preview.png');
+  const pdf = path.join(screenshotDir, 'round-3-compact-palette-print.pdf');
+  const printPreview = path.join(screenshotDir, 'round-3-compact-palette-print-preview.png');
   await page.screenshot({ path: printPreview, fullPage: true });
   await page.pdf({ path: pdf, format: 'A4', printBackground: true });
   await context.close();
   await browser.close();
 
-  const prefix = path.join(screenshotDir, 'round-2-overlay-print-page');
+  const prefix = path.join(screenshotDir, 'round-3-compact-palette-print-page');
   const conversion = spawnSync(pdftoppm, ['-png', '-f', '1', '-singlefile', '-r', '120', pdf, prefix], {
     encoding: 'utf8',
   });
@@ -129,6 +143,10 @@ async function main() {
     && row.generated_image_count === 3
     && row.missing_meaningful_alt === 0
     && row.hero_overlay_strength >= 0.35
+    && row.hero_height_px <= (row.viewport.width <= 720 ? 470 : 500)
+    && row.section_image_height_px <= (row.viewport.width <= 720 ? 260 : 300)
+    && Object.values(row.palette_tokens).every(Boolean)
+    && new Set(Object.values(row.palette_tokens)).size >= 5
     && row.manifest_present
     && row.design_status === 'ready'
   )) && conversion.status === 0 && fs.existsSync(printPage);
@@ -148,7 +166,7 @@ async function main() {
     },
   };
   fs.writeFileSync(
-    path.join(outputDir, 'render-audit-hero-composer.json'),
+    path.join(outputDir, 'render-audit-compact-palette.json'),
     `${JSON.stringify(result, null, 2)}\n`,
     'utf8',
   );

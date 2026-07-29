@@ -120,6 +120,59 @@ def main() -> int:
         json.dumps(design_spec.to_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    palette_dir = output_dir / "palette-previews"
+    palette_dir.mkdir(parents=True, exist_ok=True)
+    palette_rows = []
+    for slug, category in (
+        ("editorial", None),
+        ("product", "product"),
+        ("comparison", "comparison"),
+        ("factcheck", "factcheck"),
+        ("howto", "howto"),
+        ("management", "management"),
+    ):
+        palette_html = generate_visual_report(
+            **{**common, "category": category},
+            design_image_mode="editorial",
+            designed_visual_assets=visual_assets,
+        )
+        html_name = f"{slug}.html"
+        (palette_dir / html_name).write_text(palette_html, encoding="utf-8")
+        palette_spec = build_design_spec(
+            category=category,
+            headings=_extract_headings(markdown_without_title),
+            image_mode="editorial",
+            assets=visual_assets,
+        )
+        spec_name = f"{slug}.design-spec.json"
+        (palette_dir / spec_name).write_text(
+            json.dumps(palette_spec.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tokens = palette_spec.tokens
+        palette_rows.append(
+            "| "
+            f"{slug} | [{html_name}]({html_name}) | "
+            f"`{tokens.paper}` / `{tokens.surface}` | "
+            f"`{tokens.accent}` / `{tokens.accent_secondary}` | "
+            f"[DesignSpec]({spec_name}) |"
+        )
+    (palette_dir / "README.md").write_text(
+        "\n".join([
+            "# Context palette previews",
+            "",
+            "동일한 비식별 보고서와 이미지에 장르별 paper·surface·accent·secondary·"
+            "hero scrim 토큰을 적용한 비교본입니다. 색상만 임의 변경하지 않고 "
+            "ContextProfile의 장르와 독자 목적에 따라 결정론적으로 선택합니다.",
+            "",
+            "| Context | HTML | Paper / Surface | Accent / Secondary | Manifest |",
+            "| --- | --- | --- | --- | --- |",
+            *palette_rows,
+            "",
+        ]),
+        encoding="utf-8",
+    )
     return 0
 
 

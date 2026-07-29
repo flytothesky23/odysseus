@@ -203,3 +203,22 @@ def test_designed_report_composes_generated_layers_and_reports_partial_assets(mo
     assert soup.select_one('[data-visual-role="section_background"]') is not None
     assert soup.body["data-design-assets-status"] == "partial"
     assert soup.select_one(".designed-ambient-layer") is None
+
+
+def test_designed_report_uses_bounded_banner_heights_and_context_surface_tokens():
+    rendered = generate_visual_report(
+        "제품 근거를 어떻게 설명할 것인가",
+        "# 제품 근거 보고서\n\n## 요약\n\n본문",
+        category="product",
+        report_style="designed",
+        design_image_mode="none",
+    )
+
+    assert "--designed-surface:" in rendered
+    assert "--accent-secondary:" in rendered
+    assert "--hero-scrim:" in rendered
+    assert "min-height: clamp(340px, 34vw, 470px);" in rendered
+    assert "height: clamp(190px, 24vw, 290px);" in rendered
+    assert "min-height: clamp(340px, 115vw, 460px);" in rendered
+    assert "min-height: clamp(390px, 46vw, 610px);" not in rendered
+    assert "min-height: min(72vh, 610px);" not in rendered

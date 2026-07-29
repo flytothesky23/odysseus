@@ -1208,8 +1208,23 @@ def _designed_report_css(category: Optional[str], design_spec: Optional[DesignSp
     tokens = design_spec.tokens if design_spec else None
     accent = tokens.accent if tokens else "#365b6d" if management else "#8a4f3d"
     accent_soft = tokens.accent_soft if tokens else "#dbe7eb" if management else "#f1dfd7"
+    accent_secondary = tokens.accent_secondary if tokens else "#9a6b33" if management else "#315f72"
+    accent_secondary_soft = (
+        tokens.accent_secondary_soft
+        if tokens
+        else "#efe0c7"
+        if management
+        else "#dbe6ea"
+    )
     paper = tokens.paper if tokens else "#f7f4ed"
+    surface = tokens.surface if tokens else "#fffdf8"
+    surface_alt = tokens.surface_alt if tokens else "#eee6da"
     ink = tokens.ink if tokens else "#1f2529"
+    ink_muted = tokens.ink_muted if tokens else "#64615c"
+    hero_scrim = tokens.hero_scrim if tokens else "#17232c"
+    hero_text = tokens.hero_text if tokens else "#fffaf2"
+    hero_kicker = tokens.hero_kicker if tokens else "#f2c99f"
+    ambient_opacity = tokens.ambient_opacity if tokens else 0.08
     body_size = tokens.body_size_px if tokens else 17
     line_height = tokens.line_height if tokens else 1.82
     return f"""
@@ -1220,10 +1235,30 @@ body[data-report-style="designed"] {{
   --accent: {accent};
   --accent-light: {accent};
   --accent-bg: color-mix(in srgb, {accent_soft} 72%, transparent);
+  --accent-secondary: {accent_secondary};
+  --accent-secondary-bg: color-mix(in srgb, {accent_secondary_soft} 74%, transparent);
   --designed-paper: {paper};
+  --designed-surface: {surface};
+  --designed-surface-alt: {surface_alt};
   --designed-ink: {ink};
+  --designed-muted: {ink_muted};
+  --hero-scrim: {hero_scrim};
+  --hero-text: {hero_text};
+  --hero-kicker: {hero_kicker};
+  --ambient-opacity: {ambient_opacity:.3f};
   --designed-rule: color-mix(in srgb, var(--accent) 28%, var(--border));
-  background: var(--designed-paper);
+  background:
+    radial-gradient(
+      circle at 92% 0%,
+      color-mix(in srgb, var(--accent-secondary) 12%, transparent),
+      transparent 32rem
+    ),
+    radial-gradient(
+      circle at 4% 36%,
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      transparent 38rem
+    ),
+    var(--designed-paper);
   color: var(--designed-ink);
   font-size: {body_size}px;
   line-height: {line_height};
@@ -1232,7 +1267,12 @@ body[data-report-style="designed"]::before {{
   animation: none;
   filter: none;
   background:
-    linear-gradient(90deg, transparent 0 7%, color-mix(in srgb, var(--accent) 5%, transparent) 7% 7.1%, transparent 7.1% 100%);
+    linear-gradient(
+      90deg,
+      transparent 0 7%,
+      color-mix(in srgb, var(--accent-secondary) 8%, transparent) 7% 7.1%,
+      transparent 7.1% 100%
+    );
 }}
 body[data-report-style="designed"]::after {{
   opacity: 0.018;
@@ -1273,19 +1313,30 @@ body[data-report-style="designed"] .designed-ambient-layer {{
   z-index: -1;
   pointer-events: none;
   overflow: hidden;
-  background: var(--designed-paper);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--accent) 8%, transparent),
+      transparent 46%
+    ),
+    linear-gradient(
+      315deg,
+      color-mix(in srgb, var(--accent-secondary) 9%, transparent),
+      transparent 52%
+    ),
+    var(--designed-paper);
 }}
 body[data-report-style="designed"] .designed-ambient-layer img {{
   width: 100%;
   height: 100%;
   object-fit: cover;
-  opacity: 0.09;
-  filter: saturate(0.62) contrast(0.84) blur(1px);
+  opacity: var(--ambient-opacity);
+  filter: saturate(0.72) contrast(0.86) blur(1px);
   transform: scale(1.035);
 }}
 body[data-report-style="designed"].has-generated-ambient .content {{
   padding: clamp(1.3rem, 3vw, 2.5rem);
-  background: color-mix(in srgb, var(--designed-paper) 94%, transparent);
+  background: color-mix(in srgb, var(--designed-surface) 94%, transparent);
   box-shadow: 0 18px 60px color-mix(in srgb, var(--designed-ink) 9%, transparent);
 }}
 body[data-report-style="designed"] .hero.designed-hero-composer {{
@@ -1295,15 +1346,17 @@ body[data-report-style="designed"] .hero.designed-hero-composer {{
   align-items: center;
   width: min(1280px, calc(100% - 2.5rem));
   max-width: none;
-  min-height: clamp(390px, 46vw, 610px);
+  min-height: clamp(340px, 34vw, 470px);
   margin: clamp(1rem, 3vw, 2.5rem) auto 2rem;
-  padding: clamp(2.5rem, 6vw, 5.5rem);
+  padding: clamp(2.25rem, 5vw, 4.5rem);
   overflow: hidden;
   border-radius: 18px;
-  color: #fffaf2;
+  color: var(--hero-text);
   text-align: left;
-  box-shadow: 0 24px 70px rgba(22, 24, 31, 0.25);
-  background: #1b1e27;
+  box-shadow:
+    0 24px 70px color-mix(in srgb, var(--hero-scrim) 26%, transparent),
+    0 1px 0 color-mix(in srgb, var(--hero-text) 18%, transparent) inset;
+  background: var(--hero-scrim);
 }}
 body[data-report-style="designed"] .hero.designed-hero-composer::before {{
   content: "";
@@ -1314,11 +1367,12 @@ body[data-report-style="designed"] .hero.designed-hero-composer::before {{
   background:
     linear-gradient(
       90deg,
-      rgba(12, 15, 24, var(--hero-overlay)) 0%,
-      rgba(12, 15, 24, calc(var(--hero-overlay) * .92)) 38%,
-      rgba(12, 15, 24, .18) 72%,
-      rgba(12, 15, 24, .05) 100%
+      color-mix(in srgb, var(--hero-scrim) 98%, transparent) 0%,
+      color-mix(in srgb, var(--hero-scrim) 92%, transparent) 38%,
+      color-mix(in srgb, var(--hero-scrim) 28%, transparent) 72%,
+      color-mix(in srgb, var(--hero-scrim) 8%, transparent) 100%
     );
+  opacity: var(--hero-overlay);
 }}
 body[data-report-style="designed"] .hero.designed-hero-composer::after {{
   content: "";
@@ -1327,7 +1381,12 @@ body[data-report-style="designed"] .hero.designed-hero-composer::after {{
   inset: auto 0 0;
   z-index: -1;
   height: 34%;
-  background: linear-gradient(0deg, rgba(8, 10, 15, .58), transparent);
+  background:
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--hero-scrim) 72%, transparent),
+      transparent
+    );
 }}
 body[data-report-style="designed"] .designed-hero-composer > img {{
   position: absolute;
@@ -1345,17 +1404,17 @@ body[data-report-style="designed"] .designed-hero-copy {{
 }}
 body[data-report-style="designed"] .designed-hero-composer .hero-label {{
   margin: 0 0 1.1rem;
-  color: #f2c99f;
+  color: var(--hero-kicker);
 }}
 body[data-report-style="designed"] .designed-hero-composer h1 {{
   max-width: 720px;
-  color: #fffaf2;
-  font-size: clamp(2.45rem, 5.3vw, 5.25rem);
+  color: var(--hero-text);
+  font-size: clamp(2.35rem, 4.65vw, 4.65rem);
 }}
 body[data-report-style="designed"] .designed-hero-deck {{
   max-width: 620px;
   margin: 1.3rem 0 0;
-  color: rgba(255, 250, 242, .86);
+  color: color-mix(in srgb, var(--hero-text) 86%, transparent);
   font-size: clamp(.94rem, 1.5vw, 1.15rem);
   line-height: 1.65;
 }}
@@ -1364,7 +1423,7 @@ body[data-report-style="designed"] .designed-hero-meta {{
   flex-wrap: wrap;
   gap: .55rem 1.1rem;
   margin-top: 1.5rem;
-  color: rgba(255, 250, 242, .72);
+  color: color-mix(in srgb, var(--hero-text) 72%, transparent);
   font-size: .75rem;
   letter-spacing: .04em;
 }}
@@ -1372,7 +1431,7 @@ body[data-report-style="designed"] .designed-hero-disclosure {{
   position: absolute;
   right: 1rem;
   bottom: .8rem;
-  color: rgba(255, 255, 255, .64);
+  color: color-mix(in srgb, var(--hero-text) 64%, transparent);
   font-size: .65rem;
   letter-spacing: .03em;
 }}
@@ -1386,8 +1445,7 @@ body[data-report-style="designed"] .designed-hero-visual {{
 body[data-report-style="designed"] .designed-hero-visual img {{
   display: block;
   width: 100%;
-  max-height: 660px;
-  aspect-ratio: 3 / 2;
+  height: clamp(240px, 31vw, 390px);
   object-fit: cover;
   object-position: center;
   filter: saturate(0.92) contrast(1.02);
@@ -1397,8 +1455,8 @@ body[data-report-style="designed"] .designed-section-visual figcaption {{
   margin: 0;
   padding: .55rem .7rem;
   border-left: 5px solid var(--accent);
-  background: color-mix(in srgb, var(--designed-paper) 96%, var(--accent));
-  color: color-mix(in srgb, var(--designed-ink) 58%, var(--accent));
+  background: color-mix(in srgb, var(--designed-surface-alt) 78%, var(--designed-surface));
+  color: color-mix(in srgb, var(--designed-muted) 74%, var(--accent));
   font-size: 0.74rem;
   line-height: 1.45;
   letter-spacing: 0.04em;
@@ -1414,8 +1472,7 @@ body[data-report-style="designed"] .designed-section-visual {{
 body[data-report-style="designed"] .designed-section-visual img {{
   display: block;
   width: 100%;
-  max-height: 440px;
-  aspect-ratio: 3 / 2;
+  height: clamp(190px, 24vw, 290px);
   object-fit: cover;
   object-position: center;
   border-left: 5px solid var(--accent);
@@ -1432,13 +1489,23 @@ body[data-report-style="designed"] .designed-section-title {{
   font-weight: 760;
   line-height: 1.12;
   text-shadow: 0 2px 20px rgba(0, 0, 0, .62);
-  background: linear-gradient(0deg, rgba(10, 13, 20, .78), transparent 66%);
+  background:
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--hero-scrim) 82%, transparent),
+      transparent 68%
+    );
 }}
 body[data-report-style="designed"] .stats-bar {{
   max-width: 1040px;
   margin-inline: auto;
   border-block: 1px solid var(--designed-rule);
-  background: transparent;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent-secondary-bg) 48%, transparent),
+      color-mix(in srgb, var(--designed-surface) 72%, transparent)
+    );
 }}
 body[data-report-style="designed"] .layout {{
   max-width: 1180px;
@@ -1447,6 +1514,15 @@ body[data-report-style="designed"] .layout {{
 body[data-report-style="designed"] .toc-sidebar nav {{
   border-left: 2px solid var(--designed-rule);
   padding-left: 1rem;
+}}
+body[data-report-style="designed"] .toc-sidebar nav a.active {{
+  color: color-mix(in srgb, var(--accent) 78%, var(--designed-ink));
+  background:
+    linear-gradient(
+      90deg,
+      var(--accent-bg),
+      color-mix(in srgb, var(--accent-secondary-bg) 42%, transparent)
+    );
 }}
 body[data-report-style="designed"] .content {{
   max-width: 780px;
@@ -1474,10 +1550,15 @@ body[data-report-style="designed"] .content blockquote {{
   border-radius: 0;
 }}
 body[data-report-style="designed"] .content table {{
-  background: #fffdf8;
+  background: var(--designed-surface);
 }}
 body[data-report-style="designed"] .content th {{
-  background: color-mix(in srgb, var(--accent) 10%, #fffdf8);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 10%, var(--designed-surface)),
+      color-mix(in srgb, var(--accent-secondary) 8%, var(--designed-surface))
+    );
 }}
 body[data-report-style="designed"].category-management .content h2,
 body[data-report-style="designed"].category-management .content h3 {{
@@ -1517,26 +1598,27 @@ body[data-report-style="designed"] .chat-cta {{
   body[data-report-style="designed"] .hero.designed-hero-composer {{
     align-items: end;
     width: calc(100% - 1rem);
-    min-height: min(72vh, 610px);
+    min-height: clamp(340px, 115vw, 460px);
     margin: .5rem auto 1.3rem;
-    padding: 2rem 1.25rem 2.6rem;
+    padding: 1.8rem 1.25rem 2.45rem;
     border-radius: 12px;
   }}
   body[data-report-style="designed"] .hero.designed-hero-composer::before {{
     background:
       linear-gradient(
         0deg,
-        rgba(10, 12, 19, .92) 0%,
-        rgba(10, 12, 19, .68) 42%,
-        rgba(10, 12, 19, .08) 78%
+        color-mix(in srgb, var(--hero-scrim) 98%, transparent) 0%,
+        color-mix(in srgb, var(--hero-scrim) 84%, transparent) 42%,
+        color-mix(in srgb, var(--hero-scrim) 12%, transparent) 78%
       );
+    opacity: var(--hero-overlay);
   }}
   body[data-report-style="designed"] .designed-hero-copy {{
     width: 100%;
   }}
   body[data-report-style="designed"] .designed-hero-composer h1 {{
     max-width: none;
-    font-size: clamp(2rem, 10.7vw, 3.25rem);
+    font-size: clamp(1.95rem, 9.5vw, 3rem);
     line-height: 1.08;
   }}
   body[data-report-style="designed"] .designed-hero-disclosure {{
@@ -1562,10 +1644,11 @@ body[data-report-style="designed"] .chat-cta {{
     margin-bottom: 2.4rem;
     padding-block: 0.65rem;
   }}
-  body[data-report-style="designed"] .designed-hero-visual img,
+  body[data-report-style="designed"] .designed-hero-visual img {{
+    height: clamp(220px, 72vw, 320px);
+  }}
   body[data-report-style="designed"] .designed-section-visual img {{
-    max-height: none;
-    aspect-ratio: 4 / 3;
+    height: clamp(180px, 54vw, 250px);
   }}
 }}
 @media (prefers-reduced-motion: reduce) {{
@@ -1604,9 +1687,9 @@ body[data-report-style="designed"] .chat-cta {{
   body[data-report-style="designed"] .hero.designed-hero-composer {{
     display: grid;
     width: 100%;
-    min-height: 78mm;
+    min-height: 58mm;
     margin: 0 0 10mm;
-    padding: 14mm;
+    padding: 10mm;
     border-radius: 0;
     color: #fff !important;
     box-shadow: none;
@@ -1649,7 +1732,8 @@ body[data-report-style="designed"] .chat-cta {{
   }}
   body[data-report-style="designed"] .designed-hero-visual img,
   body[data-report-style="designed"] .designed-section-visual img {{
-    max-height: 72mm;
+    height: auto;
+    max-height: 48mm;
     object-fit: contain;
     filter: grayscale(0.18) contrast(0.98);
     border-left: 0;
