@@ -358,6 +358,9 @@ export function closeContractReview() {
 export function initContractReview(apiBase = '') {
   API_BASE = apiBase;
   syncIndicator();
+  document.addEventListener('contract-review-state-change', event => {
+    syncIndicator(event.detail);
+  });
   document.getElementById('overflow-contract-review-btn')?.addEventListener('click', openContractReview);
   document.addEventListener('contract-review-vault-indexed', event => {
     indexedNotes = Array.isArray(event.detail?.notes) ? event.detail.notes : indexedNotes;

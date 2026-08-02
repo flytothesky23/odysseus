@@ -133,6 +133,12 @@ def test_contract_review_refreshes_mcp_inventory_each_time_the_workspace_opens()
     assert "catch (error) { clearProfileServers();" in workspace
 
 
+def test_contract_review_indicator_tracks_explorer_state_changes():
+    workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    assert "document.addEventListener('contract-review-state-change', event => {" in workspace
+    assert "syncIndicator(event.detail);" in workspace
+
+
 def test_explicit_report_save_has_one_request_method_definition():
     workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
     duplicate = "method: 'POST', body: JSON.stringify({ session_id: sessionId, title, result }),\n    method: 'POST'"
