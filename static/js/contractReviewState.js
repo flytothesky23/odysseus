@@ -13,6 +13,20 @@ function sanitizeJobIds(value) {
   return [...new Set(value.map(String).filter(id => /^[a-f0-9]{32}$/.test(id)))].slice(0, 20);
 }
 
+export function sanitizeNoteScope(value) {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const defaultIncluded = input.default_included !== false;
+  const deduped = new Map();
+  for (const rule of Array.isArray(input.rules) ? input.rules.slice(0, 2000) : []) {
+    if (!rule || typeof rule !== 'object' || typeof rule.included !== 'boolean') continue;
+    const path = typeof rule.path === 'string' ? rule.path.trim().replace(/\\/g, '/') : '';
+    if (!isRelativePath(path)) continue;
+    if (deduped.has(path)) deduped.delete(path);
+    deduped.set(path, { path, included: rule.included });
+  }
+  return { default_included: defaultIncluded, rules: [...deduped.values()] };
+}
+
 export function updateSelectedPathSelection(current, path, checked) {
   const selected = new Set(
     (Array.isArray(current) ? current : []).filter(candidate => isRelativePath(candidate)),
@@ -35,6 +49,7 @@ export function sanitizePersistedState(value) {
     snapshot_id: String(input.snapshot_id || '').slice(0, 128),
     vault_id: String(input.vault_id || '').slice(0, 128),
     vault_path: isRelativePath(vaultPath, true) ? vaultPath : '.',
+    note_scope: sanitizeNoteScope(input.note_scope),
     selected_paths: selected,
     kordoc_job_ids: sanitizeJobIds(input.kordoc_job_ids),
     law_job_ids: sanitizeJobIds(input.law_job_ids),
@@ -46,6 +61,7 @@ export function buildContractReviewChatContext(value) {
   return {
     snapshot_id: state.snapshot_id,
     vault_id: state.vault_id,
+    note_scope: state.note_scope,
     selected_paths: state.selected_paths,
     kordoc_job_ids: state.kordoc_job_ids,
     law_job_ids: state.law_job_ids,
@@ -57,6 +73,7 @@ export function buildVaultSearchRequest(value, query, includeBody, candidatePath
   return {
     snapshot_id: state.snapshot_id,
     vault_id: state.vault_id,
+    note_scope: state.note_scope,
     query: String(query || '').trim(),
     include_body: Boolean(includeBody),
     candidate_paths: (Array.isArray(candidatePaths) ? candidatePaths : [])

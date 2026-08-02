@@ -21,6 +21,8 @@ def contract_api(tmp_path, monkeypatch):
         "---\ntitle: 기본 계약\naliases: [MSA]\n---\n대금 지급 근거",
         encoding="utf-8",
     )
+    (vault / "archive").mkdir()
+    (vault / "archive" / "Hidden.md").write_text("제외된 지급 근거", encoding="utf-8")
     document = workspace / "documents" / "agreement.pdf"
     document.parent.mkdir()
     document.write_bytes(b"fixture")
@@ -179,6 +181,37 @@ async def test_route_owner_isolation_and_unauthenticated_rejection(contract_api)
 
     anonymous = await _request(app, "GET", "/api/contract-review/profile", owner=None)
     assert anonymous.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_route_applies_compact_note_scope_to_search_open_and_context(contract_api):
+    app, workspace, _saved = contract_api
+    indexed = (await _request(app, "POST", "/api/contract-review/vault/index", json={
+        "workspace": str(workspace), "vault_path": "vault",
+    })).json()
+    scope = {"default_included": False, "rules": [{"path": "Agreement.md", "included": True}]}
+
+    search = await _request(app, "POST", "/api/contract-review/vault/search", json={
+        "snapshot_id": indexed["snapshot_id"], "vault_id": indexed["vault_id"],
+        "query": "MSA", "note_scope": scope,
+    })
+    assert search.status_code == 200
+    assert [item["path"] for item in search.json()["results"]] == ["Agreement.md"]
+
+    opened = await _request(app, "POST", "/api/contract-review/vault/open", json={
+        "snapshot_id": indexed["snapshot_id"], "vault_id": indexed["vault_id"],
+        "path": "archive/Hidden.md", "note_scope": scope,
+    })
+    assert opened.status_code == 403
+    assert opened.json()["error"] == "outside_scope"
+
+    prepared = await _request(app, "POST", "/api/contract-review/context/prepare", json={
+        "session_id": "scope-session", "snapshot_id": indexed["snapshot_id"],
+        "vault_id": indexed["vault_id"], "selected_paths": ["archive/Hidden.md"],
+        "note_scope": scope, "kordoc_job_ids": [], "law_job_ids": [],
+    })
+    assert prepared.status_code == 403
+    assert prepared.json()["error"] == "outside_scope"
 
 
 @pytest.mark.asyncio

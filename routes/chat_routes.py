@@ -82,6 +82,7 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
     selected = payload.get("selected_paths") or []
     kordoc_ids = payload.get("kordoc_job_ids") or []
     law_ids = payload.get("law_job_ids") or []
+    note_scope = payload.get("note_scope")
     if not all(isinstance(value, list) for value in (selected, kordoc_ids, law_ids)):
         raise HTTPException(400, "Invalid Contract Review selection")
     if len(kordoc_ids) > 20 or len(law_ids) > 20:
@@ -98,6 +99,7 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
             snapshot_id=str(payload.get("snapshot_id") or ""),
             vault_id=str(payload.get("vault_id") or ""),
             selected_paths=selected,
+            note_scope=note_scope,
             local_document_evidence=local_evidence,
             official_legal_evidence=legal_evidence,
         )

@@ -92,6 +92,36 @@ def test_metadata_index_and_korean_search_read_no_bodies(contract_workspace, mon
     assert calls == []
 
 
+def test_metadata_and_body_search_are_confined_to_compact_note_scope(contract_workspace):
+    workspace, _vault = contract_workspace
+    service = ContractReviewWorkspaceService(max_body_candidates=2)
+    indexed = _index(service, workspace)
+    scope = {
+        "default_included": False,
+        "rules": [{"path": "amendments", "included": True}],
+    }
+
+    included = service.search(
+        "alice", indexed["snapshot_id"], indexed["vault_id"], "책임 제한",
+        note_scope=scope,
+    )
+    excluded = service.search(
+        "alice", indexed["snapshot_id"], indexed["vault_id"], "용역 기본 계약서",
+        note_scope=scope,
+    )
+    assert [item["path"] for item in included["results"]] == ["amendments/Liability.md"]
+    assert excluded["results"] == []
+
+    with pytest.raises(ContractReviewError) as exc:
+        service.search(
+            "alice", indexed["snapshot_id"], indexed["vault_id"], "지급",
+            include_body=True,
+            candidate_paths=["기본 계약.md"],
+            note_scope=scope,
+        )
+    assert exc.value.code == "outside_scope"
+
+
 def test_bounded_body_search_and_delta_follow_up(contract_workspace, monkeypatch):
     workspace, _vault = contract_workspace
     service = ContractReviewWorkspaceService(max_body_candidates=1, max_body_chars=4000)

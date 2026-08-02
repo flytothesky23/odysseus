@@ -220,6 +220,7 @@ def setup_contract_review_routes(
                 str(payload.get("query") or ""),
                 include_body=bool(payload.get("include_body", False)),
                 candidate_paths=payload.get("candidate_paths"),
+                note_scope=payload.get("note_scope"),
                 limit=int(payload.get("limit", 20)),
             )
         except (TypeError, ValueError):
@@ -237,6 +238,7 @@ def setup_contract_review_routes(
                 str(payload.get("snapshot_id") or ""),
                 str(payload.get("vault_id") or ""),
                 str(payload.get("path") or ""),
+                payload.get("note_scope"),
             )
         except ContractReviewError as exc:
             return _error_response(exc)
@@ -257,6 +259,7 @@ def setup_contract_review_routes(
                 snapshot_id=str(payload.get("snapshot_id") or ""),
                 vault_id=str(payload.get("vault_id") or ""),
                 selected_paths=selected,
+                note_scope=payload.get("note_scope"),
                 local_document_evidence=local_evidence,
                 official_legal_evidence=law_evidence,
             )

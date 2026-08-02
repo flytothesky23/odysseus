@@ -9,13 +9,13 @@ import {
   sanitizePersistedState,
   updateSelectedPathSelection,
 } from './contractReviewState.js';
+import { isPathIncludedByScope } from './contractReviewExplorerState.js';
 
 let API_BASE = '';
 let modal = null;
 let indexedNotes = [];
 let visibleNotes = [];
 let activeJobId = null;
-let profileLoaded = false;
 
 function loadState() {
   return sanitizePersistedState(Storage.getJSON(KEYS.CONTRACT_REVIEW, {}));
@@ -72,8 +72,13 @@ function renderServerOptions(select, servers, emptyLabel) {
     : `<option value="">${uiModule.esc(emptyLabel)}</option>`;
 }
 
+function clearProfileServers() {
+  renderServerOptions(modal?.querySelector('#contract-review-kordoc-server'), [], 'Kordoc unavailable');
+  renderServerOptions(modal?.querySelector('#contract-review-law-server'), [], 'Korean Law unavailable');
+}
+
 async function loadProfile() {
-  if (profileLoaded) return;
+  clearProfileServers();
   const profile = await api('/profile');
   renderServerOptions(
     modal.querySelector('#contract-review-kordoc-server'),
@@ -85,7 +90,6 @@ async function loadProfile() {
     Array.isArray(profile.korean_law_servers) ? profile.korean_law_servers : [],
     'Korean Law unavailable',
   );
-  profileLoaded = true;
   if (!profile.inventory_available) setStatus('MCP inventory를 읽을 수 없습니다.', 'error');
 }
 
@@ -96,12 +100,14 @@ function selectedPaths() {
 function renderNotes(items) {
   const list = modal?.querySelector('#contract-review-results');
   if (!list) return;
-  const chosen = new Set(loadState().selected_paths);
-  if (!items.length) {
+  const state = loadState();
+  const chosen = new Set(state.selected_paths);
+  const scopedItems = items.filter(note => isPathIncludedByScope(note.path, state.note_scope));
+  if (!scopedItems.length) {
     list.innerHTML = '<div class="workspace-empty">일치하는 Markdown 노트가 없습니다.</div>';
     return;
   }
-  list.innerHTML = items.map(note => {
+  list.innerHTML = scopedItems.map(note => {
     const path = String(note.path || '');
     const aliases = Array.isArray(note.aliases) && note.aliases.length
       ? `<div class="muted">Aliases: ${uiModule.esc(note.aliases.join(', '))}</div>` : '';
@@ -113,6 +119,7 @@ function renderNotes(items) {
     const state = loadState();
     saveState({
       ...state,
+      active: false,
       selected_paths: updateSelectedPathSelection(
         state.selected_paths,
         input.dataset.contractNote,
@@ -130,9 +137,14 @@ async function indexVault() {
   const indexed = await api('/vault/index', { method: 'POST', body: JSON.stringify({ workspace, vault_path: vaultPath }) });
   indexedNotes = indexed.notes || [];
   visibleNotes = indexedNotes;
+  const previous = loadState();
+  const noteScope = previous.vault_id === indexed.vault_id
+    ? previous.note_scope
+    : { default_included: true, rules: [] };
   saveState({
-    active: true, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
-    vault_path: vaultPath, selected_paths: [], kordoc_job_ids: [], law_job_ids: [],
+    active: false, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
+    vault_path: vaultPath, note_scope: noteScope, selected_paths: [],
+    kordoc_job_ids: previous.kordoc_job_ids, law_job_ids: previous.law_job_ids,
   });
   document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
     detail: { notes: indexedNotes, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id },
@@ -146,7 +158,12 @@ async function searchVault(includeBody) {
   const query = modal.querySelector('#contract-review-query').value.trim();
   if (!state.snapshot_id) throw new Error('먼저 Vault metadata를 인덱싱하세요.');
   if (!query) throw new Error('검색어를 입력하세요.');
-  const candidates = includeBody ? visibleNotes.map(note => note.path).slice(0, 20) : [];
+  const candidates = includeBody
+    ? visibleNotes
+      .filter(note => isPathIncludedByScope(note.path, state.note_scope))
+      .map(note => note.path)
+      .slice(0, 20)
+    : [];
   setStatus(includeBody ? '제한된 후보 본문을 확인하는 중…' : 'Metadata만 검색하는 중…');
   const result = await api('/vault/search', {
     method: 'POST',
@@ -298,7 +315,12 @@ function getModal() {
   modal.querySelector('#contract-review-cancel').addEventListener('click', wrapped(cancelJob));
   modal.querySelector('#contract-review-save').addEventListener('click', wrapped(saveReport));
   modal.querySelector('#contract-review-use').addEventListener('click', () => {
-    saveState({ ...loadState(), active: true, selected_paths: selectedPaths() });
+    const state = loadState();
+    if (!state.selected_paths.length && !state.kordoc_job_ids.length && !state.law_job_ids.length) {
+      setStatus('채팅에 연결할 Vault 본문 후보 또는 완료된 MCP 근거가 없습니다.', 'warning');
+      return;
+    }
+    saveState({ ...state, active: true, selected_paths: selectedPaths() });
     closeContractReview();
     uiModule.showToast?.('Contract Review evidence is active for Chat.');
   });
@@ -314,7 +336,8 @@ function getModal() {
 
 export function getContractReviewChatContext() {
   const state = loadState();
-  if (!state.active || !state.snapshot_id || !state.vault_id) return null;
+  const hasEvidence = state.selected_paths.length || state.kordoc_job_ids.length || state.law_job_ids.length;
+  if (!state.active || !state.snapshot_id || !state.vault_id || !hasEvidence) return null;
   return buildContractReviewChatContext(state);
 }
 
@@ -325,7 +348,7 @@ export async function openContractReview() {
   renderNotes(visibleNotes.length ? visibleNotes : indexedNotes);
   view.style.display = 'flex';
   try { await loadProfile(); }
-  catch (error) { setStatus(`${error.code ? `${error.code}: ` : ''}${error.message}`, 'error'); }
+  catch (error) { clearProfileServers(); setStatus(`${error.code ? `${error.code}: ` : ''}${error.message}`, 'error'); }
 }
 
 export function closeContractReview() {

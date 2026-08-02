@@ -1,5 +1,9 @@
 import asyncio
+import shutil
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from src.mcp_manager import _format_mcp_connection_error, McpManager
 
@@ -39,3 +43,26 @@ def test_http_transport_routes_to_start_http_connect():
         result = asyncio.run(mgr.connect_server("id1", "n", "http", url="https://x/mcp"))
     assert result == "ROUTED"
     m.assert_called_once()
+
+
+def test_stdio_lifetime_is_owned_and_closed_by_the_same_task(caplog):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the deterministic MCP fixture")
+    fixture = Path(__file__).parent / "fixtures" / "fake_kordoc_mcp.mjs"
+
+    async def scenario():
+        mgr = McpManager()
+        connected = await mgr.connect_server(
+            "fixture", "Kordoc", "stdio", command=node, args=[str(fixture)], env={},
+        )
+        assert connected is True
+        assert not mgr._lifetime_tasks["fixture"].done()
+        result = await mgr.call_tool("mcp__fixture__parse_document", {})
+        assert result == {"stdout": "fixture parsed", "stderr": "", "exit_code": 0}
+        await mgr.disconnect_server("fixture")
+        assert "fixture" not in mgr._lifetime_tasks
+        assert "fixture" not in mgr._sessions
+
+    asyncio.run(scenario())
+    assert "different task" not in caplog.text

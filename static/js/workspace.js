@@ -14,6 +14,7 @@ const API_BASE = window.location.origin;
 const _FOLDER_SVG = '<svg class="workspace-row-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 let _modal = null;
 let _curPath = '';
+let _pickerOptions = {};
 
 export function getWorkspace() {
   return Storage.get(KEYS.WORKSPACE, '') || '';
@@ -172,9 +173,13 @@ function _getModal() {
     }
   });
   _modal.querySelector('#workspace-use').addEventListener('click', () => {
-    setWorkspace(_curPath);
+    const selectedPath = _curPath;
+    const onSelect = _pickerOptions.onSelect;
+    setWorkspace(selectedPath);
     if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(_curPath)}`);
     closeWorkspaceBrowser();
+    document.dispatchEvent(new CustomEvent('workspace-selected', { detail: { path: selectedPath } }));
+    if (typeof onSelect === 'function') onSelect(selectedPath);
   });
   const content = _modal.querySelector('.modal-content');
   const header = _modal.querySelector('.modal-header');
@@ -182,8 +187,15 @@ function _getModal() {
   return _modal;
 }
 
-export async function openWorkspaceBrowser() {
+export async function openWorkspaceBrowser(options = {}) {
+  _pickerOptions = options && typeof options === 'object' ? options : {};
   const modal = _getModal();
+  const title = modal.querySelector('.modal-header h4');
+  const note = modal.querySelector('.workspace-note');
+  const useButton = modal.querySelector('#workspace-use');
+  if (title) title.lastChild.textContent = _pickerOptions.title || 'Select workspace';
+  if (note) note.innerHTML = _pickerOptions.note || 'File tools are <strong>confined</strong> to this folder. Shell commands start here but are <strong>not sandboxed</strong> and can reach outside it. A workspace scopes the tools; it is not a security boundary.';
+  if (useButton) useButton.textContent = _pickerOptions.useLabel || 'Use this folder';
   modal.style.display = 'flex';
   try {
     _render(await _load(getWorkspace() || ''));
@@ -194,6 +206,7 @@ export async function openWorkspaceBrowser() {
 
 export function closeWorkspaceBrowser() {
   if (_modal) _modal.style.display = 'none';
+  _pickerOptions = {};
 }
 
 export function initWorkspace() {

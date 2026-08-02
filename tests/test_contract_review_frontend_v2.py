@@ -107,6 +107,109 @@ def test_vault_explorer_is_a_sidebar_tool_opening_a_notes_style_right_panel():
     assert "vault-explorer-panel" in manager
 
 
+def test_vault_explorer_exposes_an_obvious_vault_picker_and_index_action():
+    explorer = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
+    workspace = (ROOT / "static/js/workspace.js").read_text(encoding="utf-8")
+    assert "Vault 폴더 선택" in explorer
+    assert "Metadata 색인" in explorer
+    assert 'id="vault-explorer-empty-select"' in explorer
+    assert "workspace-selected" in workspace
+    assert "preserveSelection: true" in explorer
+    assert "체크박스 = metadata 검색·분석 범위" in explorer
+    assert "검색 결과를 본문 후보로" in explorer
+    assert "현재 후보로 채팅" in explorer
+
+
+def test_vault_explorer_closes_before_opening_the_mcp_workspace_modal():
+    explorer = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
+    assert "closePanel();\n    contractReviewModule.openContractReview();" in explorer
+
+
+def test_contract_review_refreshes_mcp_inventory_each_time_the_workspace_opens():
+    workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    assert "if (profileLoaded) return" not in workspace
+    assert "let profileLoaded" not in workspace
+    assert "clearProfileServers();\n  const profile = await api('/profile');" in workspace
+    assert "catch (error) { clearProfileServers();" in workspace
+
+
+def test_explicit_report_save_has_one_request_method_definition():
+    workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    duplicate = "method: 'POST', body: JSON.stringify({ session_id: sessionId, title, result }),\n    method: 'POST'"
+    assert duplicate not in workspace
+
+
+def test_vault_explorer_revalidates_persisted_selection_against_the_new_manifest():
+    explorer_url = (ROOT / "static/js/contractReviewExplorerState.js").as_uri()
+    data = _node(f"""
+      import {{ reconcileSelectedPaths }} from {json.dumps(explorer_url)};
+      const notes = [
+        {{path: '계약/유효.md'}},
+        {{path: '계약/신규.md'}},
+        {{path: '../escape.md'}},
+      ];
+      console.log(JSON.stringify({{
+        kept: reconcileSelectedPaths(['계약/유효.md', '삭제됨.md', '/절대.md'], notes, 8),
+        capped: reconcileSelectedPaths(
+          Array.from({{length: 12}}, (_, i) => `범위/${{i}}.md`),
+          Array.from({{length: 12}}, (_, i) => ({{path: `범위/${{i}}.md`}})),
+          8,
+        ),
+      }}));
+    """)
+    assert data["kept"] == ["계약/유효.md"]
+    assert data["capped"] == [f"범위/{i}.md" for i in range(8)]
+
+
+def test_vault_explorer_uses_compact_longest_match_scope_rules_for_folders_and_notes():
+    explorer_url = (ROOT / "static/js/contractReviewExplorerState.js").as_uri()
+    data = _node(f"""
+      import {{ isPathIncludedByScope, updateScopeSelection }} from {json.dumps(explorer_url)};
+      let scope = {{default_included: true, rules: []}};
+      scope = updateScopeSelection(scope, '10_업무체계/계약', false);
+      scope = updateScopeSelection(scope, '10_업무체계/계약/대한제강', true);
+      scope = updateScopeSelection(scope, '10_업무체계/계약/대한제강/제외.md', false);
+      console.log(JSON.stringify({{
+        scope,
+        excluded: isPathIncludedByScope('10_업무체계/계약/다른회사.md', scope),
+        included: isPathIncludedByScope('10_업무체계/계약/대한제강/2026.md', scope),
+        exact: isPathIncludedByScope('10_업무체계/계약/대한제강/제외.md', scope),
+        outside: isPathIncludedByScope('20_법률/민법.md', scope),
+      }}));
+    """)
+    assert data["excluded"] is False
+    assert data["included"] is True
+    assert data["exact"] is False
+    assert data["outside"] is True
+    assert data["scope"]["rules"] == [
+        {"path": "10_업무체계/계약", "included": False},
+        {"path": "10_업무체계/계약/대한제강", "included": True},
+        {"path": "10_업무체계/계약/대한제강/제외.md", "included": False},
+    ]
+
+
+def test_browser_state_persists_only_safe_compact_scope_rules():
+    state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
+    data = _node(f"""
+      import {{ sanitizePersistedState, buildContractReviewChatContext }} from {json.dumps(state_url)};
+      const safe = sanitizePersistedState({{
+        active: true, snapshot_id: 'snap', vault_id: 'vault',
+        note_scope: {{default_included: false, rules: [
+          {{path: String.raw`10_업무체계\\계약`, included: true}},
+          {{path: '../escape', included: true}},
+          {{path: '/absolute', included: true}},
+          {{path: '20_법률', included: 'yes'}},
+        ]}},
+      }});
+      console.log(JSON.stringify({{safe, context: buildContractReviewChatContext(safe)}}));
+    """)
+    assert data["safe"]["note_scope"] == {
+        "default_included": False,
+        "rules": [{"path": "10_업무체계/계약", "included": True}],
+    }
+    assert data["context"]["note_scope"] == data["safe"]["note_scope"]
+
+
 def test_precedent_search_is_scoped_to_the_verified_precedent_domain():
     source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
     assert "{ domain: 'precedent', query, display: 5 }" in source

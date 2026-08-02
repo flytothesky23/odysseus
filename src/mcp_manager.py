@@ -162,6 +162,13 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # stdio clients are AnyIO task-group contexts. Their enter/exit must run
+        # in the same asyncio task; keeping only an AsyncExitStack and closing it
+        # from a later request/shutdown task corrupts responses and emits
+        # "Attempted to exit cancel scope in a different task". A dedicated
+        # owner task therefore holds each stdio lifetime open until signalled.
+        self._lifetime_tasks: Dict[str, asyncio.Task] = {}
+        self._lifetime_stops: Dict[str, asyncio.Event] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -202,75 +209,107 @@ class McpManager:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
             from contextlib import AsyncExitStack
+        except ImportError:
+            logger.warning("MCP package not installed. Install with: pip install mcp")
+            self._connections[server_id] = {
+                "status": "error", "error": "mcp package not installed", "name": name,
+            }
+            return False
 
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env={**os.environ, **env} if env else None,
-            )
+        if (
+            server_id in self._connections
+            or server_id in self._sessions
+            or server_id in self._lifetime_tasks
+            or server_id in self._connect_tasks
+        ):
+            await self.disconnect_server(server_id)
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future = loop.create_future()
+        stop = asyncio.Event()
+        server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            env={**os.environ, **env} if env else None,
+        )
 
+        async def own_stdio_lifetime():
             stack = AsyncExitStack()
+            session = None
             registered = False
-
             try:
                 transport = await stack.enter_async_context(stdio_client(server_params))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
                 await session.initialize()
                 tools_result = await session.list_tools()
-
-                tools = []
-                for tool in tools_result.tools:
-                    tools.append({
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                        # MCP tool annotations (readOnlyHint / destructiveHint) drive
-                        # plan-mode read-only gating. Absent on many servers, so we
-                        # fall back to a name heuristic in mcp_tool_is_readonly().
-                        "annotations": getattr(tool, "annotations", None),
-                    })
-
-                # Extract identity hints from env vars (e.g. email address, API name)
-                # so tool descriptions can distinguish between multiple instances of
-                # the same MCP server (e.g. two email accounts).
-                identity_hints = []
-                for k, v in (env or {}).items():
-                    k_lower = k.lower()
-                    if any(x in k_lower for x in ["email_address", "account", "user", "username"]):
-                        identity_hints.append(v)
-                identity = ", ".join(identity_hints) if identity_hints else ""
-
+                tools = [{
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    "annotations": getattr(tool, "annotations", None),
+                } for tool in tools_result.tools]
+                identity_hints = [
+                    value for key, value in (env or {}).items()
+                    if any(token in key.lower() for token in ("email_address", "account", "user", "username"))
+                ]
                 self._sessions[server_id] = session
-                self._stacks[server_id] = stack
                 self._tools[server_id] = tools
                 self._connections[server_id] = {
                     "status": "connected",
                     "name": name,
                     "transport": "stdio",
                     "tool_count": len(tools),
-                    "identity": identity,
+                    "identity": ", ".join(identity_hints),
                     "launch_identity_hash": stdio_launch_identity_hash(command, args),
                 }
-
                 registered = True
-
+                if not ready.done():
+                    ready.set_result(True)
+                logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via stdio")
+                await stop.wait()
+            except asyncio.CancelledError:
+                if not ready.done():
+                    ready.cancel()
+                raise
+            except Exception as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                elif not stop.is_set():
+                    logger.error("MCP stdio lifetime failed for %s (%s): %s", name, server_id, exc)
+                    self._connections[server_id] = {
+                        "status": "error",
+                        "error": _format_mcp_connection_error(name, command, args, exc),
+                        "name": name,
+                        "transport": "stdio",
+                    }
+                    self._generation += 1
             finally:
-                if not registered:
+                try:
                     await stack.aclose()
+                except Exception as exc:
+                    logger.warning("Error closing MCP server %s: %s", server_id, exc)
+                if session is not None and self._sessions.get(server_id) is session:
+                    self._sessions.pop(server_id, None)
+                    self._tools.pop(server_id, None)
+                current_task = asyncio.current_task()
+                if self._lifetime_tasks.get(server_id) is current_task:
+                    self._lifetime_tasks.pop(server_id, None)
+                    self._lifetime_stops.pop(server_id, None)
+                if not registered and not ready.done():
+                    ready.set_result(False)
 
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via stdio")
-            return True
-
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {
-                "status": "error",
-                "error": "mcp package not installed",
-                "name": name,
-            }
-            return False
+        task = asyncio.create_task(own_stdio_lifetime(), name=f"mcp-stdio-{server_id}")
+        self._lifetime_tasks[server_id] = task
+        self._lifetime_stops[server_id] = stop
+        try:
+            return bool(await asyncio.shield(ready))
+        except BaseException:
+            stop.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._lifetime_tasks.pop(server_id, None)
+            self._lifetime_stops.pop(server_id, None)
+            raise
 
     async def _connect_sse(self, server_id: str, name: str, url: str) -> bool:
         """Connect to an MCP server via SSE transport."""
@@ -421,6 +460,19 @@ class McpManager:
         except Exception:
             pass
 
+        lifetime_task = self._lifetime_tasks.pop(server_id, None)
+        lifetime_stop = self._lifetime_stops.pop(server_id, None)
+        if lifetime_stop is not None:
+            lifetime_stop.set()
+        if lifetime_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(lifetime_task), timeout=10)
+            except asyncio.TimeoutError:
+                lifetime_task.cancel()
+                await asyncio.gather(lifetime_task, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"Error closing MCP server {server_id}: {e}")
+
         stack = self._stacks.pop(server_id, None)
         if stack:
             try:
@@ -436,7 +488,7 @@ class McpManager:
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
-        ids = list(self._sessions.keys())
+        ids = list(set(self._sessions) | set(self._lifetime_tasks) | set(self._connect_tasks))
         for sid in ids:
             await self.disconnect_server(sid)
 

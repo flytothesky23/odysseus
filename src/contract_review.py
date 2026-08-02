@@ -76,6 +76,7 @@ _SENSITIVE_NAMES = frozenset({
 _ABS_POSIX = re.compile(r"(?<![/:\w])/(?:[^/\s]+/)+[^/\s,;)}\]]+")
 _ABS_WINDOWS = re.compile(r"(?<!\w)[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])+[^\\/\s,;)}\]]+")
 _HOME_PATH = re.compile(r"(?<!\w)~/(?:[^/\s]+/)*[^/\s,;)}\]]+")
+_MAX_NOTE_SCOPE_RULES = 2000
 
 
 class ContractReviewError(Exception):
@@ -122,6 +123,45 @@ def _safe_relative_path(raw: Any, *, allow_dot: bool = False) -> str:
     if any(part.casefold() in _SENSITIVE_NAMES or part.startswith(".") for part in parts):
         raise ContractReviewError("sensitive_path", "Credential and hidden paths cannot be used as evidence.", 403)
     return "/".join(parts)
+
+
+def _normalize_note_scope(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {"default_included": True, "rules": []}
+    if not isinstance(raw, Mapping):
+        raise ContractReviewError("invalid_scope", "The Vault note scope is invalid.", 422)
+    default_included = raw.get("default_included", True)
+    rules = raw.get("rules", [])
+    if not isinstance(default_included, bool) or not isinstance(rules, Sequence) or isinstance(rules, (str, bytes)):
+        raise ContractReviewError("invalid_scope", "The Vault note scope is invalid.", 422)
+    if len(rules) > _MAX_NOTE_SCOPE_RULES:
+        raise ContractReviewError("scope_too_large", "The Vault note scope has too many rules.", 422)
+    deduped: dict[str, dict[str, Any]] = {}
+    for raw_rule in rules:
+        if not isinstance(raw_rule, Mapping) or not isinstance(raw_rule.get("included"), bool):
+            raise ContractReviewError("invalid_scope", "The Vault note scope is invalid.", 422)
+        try:
+            path = _safe_relative_path(raw_rule.get("path"))
+        except ContractReviewError as exc:
+            raise ContractReviewError("invalid_scope", "The Vault note scope is invalid.", 422) from exc
+        if path in deduped:
+            del deduped[path]
+        deduped[path] = {"path": path, "included": raw_rule["included"]}
+    return {"default_included": default_included, "rules": list(deduped.values())}
+
+
+def _note_in_scope(path: str, scope: Mapping[str, Any]) -> bool:
+    included = bool(scope["default_included"])
+    specificity = -1
+    for index, rule in enumerate(scope["rules"]):
+        rule_path = str(rule["path"])
+        if path != rule_path and not path.startswith(f"{rule_path}/"):
+            continue
+        candidate_specificity = len(rule_path.split("/")) * (_MAX_NOTE_SCOPE_RULES + 1) + index
+        if candidate_specificity >= specificity:
+            included = bool(rule["included"])
+            specificity = candidate_specificity
+    return included
 
 
 def _inside(root: str, candidate: str) -> bool:
@@ -455,21 +495,34 @@ class ContractReviewWorkspaceService:
         *,
         include_body: bool = False,
         candidate_paths: Sequence[str] | None = None,
+        note_scope: Mapping[str, Any] | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
         snapshot = self._snapshot(owner, snapshot_id, vault_id)
+        normalized_scope = _normalize_note_scope(note_scope)
         query_text = str(query or "").strip()
         if not query_text:
             raise ContractReviewError("invalid_query", "A search query is required.", 400)
         cap = max(1, min(int(limit), 100))
         ranked = sorted(
-            ((self._metadata_score(record, query_text), record) for record in snapshot.notes.values()),
+            (
+                (self._metadata_score(record, query_text), record)
+                for record in snapshot.notes.values()
+                if _note_in_scope(record.path, normalized_scope)
+            ),
             key=lambda item: (-item[0], item[1].path.casefold()),
         )
         results = [dict(record.public(), score=score, evidence_level="metadata") for score, record in ranked if score > 0][:cap]
         body_read_count = 0
         if include_body:
             candidates = list(candidate_paths or [record.path for _score, record in ranked])
+            for relative in candidates:
+                try:
+                    scoped_path = _safe_relative_path(relative)
+                except ContractReviewError as exc:
+                    raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403) from exc
+                if not _note_in_scope(scoped_path, normalized_scope):
+                    raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
             normalized = _search_text(query_text)
             terms = [term for term in normalized.split() if term]
             content_results: list[dict[str, Any]] = []
@@ -494,13 +547,24 @@ class ContractReviewWorkspaceService:
             "snapshot_id": snapshot.snapshot_id,
             "vault_id": snapshot.vault_id,
             "query": query_text,
+            "note_scope": normalized_scope,
             "body_read_count": body_read_count,
             "results": results,
         }
 
-    def open_note(self, owner: str, snapshot_id: str, vault_id: str, path: str) -> dict[str, Any]:
+    def open_note(
+        self,
+        owner: str,
+        snapshot_id: str,
+        vault_id: str,
+        path: str,
+        note_scope: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         snapshot = self._snapshot(owner, snapshot_id, vault_id)
         record, _resolved = self._record(owner, snapshot, path)
+        normalized_scope = _normalize_note_scope(note_scope)
+        if not _note_in_scope(record.path, normalized_scope):
+            raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
         return {
             "state": "completed",
             "snapshot_id": snapshot.snapshot_id,
@@ -517,19 +581,23 @@ class ContractReviewWorkspaceService:
         vault_id: str,
         selected_paths: Sequence[str],
         additional_evidence: Sequence[tuple[str, str]] = (),
+        note_scope: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         snapshot = self._snapshot(owner, snapshot_id, vault_id)
+        normalized_scope = _normalize_note_scope(note_scope)
         if len(selected_paths) > self.max_selected_notes:
             raise ContractReviewError("selection_too_large", f"Select at most {self.max_selected_notes} notes.", 422)
         selected: list[str] = []
         fingerprints: list[tuple[str, str]] = []
         for raw in selected_paths:
             record, _resolved = self._record(owner, snapshot, raw)
+            if not _note_in_scope(record.path, normalized_scope):
+                raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
             if record.path not in selected:
                 selected.append(record.path)
                 fingerprints.append((record.path, record.stat_fingerprint))
         normalized_additional = tuple(sorted((str(item[0]), str(item[1])) for item in additional_evidence))
-        fingerprint = _digest(snapshot.vault_id, fingerprints, normalized_additional)
+        fingerprint = _digest(snapshot.vault_id, normalized_scope, fingerprints, normalized_additional)
         key = (str(owner or ""), str(session_id or ""))
         previous = self._session_scopes.get(key)
         if previous is None:
@@ -554,6 +622,7 @@ class ContractReviewWorkspaceService:
             "snapshot_id": snapshot.snapshot_id,
             "vault_id": snapshot.vault_id,
             "selected_paths": tuple(selected),
+            "note_scope": normalized_scope,
             "fingerprint": fingerprint,
             "additional_evidence": normalized_additional,
             "content_by_path": cached,
@@ -566,6 +635,7 @@ class ContractReviewWorkspaceService:
             "snapshot_id": snapshot.snapshot_id,
             "vault_id": snapshot.vault_id,
             "selected_paths": selected,
+            "note_scope": normalized_scope,
             "evidence_fingerprint": fingerprint,
         }
 
@@ -577,6 +647,7 @@ class ContractReviewWorkspaceService:
         snapshot_id: str,
         vault_id: str,
         selected_paths: Sequence[str],
+        note_scope: Mapping[str, Any] | None = None,
         local_document_evidence: Sequence[Mapping[str, Any]] = (),
         official_legal_evidence: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
@@ -585,7 +656,7 @@ class ContractReviewWorkspaceService:
             for item in [*local_document_evidence, *official_legal_evidence]
         ]
         scope = self.prepare_session_scope(
-            owner, session_id, snapshot_id, vault_id, selected_paths, additional,
+            owner, session_id, snapshot_id, vault_id, selected_paths, additional, note_scope,
         )
         snapshot = self._snapshot(owner, snapshot_id, vault_id)
         key = (str(owner or ""), str(session_id or ""))

@@ -12,6 +12,53 @@ function safeRelativeMarkdownPath(value) {
   return path;
 }
 
+function safeRelativeScopePath(value) {
+  const path = String(value || '').trim().replace(/\\/g, '/');
+  if (!path || path.startsWith('/') || /^[A-Za-z]:\//.test(path)) return '';
+  if (path.split('/').some(part => !part || part === '.' || part === '..' || part.startsWith('.'))) return '';
+  return path;
+}
+
+function safeScope(value) {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const rules = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(input.rules) ? input.rules.slice(0, 2000) : []) {
+    const path = safeRelativeScopePath(raw?.path);
+    if (!path || typeof raw?.included !== 'boolean' || seen.has(path)) continue;
+    seen.add(path);
+    rules.push({ path, included: raw.included });
+  }
+  return { default_included: input.default_included !== false, rules };
+}
+
+export function isPathIncludedByScope(path, scope) {
+  const target = safeRelativeScopePath(path);
+  const safe = safeScope(scope);
+  if (!target) return false;
+  let included = safe.default_included;
+  let specificity = -1;
+  safe.rules.forEach((rule, index) => {
+    if (target !== rule.path && !target.startsWith(`${rule.path}/`)) return;
+    const ruleSpecificity = rule.path.split('/').length * 10000 + index;
+    if (ruleSpecificity >= specificity) {
+      included = rule.included;
+      specificity = ruleSpecificity;
+    }
+  });
+  return included;
+}
+
+export function updateScopeSelection(scope, path, included) {
+  const safe = safeScope(scope);
+  const normalizedPath = safeRelativeScopePath(path);
+  if (!normalizedPath || typeof included !== 'boolean') return safe;
+  const prefix = `${normalizedPath}/`;
+  const rules = safe.rules.filter(rule => rule.path !== normalizedPath && !rule.path.startsWith(prefix));
+  rules.push({ path: normalizedPath, included });
+  return { default_included: safe.default_included, rules: rules.slice(-2000) };
+}
+
 function noteSort(a, b) {
   return collator.compare(String(a.filename || a.title || a.path), String(b.filename || b.title || b.path));
 }
@@ -99,4 +146,18 @@ export function updateBoundedSelection(current, paths, checked, limit = 8) {
     selected.add(path);
   }
   return { selected_paths: [...selected], rejected_count: rejectedCount };
+}
+
+export function reconcileSelectedPaths(current, notes, limit = 8) {
+  const cap = Math.max(1, Math.min(Number(limit) || 8, 50));
+  const available = new Set(
+    (Array.isArray(notes) ? notes : [])
+      .map(note => safeRelativeMarkdownPath(note?.path))
+      .filter(Boolean),
+  );
+  return [...new Set(
+    (Array.isArray(current) ? current : [])
+      .map(safeRelativeMarkdownPath)
+      .filter(path => path && available.has(path)),
+  )].slice(0, cap);
 }
