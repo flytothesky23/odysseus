@@ -41203,6 +41203,11 @@ body.theme-frosted .modal {
 /* Contract Review Workspace */
 .contract-review-modal-content { width: min(1040px, 94vw); max-height: 90vh; }
 .contract-review-body { display: grid; gap: 12px; overflow: auto; }
+.contract-review-help { border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.contract-review-help summary { padding: 11px 13px; color: var(--accent); font-weight: 650; cursor: pointer; }
+.contract-review-help[open] summary { border-bottom: 1px solid var(--border); }
+.contract-review-help ol { display: grid; gap: 7px; margin: 0; padding: 12px 18px 14px 38px; color: var(--text-secondary); line-height: 1.55; }
+.contract-review-help strong { color: var(--text-primary); }
 .contract-review-section { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: color-mix(in srgb, var(--surface) 92%, transparent); }
 .contract-review-section h5 { margin: 0 0 9px; }
 .contract-review-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

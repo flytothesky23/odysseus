@@ -231,6 +231,7 @@ async function parseDocument() {
   if (!workspace) throw new Error('먼저 Odysseus Workspace를 선택하세요.');
   if (!filePath) throw new Error('Workspace 상대 문서 경로를 입력하세요.');
   if (!serverId) throw new Error('연결된 Kordoc MCP가 없습니다. Settings에서 먼저 연결하세요.');
+  modal.querySelector('#contract-review-parser-output').textContent = '';
   const started = await api('/kordoc/jobs', { method: 'POST', body: JSON.stringify({
     server_id: serverId,
     tool: modal.querySelector('#contract-review-kordoc-tool').value,
@@ -255,6 +256,7 @@ async function searchLaw() {
   const tool = modal.querySelector('#contract-review-law-tool').value;
   if (!query) throw new Error('법령 검색어를 입력하세요.');
   if (!serverId) throw new Error('연결된 Korean Law MCP가 없습니다. Settings에서 먼저 연결하세요.');
+  modal.querySelector('#contract-review-law-output').textContent = '';
   const started = await api('/law/jobs', { method: 'POST', body: JSON.stringify({
     server_id: serverId,
     tool,
@@ -311,27 +313,39 @@ function getModal() {
   modal.className = 'modal';
   modal.style.display = 'none';
   modal.innerHTML = `<div class="modal-content contract-review-modal-content">
-    <div class="modal-header"><h4>Contract Review Workspace</h4><button class="close-btn" id="contract-review-close" aria-label="Close">✖</button></div>
+    <div class="modal-header"><h4>Contract Review Workspace</h4><button class="close-btn" id="contract-review-close" aria-label="닫기">✖</button></div>
     <div class="modal-body contract-review-body">
       <p class="muted">읽기 전용 · 상대경로와 식별자만 저장 · metadata 우선, 선택 후보 본문만 제한적으로 조회</p>
-      <section class="contract-review-section"><h5>1. Obsidian Vault</h5>
-        <div class="contract-review-row"><button class="confirm-btn" id="contract-review-workspace-select">Select Odysseus Workspace</button><span id="contract-review-workspace" class="muted contract-review-workspace-readout">선택되지 않음</span></div>
-        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-vault-path" value="." placeholder="Workspace-relative Vault path"><button class="confirm-btn confirm-btn-primary" id="contract-review-index">Metadata index</button></div>
-        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-query" placeholder="제목, 파일명, 상대경로, aliases"><button class="confirm-btn" id="contract-review-search">Search metadata</button><button class="confirm-btn" id="contract-review-body-search">Check bounded bodies</button></div>
+      <details class="contract-review-help" open>
+        <summary>처음 사용하는 경우 · 단계별 사용 방법</summary>
+        <ol>
+          <li><strong>Vault 연결:</strong> .obsidian 폴더가 들어 있는 Vault 최상위 폴더를 선택하세요. 상위 Workspace를 선택했다면 아래에 Vault 상대경로를 입력합니다.</li>
+          <li><strong>Metadata 색인:</strong> 제목·파일명·상대경로·aliases만 먼저 읽습니다. 이 단계에서는 노트 본문을 LLM에 보내지 않습니다.</li>
+          <li><strong>후보 선택:</strong> Metadata 검색 결과를 체크한 뒤 필요한 후보의 본문만 제한적으로 조회하세요.</li>
+          <li><strong>로컬 문서:</strong> Workspace 안의 PDF·Office·HWP 상대경로를 입력해 Kordoc으로 파싱합니다. 절대경로는 거부됩니다.</li>
+          <li><strong>법률 근거:</strong> Korean Law로 찾은 후보는 정확한 법령명·MST를 식별한 뒤 공식 원문으로 다시 확인합니다.</li>
+          <li><strong>채팅:</strong> 아래의 ‘선택 근거로 채팅’을 누른 뒤 질문하세요. 파일이 바뀌면 다시 색인해야 합니다.</li>
+          <li><strong>저장:</strong> 보고서는 채팅 결과가 검증된 뒤 사용자가 ‘검증 결과를 Documents에 저장’을 눌렀을 때만 명시적으로 저장됩니다.</li>
+        </ol>
+      </details>
+      <section class="contract-review-section"><h5>1. Obsidian Vault 근거</h5>
+        <div class="contract-review-row"><button class="confirm-btn" id="contract-review-workspace-select">Vault/Workspace 폴더 선택</button><span id="contract-review-workspace" class="muted contract-review-workspace-readout">선택되지 않음</span></div>
+        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-vault-path" value="." aria-label="Workspace 기준 Vault 상대경로" placeholder="Workspace 기준 Vault 상대경로 (Vault 자체면 .)"><button class="confirm-btn confirm-btn-primary" id="contract-review-index">Metadata 색인</button></div>
+        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-query" placeholder="제목, 파일명, 상대경로, aliases"><button class="confirm-btn" id="contract-review-search">Metadata 검색</button><button class="confirm-btn" id="contract-review-body-search">후보 본문 제한 조회</button></div>
         <div id="contract-review-results" class="contract-review-results"></div>
       </section>
-      <section class="contract-review-section"><h5>2. Local document · Kordoc MCP</h5>
-        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-document-path" placeholder="documents/contract.pdf"><select class="contract-review-server" id="contract-review-kordoc-server" aria-label="Kordoc server"><option value="">Loading Kordoc…</option></select><select id="contract-review-kordoc-tool"><option>parse_document</option><option>detect_format</option><option>parse_metadata</option><option>parse_pages</option><option>parse_table</option><option>parse_chunks</option><option>parse_form</option></select><button class="confirm-btn" id="contract-review-parse">Parse</button></div>
+      <section class="contract-review-section"><h5>2. 로컬 문서 근거 · Kordoc MCP</h5>
+        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-document-path" aria-label="Workspace 기준 로컬 문서 상대경로" placeholder="예: documents/contract.pdf"><select class="contract-review-server" id="contract-review-kordoc-server" aria-label="Kordoc 서버"><option value="">Kordoc 불러오는 중…</option></select><select id="contract-review-kordoc-tool" aria-label="Kordoc 읽기 전용 도구"><option>parse_document</option><option>detect_format</option><option>parse_metadata</option><option>parse_pages</option><option>parse_table</option><option>parse_chunks</option><option>parse_form</option></select><button class="confirm-btn" id="contract-review-parse">문서 파싱</button></div>
         <pre id="contract-review-parser-output" class="contract-review-output"></pre>
       </section>
-      <section class="contract-review-section"><h5>3. Official Korean Law evidence</h5>
-        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-law-query" placeholder="법령명 또는 판례 검색어"><select class="contract-review-server" id="contract-review-law-server" aria-label="Korean Law server"><option value="">Loading Korean Law…</option></select><select id="contract-review-law-tool"><option>search_law</option><option>search_decisions</option></select><button class="confirm-btn" id="contract-review-law-search">Lookup</button></div>
+      <section class="contract-review-section"><h5>3. 공식 법률 근거 · Korean Law MCP</h5>
+        <div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-law-query" placeholder="법령명 또는 판례 검색어"><select class="contract-review-server" id="contract-review-law-server" aria-label="Korean Law 서버"><option value="">Korean Law 불러오는 중…</option></select><select id="contract-review-law-tool" aria-label="Korean Law 조회 도구"><option>search_law</option><option>search_decisions</option></select><button class="confirm-btn" id="contract-review-law-search">공식 근거 조회</button></div>
         <pre id="contract-review-law-output" class="contract-review-output"></pre>
       </section>
-      <section class="contract-review-section"><h5>4. Explicit report save</h5><div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-report-title" value="Contract Review"><button class="confirm-btn" id="contract-review-save">Save latest validated result</button></div></section>
+      <section class="contract-review-section"><h5>4. 명시적 보고서 저장</h5><div class="contract-review-row"><input class="styled-prompt-input" id="contract-review-report-title" aria-label="저장할 보고서 제목" value="Contract Review"><button class="confirm-btn" id="contract-review-save">검증 결과를 Documents에 저장</button></div></section>
       <p id="contract-review-status" class="contract-review-status" aria-live="polite"></p>
     </div>
-    <div class="modal-footer"><button class="confirm-btn confirm-btn-secondary" id="contract-review-cancel" disabled>Cancel running job</button><button class="confirm-btn confirm-btn-secondary" id="contract-review-deactivate">Deactivate</button><button class="confirm-btn confirm-btn-primary" id="contract-review-use">Use selected evidence in Chat</button></div>
+    <div class="modal-footer"><button class="confirm-btn confirm-btn-secondary" id="contract-review-cancel" disabled>진행 중 작업 취소</button><button class="confirm-btn confirm-btn-secondary" id="contract-review-deactivate">근거 연결 해제</button><button class="confirm-btn confirm-btn-primary" id="contract-review-use">선택 근거로 채팅</button></div>
   </div>`;
   document.body.appendChild(modal);
   modal.querySelector('#contract-review-close').addEventListener('click', closeContractReview);

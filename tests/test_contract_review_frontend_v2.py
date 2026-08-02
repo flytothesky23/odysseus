@@ -358,3 +358,42 @@ def test_contract_review_has_native_workspace_picker_in_chat_mode():
     app = (ROOT / "static/app.js").read_text(encoding="utf-8")
     assert "from './js/sessions.js';" in app
     assert "sessions.js?v=" not in app.splitlines()[20]
+
+
+def test_contract_review_modal_explains_the_safe_korean_workflow_in_place():
+    source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    style = (ROOT / "static/style.css").read_text(encoding="utf-8")
+
+    for guidance in (
+        "처음 사용하는 경우 · 단계별 사용 방법",
+        ".obsidian 폴더가 들어 있는 Vault 최상위 폴더",
+        "제목·파일명·상대경로·aliases만",
+        "필요한 후보의 본문만 제한적으로",
+        "절대경로는 거부됩니다",
+        "공식 원문으로 다시 확인",
+        "명시적으로 저장",
+    ):
+        assert guidance in source
+
+    for label in (
+        "Vault/Workspace 폴더 선택",
+        "Metadata 색인",
+        "Metadata 검색",
+        "후보 본문 제한 조회",
+        "문서 파싱",
+        "공식 근거 조회",
+        "검증 결과를 Documents에 저장",
+        "진행 중 작업 취소",
+        "근거 연결 해제",
+        "선택 근거로 채팅",
+    ):
+        assert label in source
+
+    assert 'class="contract-review-help"' in source
+    assert ".contract-review-help" in style
+
+
+def test_contract_review_clears_stale_mcp_output_before_each_new_job():
+    source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    assert "modal.querySelector('#contract-review-parser-output').textContent = '';" in source
+    assert "modal.querySelector('#contract-review-law-output').textContent = '';" in source
