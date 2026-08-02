@@ -6,6 +6,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import {
   buildContractReviewChatContext,
   buildVaultSearchRequest,
+  reconcileMcpRuntimeState,
   sanitizePersistedState,
   updateSelectedPathSelection,
 } from './contractReviewState.js';
@@ -79,7 +80,7 @@ function clearProfileServers() {
 
 async function loadProfile() {
   clearProfileServers();
-  const profile = await api('/profile');
+  const profile = await refreshMcpRuntime();
   renderServerOptions(
     modal.querySelector('#contract-review-kordoc-server'),
     Array.isArray(profile.kordoc_servers) ? profile.kordoc_servers : [],
@@ -91,6 +92,25 @@ async function loadProfile() {
     'Korean Law unavailable',
   );
   if (!profile.inventory_available) setStatus('MCP inventory를 읽을 수 없습니다.', 'error');
+  else if (loadState().mcp_runtime_stale) {
+    setStatus('앱 재기동으로 이전 MCP 근거가 만료되었습니다. Kordoc·법률 조회를 다시 실행하세요.', 'warning');
+  }
+}
+
+async function refreshMcpRuntime() {
+  try {
+    const profile = await api('/profile');
+    const previous = loadState();
+    const reconciled = reconcileMcpRuntimeState(previous, profile.mcp_runtime_id);
+    if (JSON.stringify(reconciled) !== JSON.stringify(previous)) saveState(reconciled);
+    return profile;
+  } catch (error) {
+    const previous = loadState();
+    if (previous.kordoc_job_ids.length || previous.law_job_ids.length) {
+      saveState(reconcileMcpRuntimeState(previous, ''));
+    }
+    throw error;
+  }
 }
 
 function selectedPaths() {
@@ -145,6 +165,8 @@ async function indexVault() {
     active: false, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
     vault_path: vaultPath, note_scope: noteScope, selected_paths: [],
     kordoc_job_ids: previous.kordoc_job_ids, law_job_ids: previous.law_job_ids,
+    mcp_runtime_id: previous.mcp_runtime_id,
+    mcp_runtime_stale: previous.mcp_runtime_stale,
   });
   document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
     detail: { notes: indexedNotes, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id },
@@ -218,7 +240,12 @@ async function parseDocument() {
   if (completed.state !== 'completed') return;
   const output = String(completed.result?.output || '');
   modal.querySelector('#contract-review-parser-output').textContent = output.slice(0, 12000);
-  saveState({ ...loadState(), kordoc_job_ids: [...loadState().kordoc_job_ids, completed.id] });
+  saveState({
+    ...loadState(),
+    kordoc_job_ids: [...loadState().kordoc_job_ids, completed.id],
+    mcp_runtime_id: completed.mcp_runtime_id,
+    mcp_runtime_stale: false,
+  });
   setStatus('Kordoc read-only parsing 완료.', 'ok');
 }
 
@@ -238,7 +265,12 @@ async function searchLaw() {
   const completed = await pollJob(started);
   if (completed.state !== 'completed') return;
   modal.querySelector('#contract-review-law-output').textContent = String(completed.result?.output || '').slice(0, 12000);
-  saveState({ ...loadState(), law_job_ids: [...loadState().law_job_ids, completed.id] });
+  saveState({
+    ...loadState(),
+    law_job_ids: [...loadState().law_job_ids, completed.id],
+    mcp_runtime_id: completed.mcp_runtime_id,
+    mcp_runtime_stale: false,
+  });
   setStatus('공식 법률 근거 조회 완료.', 'ok');
 }
 
@@ -358,6 +390,7 @@ export function closeContractReview() {
 export function initContractReview(apiBase = '') {
   API_BASE = apiBase;
   syncIndicator();
+  refreshMcpRuntime().catch(() => {});
   document.addEventListener('contract-review-state-change', event => {
     syncIndicator(event.detail);
   });

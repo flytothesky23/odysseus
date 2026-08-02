@@ -12,6 +12,10 @@ function sanitizeJobIds(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map(String).filter(id => /^[a-f0-9]{32}$/.test(id)))].slice(0, 20);
 }
+function sanitizeRuntimeId(value) {
+  const runtimeId = typeof value === 'string' ? value : '';
+  return /^[a-f0-9]{32}$/.test(runtimeId) ? runtimeId : '';
+}
 
 export function sanitizeNoteScope(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -53,7 +57,32 @@ export function sanitizePersistedState(value) {
     selected_paths: selected,
     kordoc_job_ids: sanitizeJobIds(input.kordoc_job_ids),
     law_job_ids: sanitizeJobIds(input.law_job_ids),
+    mcp_runtime_id: sanitizeRuntimeId(input.mcp_runtime_id),
+    mcp_runtime_stale: Boolean(input.mcp_runtime_stale),
   };
+}
+
+export function reconcileMcpRuntimeState(value, runtimeId) {
+  const state = sanitizePersistedState(value);
+  const currentRuntimeId = sanitizeRuntimeId(runtimeId);
+  const hasMcpJobs = Boolean(state.kordoc_job_ids.length || state.law_job_ids.length);
+  if (hasMcpJobs && (!currentRuntimeId || state.mcp_runtime_id !== currentRuntimeId)) {
+    return {
+      ...state,
+      active: false,
+      kordoc_job_ids: [],
+      law_job_ids: [],
+      mcp_runtime_id: currentRuntimeId,
+      mcp_runtime_stale: true,
+    };
+  }
+  if (!hasMcpJobs && currentRuntimeId) {
+    return { ...state, mcp_runtime_id: currentRuntimeId };
+  }
+  if (hasMcpJobs) {
+    return { ...state, mcp_runtime_id: currentRuntimeId, mcp_runtime_stale: false };
+  }
+  return state;
 }
 
 export function buildContractReviewChatContext(value) {
@@ -65,6 +94,7 @@ export function buildContractReviewChatContext(value) {
     selected_paths: state.selected_paths,
     kordoc_job_ids: state.kordoc_job_ids,
     law_job_ids: state.law_job_ids,
+    mcp_runtime_id: state.mcp_runtime_id,
   };
 }
 

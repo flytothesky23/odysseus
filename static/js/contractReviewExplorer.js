@@ -285,6 +285,8 @@ async function indexVault({ preserveSelection = false } = {}) {
     selected_paths: nextSelection,
     kordoc_job_ids: previousState.kordoc_job_ids,
     law_job_ids: previousState.law_job_ids,
+    mcp_runtime_id: previousState.mcp_runtime_id,
+    mcp_runtime_stale: previousState.mcp_runtime_stale,
   });
   document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
     detail: { notes: indexedNotes, snapshot_id: result.snapshot_id, vault_id: result.vault_id },

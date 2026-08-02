@@ -184,6 +184,7 @@ def setup_contract_review_routes(
         return {
             "id": "contract_review",
             "name": "Contract Review",
+            "mcp_runtime_id": jobs.runtime_id,
             "read_only": True,
             "generic_mcp_disabled": policy.disable_mcp,
             "inventory_available": inventory_available,
@@ -251,6 +252,12 @@ def setup_contract_review_routes(
             selected = _require_list(payload, "selected_paths")
             kordoc_ids = _require_list(payload, "kordoc_job_ids")
             law_ids = _require_list(payload, "law_job_ids")
+            if (kordoc_ids or law_ids) and payload.get("mcp_runtime_id") != jobs.runtime_id:
+                raise ContractReviewError(
+                    "stale_evidence_runtime",
+                    "MCP evidence belongs to a previous app runtime. Re-run the evidence lookup.",
+                    409,
+                )
             local_evidence = jobs.completed_evidence(owner, kordoc_ids, kind="kordoc") if kordoc_ids else []
             law_evidence = jobs.completed_evidence(owner, law_ids, kind="law") if law_ids else []
             return service.build_turn_context(

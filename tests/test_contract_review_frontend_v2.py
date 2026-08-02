@@ -33,6 +33,59 @@ def test_browser_state_persists_identifiers_not_private_content():
         assert secret not in serialized
 
 
+def test_mcp_runtime_reconciliation_fails_closed_for_stale_or_invalid_job_identity():
+    state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
+    data = _node(f"""
+      import {{
+        buildContractReviewChatContext,
+        reconcileMcpRuntimeState,
+      }} from {json.dumps(state_url)};
+      const oldRuntime = 'a'.repeat(32);
+      const currentRuntime = 'b'.repeat(32);
+      const active = {{
+        active: true, snapshot_id: 'snap', vault_id: 'vault',
+        selected_paths: ['Agreement.md'],
+        kordoc_job_ids: ['c'.repeat(32)], law_job_ids: ['d'.repeat(32)],
+        mcp_runtime_id: oldRuntime,
+      }};
+      const same = reconcileMcpRuntimeState(active, oldRuntime);
+      const stale = reconcileMcpRuntimeState(active, currentRuntime);
+      const invalid = reconcileMcpRuntimeState(active, 'not-a-runtime');
+      const legacy = reconcileMcpRuntimeState({{
+        ...active,
+        mcp_runtime_id: undefined,
+      }}, currentRuntime);
+      console.log(JSON.stringify({{
+        same,
+        stale,
+        invalid,
+        legacy,
+        context: buildContractReviewChatContext(same),
+      }}));
+    """)
+    assert data["same"]["active"] is True
+    assert data["same"]["kordoc_job_ids"] == ["c" * 32]
+    assert data["same"]["law_job_ids"] == ["d" * 32]
+    assert data["same"]["mcp_runtime_stale"] is False
+    for key in ("stale", "invalid", "legacy"):
+        assert data[key]["active"] is False
+        assert data[key]["kordoc_job_ids"] == []
+        assert data[key]["law_job_ids"] == []
+        assert data[key]["mcp_runtime_stale"] is True
+    assert data["stale"]["mcp_runtime_id"] == "b" * 32
+    assert data["invalid"]["mcp_runtime_id"] == ""
+    assert data["legacy"]["mcp_runtime_id"] == "b" * 32
+    assert data["context"]["mcp_runtime_id"] == "a" * 32
+
+
+def test_contract_review_reconciles_runtime_during_init_and_shows_expiry_warning():
+    workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    assert "const profile = await refreshMcpRuntime();" in workspace
+    assert "refreshMcpRuntime().catch(() => {});" in workspace
+    assert "이전 MCP 근거가 만료되었습니다" in workspace
+    assert "mcp_runtime_stale: false" in workspace
+
+
 def test_note_selection_survives_metadata_search_result_changes():
     state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
     data = _node(f"""
@@ -129,7 +182,8 @@ def test_contract_review_refreshes_mcp_inventory_each_time_the_workspace_opens()
     workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
     assert "if (profileLoaded) return" not in workspace
     assert "let profileLoaded" not in workspace
-    assert "clearProfileServers();\n  const profile = await api('/profile');" in workspace
+    assert "clearProfileServers();\n  const profile = await refreshMcpRuntime();" in workspace
+    assert "const profile = await api('/profile');" in workspace
     assert "catch (error) { clearProfileServers();" in workspace
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -68,6 +69,7 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
     profile = await _request(app, "GET", "/api/contract-review/profile")
     assert profile.status_code == 200
     assert profile.json()["result_schema"] == "contract-review.v2"
+    assert re.fullmatch(r"[a-f0-9]{32}", profile.json()["mcp_runtime_id"])
     assert profile.json()["generic_mcp_disabled"] is True
     assert profile.json()["kordoc_servers"] == [{
         "id": "kordoc", "name": "kordoc", "tools": ["parse_document"],
@@ -99,6 +101,7 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
     })
     assert parsed.status_code == 202
     parser_id = parsed.json()["id"]
+    assert parsed.json()["mcp_runtime_id"] == profile.json()["mcp_runtime_id"]
     for _ in range(30):
         parser = await _request(app, "GET", f"/api/contract-review/jobs/{parser_id}")
         if parser.json()["state"] not in {"admitted", "running", "cancelling"}:
@@ -112,6 +115,7 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
     })
     assert law.status_code == 202
     law_id = law.json()["id"]
+    assert law.json()["mcp_runtime_id"] == profile.json()["mcp_runtime_id"]
     for _ in range(30):
         law_state = await _request(app, "GET", f"/api/contract-review/jobs/{law_id}")
         if law_state.json()["state"] not in {"admitted", "running", "cancelling"}:
@@ -123,6 +127,7 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
         "session_id": "session-1", "snapshot_id": indexed["snapshot_id"],
         "vault_id": indexed["vault_id"], "selected_paths": ["Agreement.md"],
         "kordoc_job_ids": [parser_id], "law_job_ids": [law_id],
+        "mcp_runtime_id": profile.json()["mcp_runtime_id"],
     })
     assert prepared.status_code == 200
     payload = prepared.json()
@@ -138,6 +143,7 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
         "session_id": "session-1", "snapshot_id": indexed["snapshot_id"],
         "vault_id": indexed["vault_id"], "selected_paths": ["Agreement.md"],
         "kordoc_job_ids": [parser_id], "law_job_ids": [law_id],
+        "mcp_runtime_id": profile.json()["mcp_runtime_id"],
     })
     assert followed_up.status_code == 200
     assert followed_up.json()["strategy"] == "reuse"
@@ -181,6 +187,22 @@ async def test_route_owner_isolation_and_unauthenticated_rejection(contract_api)
 
     anonymous = await _request(app, "GET", "/api/contract-review/profile", owner=None)
     assert anonymous.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_context_route_rejects_job_ids_from_a_previous_mcp_runtime(contract_api):
+    app, _workspace, _saved = contract_api
+    response = await _request(app, "POST", "/api/contract-review/context/prepare", json={
+        "session_id": "session-1",
+        "snapshot_id": "snap",
+        "vault_id": "vault",
+        "selected_paths": [],
+        "kordoc_job_ids": ["c" * 32],
+        "law_job_ids": [],
+        "mcp_runtime_id": "a" * 32,
+    })
+    assert response.status_code == 409
+    assert response.json()["error"] == "stale_evidence_runtime"
 
 
 @pytest.mark.asyncio

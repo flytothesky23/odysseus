@@ -90,6 +90,11 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
     jobs = getattr(service, "job_manager", None)
     if jobs is None:
         raise HTTPException(503, "Contract Review evidence jobs are unavailable")
+    if (kordoc_ids or law_ids) and payload.get("mcp_runtime_id") != getattr(jobs, "runtime_id", ""):
+        raise HTTPException(409, {
+            "error": "stale_evidence_runtime",
+            "message": "MCP evidence belongs to a previous app runtime. Re-run the evidence lookup.",
+        })
     try:
         local_evidence = jobs.completed_evidence(owner, kordoc_ids, kind="kordoc") if kordoc_ids else []
         legal_evidence = jobs.completed_evidence(owner, law_ids, kind="law") if law_ids else []

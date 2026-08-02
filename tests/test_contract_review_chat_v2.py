@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from routes import chat_helpers, chat_routes
 from src.agent_tools import ToolBlock
@@ -55,6 +56,31 @@ def test_inactive_chat_stream_status_is_an_idle_success(monkeypatch):
     result = asyncio.run(target(SimpleNamespace(), "session-1"))
 
     assert result == {"status": "idle", "detached": False}
+
+
+def test_chat_rejects_stale_mcp_runtime_before_resolving_evidence_jobs():
+    completed_evidence = MagicMock()
+    jobs = SimpleNamespace(runtime_id="b" * 32, completed_evidence=completed_evidence)
+    service = SimpleNamespace(job_manager=jobs)
+
+    with pytest.raises(HTTPException) as exc:
+        chat_routes._prepare_contract_review_context(
+            service,
+            owner="alice",
+            session_id="session-1",
+            raw={
+                "snapshot_id": "snap",
+                "vault_id": "vault",
+                "selected_paths": ["Agreement.md"],
+                "kordoc_job_ids": ["c" * 32],
+                "law_job_ids": [],
+                "mcp_runtime_id": "a" * 32,
+            },
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "stale_evidence_runtime"
+    completed_evidence.assert_not_called()
 
 
 @pytest.mark.asyncio

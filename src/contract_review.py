@@ -1238,12 +1238,14 @@ class ContractReviewJobManager:
         self.kordoc = kordoc
         self.law = law
         self.max_jobs = max(8, min(int(max_jobs), 512))
+        self.runtime_id = uuid.uuid4().hex
         self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     def _add(self, owner: str, kind: str, admission: _McpAdmission, runner) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,
+            "mcp_runtime_id": self.runtime_id,
             "owner": str(owner or ""),
             "kind": kind,
             "state": "admitted",
