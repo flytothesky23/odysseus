@@ -203,6 +203,24 @@ def _dir_identity(path: str) -> str:
     )
 
 
+def _vault_marker_identity(path: str) -> str:
+    """Pin both a Vault marker link and the directory it currently targets."""
+
+    if not os.path.isdir(path):
+        raise ContractReviewError("invalid_vault", "The selected folder is not an Obsidian Vault.", 422)
+    resolved = os.path.realpath(path)
+    return _digest(_dir_identity(path), _dir_identity(resolved), length=32)
+
+
+def _path_has_symlink(root: str, relative_parts: Sequence[str]) -> bool:
+    current = root
+    for part in relative_parts:
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return True
+    return False
+
+
 def _probe_readable_file(path: str) -> None:
     try:
         with open(path, "rb") as handle:
@@ -322,7 +340,68 @@ class _VaultSnapshot:
     vault_root: str
     vault_id: str
     marker_id: str
+    mounts: Mapping[str, "_VaultMount"]
     notes: Mapping[str, _NoteRecord]
+
+
+@dataclass(frozen=True)
+class _VaultMount:
+    """An explicitly discovered top-level entry mounted from another Obsidian Vault."""
+
+    name: str
+    link_id: str
+    target_path: str
+    target_id: str
+    source_root: str
+    source_id: str
+    source_marker_id: str
+    is_directory: bool
+
+
+def _vault_mount(vault_root: str, name: str) -> _VaultMount | None:
+    link_path = os.path.join(vault_root, name)
+    if name.startswith(".") or not os.path.islink(link_path):
+        return None
+    try:
+        _safe_relative_path(name)
+        target_path = os.path.realpath(link_path)
+        if unicodedata.normalize("NFC", os.path.basename(target_path)).casefold() != unicodedata.normalize("NFC", name).casefold():
+            return None
+        is_directory = os.path.isdir(target_path)
+        if not is_directory and not (name.lower().endswith(".md") and os.path.isfile(target_path)):
+            return None
+        source_root = os.path.dirname(target_path)
+        source_marker = os.path.join(source_root, ".obsidian")
+        if not os.path.isdir(source_marker):
+            return None
+        return _VaultMount(
+            name=name,
+            link_id=_dir_identity(link_path),
+            target_path=target_path,
+            target_id=_dir_identity(target_path),
+            source_root=source_root,
+            source_id=_dir_identity(source_root),
+            source_marker_id=_vault_marker_identity(source_marker),
+            is_directory=is_directory,
+        )
+    except (ContractReviewError, OSError):
+        return None
+
+
+def _vault_mount_is_current(vault_root: str, mount: _VaultMount) -> bool:
+    link_path = os.path.join(vault_root, mount.name)
+    source_marker = os.path.join(mount.source_root, ".obsidian")
+    try:
+        return bool(
+            os.path.islink(link_path)
+            and os.path.realpath(link_path) == mount.target_path
+            and _dir_identity(link_path) == mount.link_id
+            and _dir_identity(mount.target_path) == mount.target_id
+            and _dir_identity(mount.source_root) == mount.source_id
+            and _vault_marker_identity(source_marker) == mount.source_marker_id
+        )
+    except (ContractReviewError, OSError):
+        return False
 
 
 class ContractReviewWorkspaceService:
@@ -352,15 +431,29 @@ class ContractReviewWorkspaceService:
         if os.path.islink(unresolved) or not _inside(workspace_root, vault_root) or not os.path.isdir(vault_root):
             raise ContractReviewError("invalid_vault", "The selected Vault is invalid.", 422)
         marker = os.path.join(vault_root, ".obsidian")
-        if os.path.islink(marker) or not os.path.isdir(marker):
-            raise ContractReviewError("invalid_vault", "The selected folder is not an Obsidian Vault.", 422)
 
         workspace_id = _dir_identity(workspace_root)
         vault_id = _dir_identity(vault_root)
-        marker_id = _dir_identity(marker)
+        marker_id = _vault_marker_identity(marker)
+        mounts: dict[str, _VaultMount] = {}
         records: dict[str, _NoteRecord] = {}
-        try:
-            for current_root, dirs, files in os.walk(vault_root, followlinks=False):
+
+        def add_record(resolved: str, relative: str, filename: str) -> None:
+            stat_result = os.stat(resolved, follow_symlinks=False)
+            title, aliases = _frontmatter_metadata(resolved)
+            records[relative] = _NoteRecord(
+                path=relative,
+                filename=filename,
+                stem=Path(filename).stem,
+                title=title or Path(filename).stem,
+                aliases=aliases,
+                size=int(stat_result.st_size),
+                modified_at=datetime.fromtimestamp(stat_result.st_mtime, KST).isoformat(timespec="seconds"),
+                stat_fingerprint=_stat_fingerprint(stat_result),
+            )
+
+        def index_directory(root: str, prefix: str = "") -> None:
+            for current_root, dirs, files in os.walk(root, followlinks=False):
                 dirs[:] = sorted(
                     name for name in dirs
                     if not name.startswith(".") and not os.path.islink(os.path.join(current_root, name))
@@ -372,21 +465,23 @@ class ContractReviewWorkspaceService:
                     if os.path.islink(unresolved_file):
                         continue
                     resolved = os.path.realpath(unresolved_file)
-                    if not _inside(vault_root, resolved) or not os.path.isfile(resolved):
+                    if not _inside(root, resolved) or not os.path.isfile(resolved):
                         continue
-                    stat_result = os.stat(resolved, follow_symlinks=False)
-                    relative = Path(resolved).relative_to(vault_root).as_posix()
-                    title, aliases = _frontmatter_metadata(resolved)
-                    records[relative] = _NoteRecord(
-                        path=relative,
-                        filename=filename,
-                        stem=Path(filename).stem,
-                        title=title or Path(filename).stem,
-                        aliases=aliases,
-                        size=int(stat_result.st_size),
-                        modified_at=datetime.fromtimestamp(stat_result.st_mtime, KST).isoformat(timespec="seconds"),
-                        stat_fingerprint=_stat_fingerprint(stat_result),
-                    )
+                    inner = Path(resolved).relative_to(root).as_posix()
+                    relative = f"{prefix}/{inner}" if prefix else inner
+                    add_record(resolved, relative, filename)
+
+        try:
+            index_directory(vault_root)
+            for name in sorted(os.listdir(vault_root), key=str.casefold):
+                mount = _vault_mount(vault_root, name)
+                if mount is None:
+                    continue
+                mounts[name] = mount
+                if mount.is_directory:
+                    index_directory(mount.target_path, name)
+                else:
+                    add_record(mount.target_path, name, name)
         except ContractReviewError:
             raise
         except OSError as exc:
@@ -397,13 +492,17 @@ class ContractReviewWorkspaceService:
             workspace_id,
             vault_id,
             marker_id,
+            [
+                (name, mount.link_id, mount.target_id, mount.source_id, mount.source_marker_id)
+                for name, mount in sorted(mounts.items())
+            ],
             [(path, record.stat_fingerprint) for path, record in sorted(records.items())],
             uuid.uuid4().hex,
             length=32,
         )
         snapshot = _VaultSnapshot(
             owner, snapshot_id, workspace_root, workspace_id, vault_root, vault_id,
-            marker_id, MappingProxyType(records),
+            marker_id, MappingProxyType(mounts), MappingProxyType(records),
         )
         key = (owner, snapshot_id)
         self._snapshots[key] = snapshot
@@ -429,7 +528,11 @@ class ContractReviewWorkspaceService:
             if (
                 _dir_identity(snapshot.workspace_root) != snapshot.workspace_id
                 or _dir_identity(snapshot.vault_root) != snapshot.vault_id
-                or _dir_identity(os.path.join(snapshot.vault_root, ".obsidian")) != snapshot.marker_id
+                or _vault_marker_identity(os.path.join(snapshot.vault_root, ".obsidian")) != snapshot.marker_id
+                or any(
+                    not _vault_mount_is_current(snapshot.vault_root, mount)
+                    for mount in snapshot.mounts.values()
+                )
             ):
                 raise ContractReviewError("vault_changed", "The Vault identity has changed.", 409)
         except ContractReviewError as exc:
@@ -448,9 +551,25 @@ class ContractReviewWorkspaceService:
         record = snapshot.notes.get(relative)
         if record is None:
             raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
-        unresolved = os.path.join(snapshot.vault_root, *relative.split("/"))
-        resolved = os.path.realpath(unresolved)
-        if os.path.islink(unresolved) or not _inside(snapshot.vault_root, resolved):
+        parts = relative.split("/")
+        mount = snapshot.mounts.get(parts[0])
+        if mount is None:
+            unresolved = os.path.join(snapshot.vault_root, *parts)
+            resolved = os.path.realpath(unresolved)
+            escaped = _path_has_symlink(snapshot.vault_root, parts) or not _inside(snapshot.vault_root, resolved)
+        elif mount.is_directory and len(parts) > 1:
+            inner_parts = parts[1:]
+            unresolved = os.path.join(mount.target_path, *inner_parts)
+            resolved = os.path.realpath(unresolved)
+            escaped = _path_has_symlink(mount.target_path, inner_parts) or not _inside(mount.target_path, resolved)
+        elif not mount.is_directory and len(parts) == 1:
+            unresolved = mount.target_path
+            resolved = os.path.realpath(unresolved)
+            escaped = resolved != mount.target_path or os.path.islink(unresolved)
+        else:
+            escaped = True
+            resolved = ""
+        if escaped:
             raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
         try:
             stat_result = os.stat(resolved, follow_symlinks=False)

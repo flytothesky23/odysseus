@@ -289,6 +289,45 @@ def test_symlink_absolute_and_credentials_never_become_evidence(contract_workspa
     assert "escape.md" not in {note["path"] for note in indexed["notes"]}
 
 
+def test_virtual_obsidian_vault_mounts_are_pinned_without_allowing_arbitrary_symlink_escape(tmp_path):
+    workspace = tmp_path / "workspace"
+    vault = workspace / "vault"
+    source_vault = tmp_path / "source-vault"
+    config = tmp_path / "obsidian-config"
+    outside = tmp_path / "outside"
+    vault.mkdir(parents=True)
+    config.mkdir()
+    (source_vault / ".obsidian").mkdir(parents=True)
+    outside.mkdir()
+    _write(source_vault / "계약" / "지급.md", "# 지급\n검수 후 30일 이내 지급한다.")
+    _write(source_vault / "직접.md", "# 직접 노트")
+    _write(outside / "탈출.md", "credential-like content")
+    try:
+        (vault / ".obsidian").symlink_to(config, target_is_directory=True)
+        (vault / "계약").symlink_to(source_vault / "계약", target_is_directory=True)
+        (vault / "직접.md").symlink_to(source_vault / "직접.md")
+        (vault / "탈출.md").symlink_to(outside / "탈출.md")
+        (source_vault / "계약" / "중첩탈출").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink unavailable")
+
+    service = ContractReviewWorkspaceService()
+    indexed = _index(service, workspace)
+    assert {note["path"] for note in indexed["notes"]} == {"계약/지급.md", "직접.md"}
+    assert service.open_note(
+        "alice", indexed["snapshot_id"], indexed["vault_id"], "계약/지급.md",
+    )["content"].startswith("# 지급")
+
+    replacement_vault = tmp_path / "replacement-vault"
+    (replacement_vault / ".obsidian").mkdir(parents=True)
+    _write(replacement_vault / "계약" / "지급.md", "swapped")
+    (vault / "계약").unlink()
+    (vault / "계약").symlink_to(replacement_vault / "계약", target_is_directory=True)
+    with pytest.raises(ContractReviewError) as exc:
+        service.search("alice", indexed["snapshot_id"], indexed["vault_id"], "지급")
+    assert exc.value.code == "vault_changed"
+
+
 class FakeMcpManager:
     def __init__(self, *, kind="kordoc", server_name=None, result=None, status="connected", delay=0):
         self.kind = kind
