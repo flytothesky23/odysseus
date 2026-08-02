@@ -581,6 +581,9 @@ def test_write_reservation_extracts_only_explicit_internal_references():
         f'<!-- pdf_source upload_id="{upload_id}" -->'
     ) == {upload_id}
     assert extract_internal_upload_ids(
+        f'<!-- kordoc_source upload_id="{upload_id}" parser="kordoc" -->'
+    ) == {upload_id}
+    assert extract_internal_upload_ids(
         f"[Attachment: photo.png | id={upload_id} | mime=image/png]"
     ) == {upload_id}
     extensionless_id = "c" * 32
@@ -591,6 +594,14 @@ def test_write_reservation_extracts_only_explicit_internal_references():
         f"Attachment: odysseus://attachment/{extensionless_id}: ready"
     ) == {extensionless_id}
     assert extract_internal_upload_ids(f"/api/upload/{upload_id}/extra") == set()
+
+
+def test_kordoc_hwp_formats_are_accepted_as_documents(tmp_path):
+    handler = _make_handler(tmp_path)
+
+    assert handler.is_document_file("contract.hwp") is True
+    assert handler.is_document_file("contract.hwpx") is True
+    assert handler.is_document_file("contract.hml") is True
 
 
 def test_reservation_never_uses_admin_override(tmp_path):

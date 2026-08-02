@@ -41220,6 +41220,56 @@ body.theme-frosted .modal {
 .contract-review-status { min-height: 1.4em; margin: 0; }
 .contract-review-status[data-tone="ok"] { color: var(--success, #48a868); }
 .contract-review-status[data-tone="error"] { color: var(--danger, #d85c5c); }
+
+/* Composable chat sources: Vault notes, Odysseus memos, and explicit law mode. */
+#pinned-tools-bar:empty { display: none; }
+#pinned-tools-bar { padding: 0 14px 4px; }
+.chat-source-chips { display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.chat-source-chips::-webkit-scrollbar { display: none; }
+.chat-source-chip,
+.chat-source-action {
+  min-height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chat-source-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 8px 3px 10px; }
+.chat-source-chip:hover,
+.chat-source-action:hover { border-color: color-mix(in srgb, var(--accent) 62%, var(--border)); color: var(--text-primary); }
+.chat-source-chip-law { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+.chat-source-action { padding: 3px 10px; border-style: dashed; }
+
+.note-form-document-btn,
+.note-form-source-btn {
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.note-form-document-btn:hover,
+.note-form-source-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+.note-form-document-status {
+  min-height: 0;
+  margin: 5px 2px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.note-form-document-status:empty,
+.note-form-document-status[hidden] { display: none; }
+.note-form-document-status[data-tone="ok"] { color: var(--success, #48a868); }
+.note-form-document-status[data-tone="warning"] { color: #b7791f; }
+.note-form-document-status[data-tone="error"] { color: var(--danger, #d85c5c); }
+.note-form-document-status button { margin-left: 6px; color: inherit; text-decoration: underline; background: none; border: 0; font: inherit; }
 .contract-review-result { display: grid; gap: 10px; }
 .contract-review-result-error { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--color-error, #ff5f6d) 55%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--color-error, #ff5f6d) 10%, transparent); color: var(--color-error, #ff5f6d); }
 .contract-review-result > header { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); }

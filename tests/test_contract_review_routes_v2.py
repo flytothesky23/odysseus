@@ -29,6 +29,12 @@ def contract_api(tmp_path, monkeypatch):
     document.write_bytes(b"fixture")
     saved = []
 
+    class UploadHandler:
+        def resolve_upload(self, upload_id, owner=None, **_kwargs):
+            if upload_id != "upload-1" or owner != "alice":
+                return None
+            return {"id": upload_id, "name": "agreement.pdf", "path": str(document)}
+
     def save_report(*, owner, session_id, title, markdown):
         saved.append((owner, session_id, title, markdown))
         return {"id": "report-1", "title": title, "session_id": session_id}
@@ -49,10 +55,36 @@ def contract_api(tmp_path, monkeypatch):
         FakeMcpManager(),
         law_mcp_manager=FakeMcpManager(kind="korean-law"),
         report_saver=save_report,
+        upload_handler=UploadHandler(),
         kordoc_timeout=1,
         law_timeout=1,
     ))
     return app, workspace, saved
+
+
+@pytest.mark.asyncio
+async def test_note_document_upload_job_is_owner_scoped_and_uses_the_verified_upload_path(contract_api):
+    app, _workspace, _saved = contract_api
+    started = await _request(app, "POST", "/api/contract-review/kordoc/upload-jobs", json={
+        "upload_id": "upload-1", "server_id": "kordoc",
+        "tool": "parse_document", "arguments": {"ocr": False},
+    })
+    assert started.status_code == 202
+    job_id = started.json()["id"]
+    for _ in range(30):
+        state = await _request(app, "GET", f"/api/contract-review/jobs/{job_id}")
+        if state.json()["state"] not in {"admitted", "running", "cancelling"}:
+            break
+        await asyncio.sleep(0.01)
+    assert state.json()["state"] == "completed"
+    assert state.json()["result"]["document"].endswith(".pdf")
+
+    crossed = await _request(app, "POST", "/api/contract-review/kordoc/upload-jobs", owner="bob", json={
+        "upload_id": "upload-1", "server_id": "kordoc",
+        "tool": "parse_document", "arguments": {},
+    })
+    assert crossed.status_code == 404
+    assert "agreement.pdf" not in crossed.text
 
 
 async def _request(app, method, path, *, owner="alice", **kwargs):

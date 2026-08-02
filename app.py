@@ -819,6 +819,7 @@ _contract_kordoc_timeout, _contract_law_timeout = contract_review_timeouts_from_
 app.include_router(setup_contract_review_routes(
     contract_review_service,
     mcp_manager,
+    upload_handler=upload_handler,
     kordoc_timeout=_contract_kordoc_timeout,
     law_timeout=_contract_law_timeout,
 ))

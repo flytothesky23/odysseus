@@ -2968,6 +2968,9 @@ function _buildForm(note = null) {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
       </button>
       <input type="file" class="note-form-photo-input" accept="image/*" capture="environment" style="display:none" />
+      <button type="button" class="note-form-document-btn" title="PDF·Office·HWP/HWPX 문서를 Kordoc으로 읽어 메모에 추가">문서 가져오기</button>
+      <input type="file" class="note-form-document-input" accept=".pdf,.docx,.hwp,.hwpx,.hml,.xls,.xlsx" style="display:none" />
+      ${isEdit ? '<button type="button" class="note-form-source-btn" title="현재 메모를 채팅 분석 근거로 고정">채팅 근거로 고정</button>' : ''}
       <div class="note-color-picker">
         ${COLORS.map(c => `<span class="note-color-dot${_dotIsActive(c.value, color) ? ' active' : ''}" data-color="${c.value}" style="background:${_dotBg(c.value, color)}" title="${c.name || 'default'}"></span>`).join('')}
       </div>
@@ -2990,6 +2993,7 @@ function _buildForm(note = null) {
         </button>
       </div>
     </div>
+    <div class="note-form-document-status" aria-live="polite"></div>
   `;
 
   let currentType = type;
@@ -3530,6 +3534,123 @@ function _buildForm(note = null) {
       photoInput.value = '';
     });
   }
+  const documentBtn = form.querySelector('.note-form-document-btn');
+  const documentInput = form.querySelector('.note-form-document-input');
+  const documentStatus = form.querySelector('.note-form-document-status');
+  let documentJobId = '';
+  const setDocumentStatus = (message, tone = '') => {
+    if (!documentStatus) return;
+    documentStatus.textContent = message;
+    documentStatus.dataset.tone = tone;
+    documentStatus.hidden = !message;
+  };
+  const contractApi = async (path, options = {}) => {
+    const response = await fetch(`${API_BASE}/api/contract-review${path}`, {
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload.message || payload.detail?.message || payload.detail || `Request failed (${response.status})`);
+      error.code = payload.error || payload.detail?.error || 'request_failed';
+      throw error;
+    }
+    return payload;
+  };
+  const cancelDocumentJob = async () => {
+    if (!documentJobId) return;
+    await contractApi(`/jobs/${encodeURIComponent(documentJobId)}`, { method: 'DELETE' });
+    setDocumentStatus('문서 파싱 취소 요청을 처리했습니다.', 'warning');
+  };
+  documentStatus?.addEventListener('click', event => {
+    if (event.target.closest('[data-cancel-kordoc-note]')) cancelDocumentJob().catch(() => {});
+  });
+  if (documentBtn && documentInput) {
+    documentBtn.addEventListener('click', () => {
+      if (currentType !== 'note') {
+        setDocumentStatus('문서 본문을 넣으려면 먼저 Note 형식을 선택하세요.', 'warning');
+        return;
+      }
+      documentInput.click();
+    });
+    documentInput.addEventListener('change', async () => {
+      const file = documentInput.files?.[0];
+      if (!file) return;
+      try {
+        setDocumentStatus('문서를 업로드하는 중…');
+        const fd = new FormData();
+        fd.append('files', file);
+        const uploadedResponse = await fetch(`${API_BASE}/api/upload`, {
+          method: 'POST', body: fd, credentials: 'same-origin',
+        });
+        const uploadedPayload = await uploadedResponse.json().catch(() => ({}));
+        if (!uploadedResponse.ok) throw new Error(uploadedPayload.detail || '문서 업로드에 실패했습니다.');
+        const upload = uploadedPayload.files?.[0];
+        if (!upload?.id) throw new Error('업로드 식별자를 확인하지 못했습니다.');
+
+        const profile = await contractApi('/profile');
+        if (!profile.inventory_available) {
+          const error = new Error('MCP 도구 목록을 확인할 수 없어 문서를 파싱하지 않았습니다.');
+          error.code = 'mcp_inventory_unavailable';
+          throw error;
+        }
+        const server = (profile.kordoc_servers || []).find(item => item.tools?.includes('parse_document'));
+        if (!server) {
+          const error = new Error('연결된 Kordoc MCP에서 parse_document를 찾지 못했습니다.');
+          error.code = 'mcp_tool_unavailable';
+          throw error;
+        }
+        let job = await contractApi('/kordoc/upload-jobs', {
+          method: 'POST',
+          body: JSON.stringify({
+            upload_id: upload.id,
+            server_id: server.id,
+            tool: 'parse_document',
+            arguments: { ocr: false },
+          }),
+        });
+        documentJobId = job.id;
+        while (['admitted', 'running', 'cancelling'].includes(job.state)) {
+          setDocumentStatus(`${job.message || 'Kordoc 문서 파싱 중…'} `, 'working');
+          documentStatus.innerHTML = `${_esc(job.message || 'Kordoc 문서 파싱 중…')} <button type="button" data-cancel-kordoc-note>문서 파싱 취소</button>`;
+          await new Promise(resolve => setTimeout(resolve, 350));
+          job = await contractApi(`/jobs/${encodeURIComponent(documentJobId)}`);
+        }
+        documentJobId = '';
+        if (job.state !== 'completed') {
+          const error = new Error(job.message || '문서 파싱에 실패했습니다.');
+          error.code = job.error || 'job_failed';
+          throw error;
+        }
+        const output = String(job.result?.output || '').trim();
+        if (!output) {
+          const error = new Error('Kordoc이 빈 문서 결과를 반환했습니다.');
+          error.code = 'empty_parser_output';
+          throw error;
+        }
+        const textarea = form.querySelector('.note-form-content');
+        if (!textarea) throw new Error('문서를 넣을 메모 본문을 찾지 못했습니다.');
+        const safeName = String(upload.name || file.name || 'document').replace(/[\r\n<>]/g, '').slice(0, 160);
+        const marker = `<!-- kordoc_source upload_id="${upload.id}" parser="kordoc" -->`;
+        const section = `## 문서 소스 · ${safeName}\n${marker}\n\n${output}`;
+        textarea.value = [textarea.value.trim(), section].filter(Boolean).join('\n\n');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        setDocumentStatus(`Kordoc 파싱 완료 · ${safeName}`, 'ok');
+      } catch (error) {
+        documentJobId = '';
+        setDocumentStatus(`${error.code ? `${error.code}: ` : ''}${error.message}`, 'error');
+      } finally {
+        documentInput.value = '';
+      }
+    });
+  }
+  form.querySelector('.note-form-source-btn')?.addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('contract-review-toggle-note-source', {
+      detail: { id: note.id, title: note.title || '메모' },
+    }));
+    uiModule.showToast?.('현재 메모의 채팅 근거 고정 상태를 변경했습니다.');
+  });
   // Existing image remove
   form.querySelector('.note-form-image-rm')?.addEventListener('click', () => {
     form.querySelector('.note-form-image-wrap')?.remove();
@@ -4385,7 +4506,7 @@ function _serializeNoteForCopy(note) {
 
 // Copy a note to the clipboard, briefly swap btnEl's icon to a checkmark, and
 // toast. Shared by the corner-copy button click and the Ctrl/Cmd+C shortcut.
-// ── ⋯ corner menu (Copy + Agent) ───────────────────────────────────
+// ── ⋯ corner menu (Copy + source pin + Agent) ─────────────────────
 function _openNoteCornerMenu(btn) {
   document.querySelectorAll('.note-corner-menu-dropdown').forEach(dismissOrRemove);
   const id = btn.dataset.noteId;
@@ -4401,6 +4522,10 @@ function _openNoteCornerMenu(btn) {
     <button type="button" class="ncm-item" data-act="agent">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
       <span>${note.agent_session_id ? 'Re-run agent' : 'Agent: solve this'}</span>
+    </button>
+    <button type="button" class="ncm-item" data-act="chat-source">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="m5 3 14 0-3 6v5H8V9z"/></svg>
+      <span>채팅 근거로 고정</span>
     </button>`;
   document.body.appendChild(menu);
   const r = btn.getBoundingClientRect();
@@ -4417,6 +4542,13 @@ function _openNoteCornerMenu(btn) {
   const close = bindMenuDismiss(menu, () => { menu.remove(); });
   menu.querySelector('[data-act="copy"]').addEventListener('click', () => { close(); _copyNote(id, btn); });
   menu.querySelector('[data-act="agent"]').addEventListener('click', () => { close(); _agentSolveNote(id); });
+  menu.querySelector('[data-act="chat-source"]').addEventListener('click', () => {
+    close();
+    document.dispatchEvent(new CustomEvent('contract-review-toggle-note-source', {
+      detail: { id, title: note.title || '메모' },
+    }));
+    uiModule.showToast?.('현재 메모의 채팅 근거 고정 상태를 변경했습니다.');
+  });
 }
 
 function _positionNoteMenu(menu, btn, width = 196) {

@@ -179,6 +179,47 @@ def test_bounded_body_search_and_delta_follow_up(contract_workspace, monkeypatch
     assert calls[-2:] == ["기본 계약.md", "amendments/Liability.md"]
 
 
+def test_memo_only_context_reuses_and_deltas_without_requiring_a_vault_snapshot():
+    service = ContractReviewWorkspaceService()
+    memo_a = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "evidence_type": "odysseus_note",
+        "title": "검토 메모",
+        "content": "Kordoc로 파싱한 제한된 본문",
+        "stat_fingerprint": "a" * 64,
+        "verification_state": "verified",
+    }
+    memo_b = {
+        "id": "22222222-2222-4222-8222-222222222222",
+        "evidence_type": "odysseus_note",
+        "title": "추가 메모",
+        "content": "추가 검토 근거",
+        "stat_fingerprint": "b" * 64,
+        "verification_state": "verified",
+    }
+
+    fresh = service.build_turn_context(
+        owner="alice", session_id="memo-session", snapshot_id="", vault_id="",
+        selected_paths=[], odysseus_note_evidence=[memo_a], analysis_mode="general",
+    )
+    reused = service.build_turn_context(
+        owner="alice", session_id="memo-session", snapshot_id="", vault_id="",
+        selected_paths=[], odysseus_note_evidence=[memo_a], analysis_mode="general",
+    )
+    delta = service.build_turn_context(
+        owner="alice", session_id="memo-session", snapshot_id="", vault_id="",
+        selected_paths=[], odysseus_note_evidence=[memo_a, memo_b], analysis_mode="legal",
+    )
+
+    assert fresh["strategy"] == "fresh"
+    assert reused["strategy"] == "reuse"
+    assert delta["strategy"] == "delta"
+    assert fresh["analysis_mode"] == "general"
+    assert delta["analysis_mode"] == "legal"
+    assert [item["title"] for item in delta["odysseus_note_evidence"]] == ["검토 메모", "추가 메모"]
+    assert all("path" not in item for item in delta["odysseus_note_evidence"])
+
+
 def test_owner_scope_and_auth_disabled_single_owner(contract_workspace):
     workspace, _vault = contract_workspace
     service = ContractReviewWorkspaceService()

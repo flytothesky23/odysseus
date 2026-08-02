@@ -57,6 +57,11 @@ PDF_SOURCE_UPLOAD_RE = re.compile(
     r"[\"']([0-9a-fA-F]{32}(?:\.[A-Za-z0-9]+)?)[\"'][^>]*-->",
     re.IGNORECASE,
 )
+KORDOC_SOURCE_UPLOAD_RE = re.compile(
+    r"<!--\s*kordoc_source\b[^>]*\bupload_id="
+    r"[\"']([0-9a-fA-F]{32}(?:\.[A-Za-z0-9]+)?)[\"'][^>]*-->",
+    re.IGNORECASE,
+)
 ATTACHMENT_REFERENCE_LINE_RE = re.compile(
     r"\[Attachment:[^\]\r\n]*\|\s*id="
     r"([0-9a-fA-F]{32}(?:\.[A-Za-z0-9]+)?)"
@@ -100,6 +105,7 @@ def extract_internal_upload_ids(value: Any) -> set[str]:
     return (
         set(INTERNAL_UPLOAD_URL_RE.findall(value))
         | set(PDF_SOURCE_UPLOAD_RE.findall(value))
+        | set(KORDOC_SOURCE_UPLOAD_RE.findall(value))
         | set(ATTACHMENT_REFERENCE_LINE_RE.findall(value))
     )
 
@@ -309,6 +315,7 @@ class UploadHandler:
         """Check if a file is a document based on extension or content type."""
         document_extensions = {
             '.pdf', '.docx', '.xlsx', '.pptx', '.xls', '.epub',
+            '.hwp', '.hwpx', '.hml',
             '.txt', '.py', '.js', '.html', '.htm',
             '.css', '.json', '.md', '.csv', '.log', '.xml', '.yml',
             '.yaml', '.nix', '.sql', '.sh', '.bash', '.c', '.cpp', '.h',
@@ -320,6 +327,9 @@ class UploadHandler:
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             'application/vnd.ms-excel',
+            'application/x-hwp',
+            'application/haansofthwp',
+            'application/vnd.hancom.hwpx',
             'application/epub+zip',
             'text/plain'
         }

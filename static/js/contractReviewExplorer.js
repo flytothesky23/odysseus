@@ -1,7 +1,6 @@
 import Storage, { KEYS } from './storage.js';
 import uiModule from './ui.js';
 import workspaceModule from './workspace.js';
-import contractReviewModule from './contractReview.js';
 import * as Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { applyEdgeDock, clearDockSide } from './modalSnap.js';
@@ -200,7 +199,12 @@ function applyEvidenceSelection(paths) {
   const state = loadState();
   const included = paths.filter(path => isPathIncludedByScope(path, state.note_scope));
   const result = updateBoundedSelection([], included, true, MAX_CHAT_EVIDENCE);
-  saveState({ ...state, active: false, selected_paths: result.selected_paths });
+  saveState({
+    ...state,
+    active: Boolean(state.note_ids.length || state.law_enabled),
+    vault_active: false,
+    selected_paths: result.selected_paths,
+  });
   renderTree();
   if (result.rejected_count) {
     setStatus(`검색 결과 중 앞의 ${MAX_CHAT_EVIDENCE}개만 본문 후보로 지정했습니다. 검색어를 더 좁히면 다른 후보를 선택할 수 있습니다.`, 'warning');
@@ -213,7 +217,13 @@ function applyScopeRule(path, included) {
   const state = loadState();
   const nextScope = updateScopeSelection(state.note_scope, path, included);
   const nextSelection = state.selected_paths.filter(candidate => isPathIncludedByScope(candidate, nextScope));
-  saveState({ ...state, active: false, note_scope: nextScope, selected_paths: nextSelection });
+  saveState({
+    ...state,
+    active: Boolean(state.note_ids.length || state.law_enabled || (state.vault_active && nextSelection.length)),
+    vault_active: Boolean(state.vault_active && nextSelection.length),
+    note_scope: nextScope,
+    selected_paths: nextSelection,
+  });
   renderTree();
   setStatus(`${scopedPaths().length.toLocaleString('ko-KR')}개 노트를 분석 범위에 포함했습니다. 본문은 아직 읽지 않았습니다.`, 'ok');
 }
@@ -223,7 +233,8 @@ function applyWholeVaultScope(included) {
   const nextScope = { default_included: included, rules: [] };
   saveState({
     ...state,
-    active: false,
+    active: Boolean(state.note_ids.length || state.law_enabled || (included && state.vault_active && state.selected_paths.length)),
+    vault_active: Boolean(included && state.vault_active && state.selected_paths.length),
     note_scope: nextScope,
     selected_paths: included ? state.selected_paths : [],
   });
@@ -248,7 +259,14 @@ function handleIndexError(error) {
   indexError = friendlyIndexError(error);
   indexedNotes = [];
   const state = loadState();
-  saveState({ ...state, active: false, snapshot_id: '', vault_id: '', selected_paths: [] });
+  saveState({
+    ...state,
+    active: Boolean(state.note_ids.length || state.law_enabled),
+    vault_active: false,
+    snapshot_id: '',
+    vault_id: '',
+    selected_paths: [],
+  });
   renderTree();
   setStatus(indexError, 'error');
 }
@@ -277,16 +295,17 @@ async function indexVault({ preserveSelection = false } = {}) {
     sameVault ? previousState.selected_paths : [], indexedNotes, MAX_CHAT_EVIDENCE,
   ).filter(path => isPathIncludedByScope(path, nextScope));
   saveState({
-    active: false,
+    ...previousState,
+    active: Boolean(
+      previousState.note_ids.length || previousState.law_enabled
+      || (sameVault && previousState.vault_active && nextSelection.length)
+    ),
+    vault_active: Boolean(sameVault && previousState.vault_active && nextSelection.length),
     snapshot_id: result.snapshot_id,
     vault_id: result.vault_id,
     vault_path: vaultPath,
     note_scope: nextScope,
     selected_paths: nextSelection,
-    kordoc_job_ids: previousState.kordoc_job_ids,
-    law_job_ids: previousState.law_job_ids,
-    mcp_runtime_id: previousState.mcp_runtime_id,
-    mcp_runtime_stale: previousState.mcp_runtime_stale,
   });
   document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
     detail: { notes: indexedNotes, snapshot_id: result.snapshot_id, vault_id: result.vault_id },
@@ -366,20 +385,33 @@ function wirePanel() {
   pane.querySelector('#vault-explorer-exclude-all').addEventListener('click', () => applyWholeVaultScope(false));
   pane.querySelector('#vault-explorer-clear-evidence').addEventListener('click', () => {
     const state = loadState();
-    saveState({ ...state, active: false, selected_paths: [] });
+    saveState({
+      ...state,
+      active: Boolean(state.note_ids.length || state.law_enabled),
+      vault_active: false,
+      selected_paths: [],
+    });
     renderTree();
     setStatus('제한된 본문 후보를 모두 지웠습니다.');
   });
   pane.querySelector('#vault-explorer-use-chat').addEventListener('click', () => {
     const state = loadState();
     if (!state.selected_paths.length) return;
-    saveState({ ...state, active: true });
+    saveState({ ...state, active: true, vault_active: true, mode: state.law_enabled ? 'legal' : 'general' });
     closePanel();
-    uiModule.showToast?.(`${state.selected_paths.length}개 Vault 근거를 현재 채팅에 연결했습니다.`);
+    uiModule.showToast?.(`${state.selected_paths.length}개 Vault 근거를 입력창에 고정했습니다.`);
   });
-  pane.querySelector('#vault-explorer-open-workspace').addEventListener('click', () => {
-    closePanel();
-    contractReviewModule.openContractReview();
+  pane.querySelector('#vault-explorer-find-similar').addEventListener('click', () => {
+    const current = pane.querySelector('#vault-explorer-search').value.trim();
+    const fallback = selectedPaths()[0]?.split('/').pop()?.replace(/\.md$/i, '') || '';
+    const query = current || fallback;
+    if (!query) {
+      setStatus('유사 노트를 찾으려면 노트 후보를 고르거나 검색어를 입력하세요.', 'warning');
+      return;
+    }
+    pane.querySelector('#vault-explorer-search').value = query;
+    renderTree();
+    setStatus(`“${query}”와 유사한 제목·파일명·경로·aliases를 표시했습니다.`, 'ok');
   });
   pane.querySelector('#vault-explorer-tree').addEventListener('click', event => {
     if (event.target.closest('#vault-explorer-empty-select')) {
@@ -464,8 +496,8 @@ export function openPanel() {
     <div id="vault-explorer-tree" class="notes-pane-body vault-explorer-tree"></div>
     <p id="vault-explorer-status" class="vault-explorer-status" aria-live="polite">먼저 체크박스로 분석 범위를 정하고, 검색 결과를 제한된 본문 후보로 지정하세요.</p>
     <div class="notes-pane-footer vault-explorer-footer">
-      <button type="button" id="vault-explorer-open-workspace" class="confirm-btn confirm-btn-secondary">MCP·법률 도구</button>
-      <button type="button" id="vault-explorer-use-chat" class="confirm-btn confirm-btn-primary">현재 후보로 채팅</button>
+      <button type="button" id="vault-explorer-find-similar" class="confirm-btn confirm-btn-secondary">유사 노트 찾기</button>
+      <button type="button" id="vault-explorer-use-chat" class="confirm-btn confirm-btn-primary">선택 근거 고정</button>
     </div>`;
 
   const backdrop = document.createElement('div');
@@ -524,6 +556,16 @@ export function initContractReviewExplorer(apiBase = '') {
   });
   document.addEventListener('contract-review-state-change', () => {
     if (open) renderTree();
+  });
+  document.addEventListener('contract-review-find-similar', event => {
+    openPanel();
+    const query = String(event.detail?.query || '').trim();
+    const input = pane?.querySelector('#vault-explorer-search');
+    if (input && query) {
+      input.value = query;
+      renderTree();
+      input.focus();
+    }
   });
 }
 

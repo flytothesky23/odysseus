@@ -154,6 +154,7 @@ def setup_contract_review_routes(
     *,
     law_mcp_manager: Any | None = None,
     report_saver: Callable[..., dict[str, Any]] | None = None,
+    upload_handler: Any | None = None,
     kordoc_timeout: float = 300,
     law_timeout: float = 60,
 ) -> APIRouter:
@@ -286,6 +287,32 @@ def setup_contract_review_routes(
                 tool=str(payload.get("tool") or ""),
                 workspace=str(payload.get("workspace") or ""),
                 relative_path=str(payload.get("file_path") or ""),
+                arguments=arguments,
+            )
+        except ContractReviewError as exc:
+            return _error_response(exc)
+
+    @router.post("/kordoc/upload-jobs", status_code=202)
+    async def start_kordoc_upload(request: Request):
+        try:
+            owner = owner_for(request)
+            if upload_handler is None or not hasattr(upload_handler, "resolve_upload"):
+                raise ContractReviewError("upload_unavailable", "Document uploads are unavailable.", 503)
+            payload = _require_mapping(await request.json())
+            upload_id = str(payload.get("upload_id") or "")
+            resolved = upload_handler.resolve_upload(upload_id, owner=owner)
+            if not isinstance(resolved, Mapping) or not resolved.get("path"):
+                raise ContractReviewError("upload_unavailable", "The uploaded document is unavailable.", 404)
+            physical = Path(str(resolved["path"])).resolve()
+            if not physical.is_file():
+                raise ContractReviewError("upload_unavailable", "The uploaded document is unavailable.", 404)
+            arguments = _require_mapping(payload.get("arguments") or {})
+            return jobs.start_kordoc(
+                owner=owner,
+                server_id=str(payload.get("server_id") or ""),
+                tool=str(payload.get("tool") or "parse_document"),
+                workspace=str(physical.parent),
+                relative_path=physical.name,
                 arguments=arguments,
             )
         except ContractReviewError as exc:

@@ -583,13 +583,17 @@ class ContractReviewWorkspaceService:
         additional_evidence: Sequence[tuple[str, str]] = (),
         note_scope: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        snapshot = self._snapshot(owner, snapshot_id, vault_id)
         normalized_scope = _normalize_note_scope(note_scope)
+        has_vault_identity = bool(str(snapshot_id or "") or str(vault_id or "") or selected_paths)
+        if has_vault_identity and (not snapshot_id or not vault_id):
+            raise ContractReviewError("snapshot_unavailable", "The Vault snapshot is unavailable.", 404)
+        snapshot = self._snapshot(owner, snapshot_id, vault_id) if has_vault_identity else None
         if len(selected_paths) > self.max_selected_notes:
             raise ContractReviewError("selection_too_large", f"Select at most {self.max_selected_notes} notes.", 422)
         selected: list[str] = []
         fingerprints: list[tuple[str, str]] = []
         for raw in selected_paths:
+            assert snapshot is not None
             record, _resolved = self._record(owner, snapshot, raw)
             if not _note_in_scope(record.path, normalized_scope):
                 raise ContractReviewError("outside_scope", "The note is outside the selected scope.", 403)
@@ -597,7 +601,8 @@ class ContractReviewWorkspaceService:
                 selected.append(record.path)
                 fingerprints.append((record.path, record.stat_fingerprint))
         normalized_additional = tuple(sorted((str(item[0]), str(item[1])) for item in additional_evidence))
-        fingerprint = _digest(snapshot.vault_id, normalized_scope, fingerprints, normalized_additional)
+        scope_vault_id = snapshot.vault_id if snapshot is not None else "source-only"
+        fingerprint = _digest(scope_vault_id, normalized_scope, fingerprints, normalized_additional)
         key = (str(owner or ""), str(session_id or ""))
         previous = self._session_scopes.get(key)
         if previous is None:
@@ -619,8 +624,8 @@ class ContractReviewWorkspaceService:
             }
         state = {
             "owner": str(owner or ""),
-            "snapshot_id": snapshot.snapshot_id,
-            "vault_id": snapshot.vault_id,
+            "snapshot_id": snapshot.snapshot_id if snapshot is not None else "",
+            "vault_id": snapshot.vault_id if snapshot is not None else "",
             "selected_paths": tuple(selected),
             "note_scope": normalized_scope,
             "fingerprint": fingerprint,
@@ -632,8 +637,8 @@ class ContractReviewWorkspaceService:
             "state": "ready",
             "strategy": strategy,
             "delta_paths": delta_paths,
-            "snapshot_id": snapshot.snapshot_id,
-            "vault_id": snapshot.vault_id,
+            "snapshot_id": snapshot.snapshot_id if snapshot is not None else "",
+            "vault_id": snapshot.vault_id if snapshot is not None else "",
             "selected_paths": selected,
             "note_scope": normalized_scope,
             "evidence_fingerprint": fingerprint,
@@ -650,20 +655,43 @@ class ContractReviewWorkspaceService:
         note_scope: Mapping[str, Any] | None = None,
         local_document_evidence: Sequence[Mapping[str, Any]] = (),
         official_legal_evidence: Sequence[Mapping[str, Any]] = (),
+        odysseus_note_evidence: Sequence[Mapping[str, Any]] = (),
+        analysis_mode: str = "legal",
     ) -> dict[str, Any]:
+        if analysis_mode not in {"general", "legal"}:
+            raise ContractReviewError("invalid_mode", "The analysis mode is invalid.", 400)
+        if len(odysseus_note_evidence) > self.max_selected_notes:
+            raise ContractReviewError("selection_too_large", f"Select at most {self.max_selected_notes} notes.", 422)
+        normalized_memos: list[dict[str, Any]] = []
+        for item in odysseus_note_evidence:
+            if not isinstance(item, Mapping):
+                raise ContractReviewError("invalid_evidence", "The Odysseus note evidence is invalid.", 422)
+            note_id = str(item.get("id") or "")
+            fingerprint = str(item.get("stat_fingerprint") or "")
+            if not note_id or not fingerprint:
+                raise ContractReviewError("invalid_evidence", "The Odysseus note evidence is invalid.", 422)
+            normalized_memos.append({
+                "id": note_id,
+                "evidence_type": "odysseus_note",
+                "title": str(item.get("title") or "Memo")[:200],
+                "content": str(item.get("content") or "")[: self.max_body_chars],
+                "stat_fingerprint": fingerprint,
+                "verification_state": "verified",
+            })
         additional = [
             (str(item.get("id") or ""), str(item.get("stat_fingerprint") or item.get("descriptor_fingerprint") or ""))
-            for item in [*local_document_evidence, *official_legal_evidence]
+            for item in [*local_document_evidence, *official_legal_evidence, *normalized_memos]
         ]
         scope = self.prepare_session_scope(
             owner, session_id, snapshot_id, vault_id, selected_paths, additional, note_scope,
         )
-        snapshot = self._snapshot(owner, snapshot_id, vault_id)
+        snapshot = self._snapshot(owner, snapshot_id, vault_id) if scope["selected_paths"] else None
         key = (str(owner or ""), str(session_id or ""))
         state = self._session_scopes[key]
         content_by_path = state["content_by_path"]
         evidence: list[dict[str, Any]] = []
         for relative in scope["selected_paths"]:
+            assert snapshot is not None
             record, _resolved = self._record(owner, snapshot, relative)
             content = content_by_path.get(relative)
             if content is None:
@@ -678,12 +706,23 @@ class ContractReviewWorkspaceService:
                 "content": content,
                 "verification_state": "verified",
             })
+        memo_as_note_evidence = [{
+            "id": item["id"],
+            "evidence_type": "vault_note",
+            "path": f"odysseus-notes/{item['id']}.md",
+            "title": item["title"],
+            "stat_fingerprint": item["stat_fingerprint"],
+            "content": item["content"],
+            "verification_state": "verified",
+        } for item in normalized_memos]
         return {
             "schema": CONTRACT_REVIEW_CONTEXT_SCHEMA,
+            "analysis_mode": analysis_mode,
             **scope,
             "scope": scope,
-            "evidence": evidence,
-            "vault_note_evidence": evidence,
+            "evidence": [*evidence, *normalized_memos],
+            "vault_note_evidence": [*evidence, *memo_as_note_evidence],
+            "odysseus_note_evidence": normalized_memos,
             "local_document_evidence": [dict(item) for item in local_document_evidence],
             "official_legal_evidence": [dict(item) for item in official_legal_evidence],
         }

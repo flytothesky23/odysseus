@@ -16,6 +16,11 @@ function sanitizeRuntimeId(value) {
   const runtimeId = typeof value === 'string' ? value : '';
   return /^[a-f0-9]{32}$/.test(runtimeId) ? runtimeId : '';
 }
+function sanitizeNoteIds(value) {
+  if (!Array.isArray(value)) return [];
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+  return [...new Set(value.map(String).filter(id => uuid.test(id)))].slice(0, 8);
+}
 
 export function sanitizeNoteScope(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -48,15 +53,27 @@ export function sanitizePersistedState(value) {
     ? [...new Set(input.selected_paths.filter(path => isRelativePath(path)))].slice(0, 8)
     : [];
   const vaultPath = String(input.vault_path || '.');
+  const kordocJobIds = sanitizeJobIds(input.kordoc_job_ids);
+  const lawJobIds = sanitizeJobIds(input.law_job_ids);
+  const noteIds = sanitizeNoteIds(input.note_ids);
+  const lawEnabled = Boolean(input.law_enabled || (input.mode == null && lawJobIds.length));
+  const vaultActive = typeof input.vault_active === 'boolean'
+    ? input.vault_active && selected.length > 0
+    : Boolean(input.active && selected.length);
+  const active = Boolean(vaultActive || noteIds.length || lawEnabled || kordocJobIds.length || lawJobIds.length);
   return {
-    active: Boolean(input.active),
+    active,
+    vault_active: vaultActive,
+    mode: input.mode === 'legal' || lawEnabled ? 'legal' : 'general',
+    law_enabled: lawEnabled,
     snapshot_id: String(input.snapshot_id || '').slice(0, 128),
     vault_id: String(input.vault_id || '').slice(0, 128),
     vault_path: isRelativePath(vaultPath, true) ? vaultPath : '.',
     note_scope: sanitizeNoteScope(input.note_scope),
     selected_paths: selected,
-    kordoc_job_ids: sanitizeJobIds(input.kordoc_job_ids),
-    law_job_ids: sanitizeJobIds(input.law_job_ids),
+    note_ids: noteIds,
+    kordoc_job_ids: kordocJobIds,
+    law_job_ids: lawJobIds,
     mcp_runtime_id: sanitizeRuntimeId(input.mcp_runtime_id),
     mcp_runtime_stale: Boolean(input.mcp_runtime_stale),
   };
@@ -69,7 +86,9 @@ export function reconcileMcpRuntimeState(value, runtimeId) {
   if (hasMcpJobs && (!currentRuntimeId || state.mcp_runtime_id !== currentRuntimeId)) {
     return {
       ...state,
-      active: false,
+      active: Boolean((state.vault_active && state.selected_paths.length) || state.note_ids.length),
+      mode: 'general',
+      law_enabled: false,
       kordoc_job_ids: [],
       law_job_ids: [],
       mcp_runtime_id: currentRuntimeId,
@@ -88,10 +107,12 @@ export function reconcileMcpRuntimeState(value, runtimeId) {
 export function buildContractReviewChatContext(value) {
   const state = sanitizePersistedState(value);
   return {
+    mode: state.mode,
     snapshot_id: state.snapshot_id,
     vault_id: state.vault_id,
     note_scope: state.note_scope,
-    selected_paths: state.selected_paths,
+    selected_paths: state.vault_active ? state.selected_paths : [],
+    note_ids: state.note_ids,
     kordoc_job_ids: state.kordoc_job_ids,
     law_job_ids: state.law_job_ids,
     mcp_runtime_id: state.mcp_runtime_id,

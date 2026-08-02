@@ -19,8 +19,10 @@ def test_browser_state_persists_identifiers_not_private_content():
     state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
     data = _node(f"""
       import {{ sanitizePersistedState, buildContractReviewChatContext }} from {json.dumps(state_url)};
-      const input = {{active: true, snapshot_id: 'snap', vault_id: 'vault', vault_path: 'legal',
+      const input = {{active: true, mode: 'legal', law_enabled: true,
+        snapshot_id: 'snap', vault_id: 'vault', vault_path: 'legal',
         selected_paths: ['Agreement.md', '../escape.md', '/absolute.md'],
+        note_ids: ['11111111-1111-4111-8111-111111111111', 'not-a-note-id'],
         kordoc_job_ids: ['a'.repeat(32)], law_job_ids: ['b'.repeat(32)],
         raw_body: 'private body', absolute_path: '/private/path', prompt: 'private question'}};
       const safe = sanitizePersistedState(input);
@@ -28,9 +30,32 @@ def test_browser_state_persists_identifiers_not_private_content():
     """)
     serialized = json.dumps(data, ensure_ascii=False)
     assert data["safe"]["selected_paths"] == ["Agreement.md"]
+    assert data["safe"]["note_ids"] == ["11111111-1111-4111-8111-111111111111"]
+    assert data["safe"]["mode"] == "legal"
+    assert data["safe"]["law_enabled"] is True
     assert data["safe"]["law_job_ids"] == ["b" * 32]
     for secret in ("private body", "/private/path", "private question"):
         assert secret not in serialized
+
+
+def test_vault_candidates_do_not_enter_chat_until_the_user_pins_them():
+    state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
+    data = _node(f"""
+      import {{ sanitizePersistedState, buildContractReviewChatContext }} from {json.dumps(state_url)};
+      const candidate = sanitizePersistedState({{
+        active: false, vault_active: false, snapshot_id: 'snap', vault_id: 'vault',
+        selected_paths: ['Agreement.md'],
+      }});
+      const pinned = sanitizePersistedState({{...candidate, active: true, vault_active: true}});
+      console.log(JSON.stringify({{
+        candidate,
+        candidateContext: buildContractReviewChatContext(candidate),
+        pinnedContext: buildContractReviewChatContext(pinned),
+      }}));
+    """)
+    assert data["candidate"]["active"] is False
+    assert data["candidateContext"]["selected_paths"] == []
+    assert data["pinnedContext"]["selected_paths"] == ["Agreement.md"]
 
 
 def test_mcp_runtime_reconciliation_fails_closed_for_stale_or_invalid_job_identity():
@@ -68,9 +93,11 @@ def test_mcp_runtime_reconciliation_fails_closed_for_stale_or_invalid_job_identi
     assert data["same"]["law_job_ids"] == ["d" * 32]
     assert data["same"]["mcp_runtime_stale"] is False
     for key in ("stale", "invalid", "legacy"):
-        assert data[key]["active"] is False
+        assert data[key]["active"] is True
         assert data[key]["kordoc_job_ids"] == []
         assert data[key]["law_job_ids"] == []
+        assert data[key]["mode"] == "general"
+        assert data[key]["law_enabled"] is False
         assert data[key]["mcp_runtime_stale"] is True
     assert data["stale"]["mcp_runtime_id"] == "b" * 32
     assert data["invalid"]["mcp_runtime_id"] == ""
@@ -170,12 +197,68 @@ def test_vault_explorer_exposes_an_obvious_vault_picker_and_index_action():
     assert "preserveSelection: true" in explorer
     assert "체크박스 = metadata 검색·분석 범위" in explorer
     assert "검색 결과를 본문 후보로" in explorer
-    assert "현재 후보로 채팅" in explorer
+    assert "선택 근거 고정" in explorer
 
 
-def test_vault_explorer_closes_before_opening_the_mcp_workspace_modal():
+def test_vault_explorer_only_selects_vault_sources_and_does_not_open_the_mcp_modal():
     explorer = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
-    assert "closePanel();\n    contractReviewModule.openContractReview();" in explorer
+    assert "contractReviewModule.openContractReview" not in explorer
+    assert "MCP·법률 도구" not in explorer
+    assert "선택 근거 고정" in explorer
+    assert "유사 노트 찾기" in explorer
+
+
+def test_chat_source_bar_and_natural_language_law_toggle_replace_the_monolithic_entry():
+    html = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    workspace = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+
+    assert 'id="pinned-tools-bar"' in html
+    assert 'id="overflow-contract-review-btn"' in html
+    assert "법률 검증" in html
+    assert "renderPinnedSources" in workspace
+    assert "contract-review-toggle-note-source" in workspace
+    assert "contract-review-find-similar" in workspace
+    assert "prepareChatEvidence" in workspace
+    assert "extractLegalLookup" in workspace
+    assert "await contractReviewModule.prepareChatEvidence(msg)" in chat
+    assert "const hasLegalReviewContext = contractReviewContext?.mode === 'legal';" in chat
+    assert "fd.delete('use_web');" in chat
+    assert "if (hasLegalReviewContext)" in chat
+
+
+def test_legal_lookup_requires_an_exact_law_name_or_precedent_identity():
+    workspace_url = (ROOT / "static/js/contractReviewLegal.js").as_uri()
+    data = _node(f"""
+      import {{ extractLegalLookup }} from {json.dumps(workspace_url)};
+      console.log(JSON.stringify({{
+        civil: extractLegalLookup('민법상 계약 해제 요건을 공식 근거로 검증해줘'),
+        labor: extractLegalLookup('근로기준법의 임금 지급 원칙을 확인해줘'),
+        state: extractLegalLookup('국가를 당사자로 하는 계약에 관한 법률상 지체상금을 검토해줘'),
+        decision: extractLegalLookup('대법원 2024다12345 판례를 찾아 계약 해제를 분석해줘'),
+        missing: extractLegalLookup('이 계약이 위법한지 법적으로 검토해줘'),
+      }}));
+    """)
+    assert data["civil"] == {"tool": "search_law", "query": "민법"}
+    assert data["labor"] == {"tool": "search_law", "query": "근로기준법"}
+    assert data["state"] == {"tool": "search_law", "query": "국가를 당사자로 하는 계약에 관한 법률"}
+    assert data["decision"]["tool"] == "search_decisions"
+    assert "2024다12345" in data["decision"]["query"]
+    assert data["missing"] is None
+
+
+def test_notes_import_kordoc_documents_and_can_pin_the_note_as_chat_evidence():
+    notes = (ROOT / "static/js/notes.js").read_text(encoding="utf-8")
+    assert "문서 가져오기" in notes
+    assert "note-form-document-input" in notes
+    assert "`${API_BASE}/api/contract-review${path}`" in notes
+    assert "'/kordoc/upload-jobs'" in notes
+    assert "kordoc_source" in notes
+    assert "문서 파싱 취소" in notes
+    assert "contract-review-toggle-note-source" in notes
+    assert "채팅 근거로 고정" in notes
+    assert 'accept=".pdf,.docx,.hwp,.hwpx,.hml,.xls,.xlsx"' in notes
+    assert 'accept=".pdf,.doc,.docx' not in notes
 
 
 def test_contract_review_refreshes_mcp_inventory_each_time_the_workspace_opens():
@@ -333,7 +416,7 @@ def test_renderer_handles_actual_codex_interpretation_and_follow_up_objects():
 def test_contract_review_chat_progress_does_not_claim_web_search():
     source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
     assert "const hasContractReviewContext = !!contractReviewContext;" in source
-    assert "el('web-toggle').checked && !_isAgent && !hasContractReviewContext" in source
+    assert "el('web-toggle').checked && !_isAgent && !hasLegalReviewContext" in source
 
 
 def test_chat_renderer_and_live_chat_reference_contract_renderer():

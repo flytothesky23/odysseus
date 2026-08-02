@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -81,6 +82,73 @@ def test_chat_rejects_stale_mcp_runtime_before_resolving_evidence_jobs():
     assert exc.value.status_code == 409
     assert exc.value.detail["error"] == "stale_evidence_runtime"
     completed_evidence.assert_not_called()
+
+
+def test_chat_resolves_only_owner_scoped_note_ids_and_preserves_general_mode(monkeypatch):
+    completed_evidence = MagicMock(return_value=[])
+    jobs = SimpleNamespace(runtime_id="b" * 32, completed_evidence=completed_evidence)
+    captured = {}
+
+    class Service:
+        job_manager = jobs
+
+        def build_turn_context(self, **kwargs):
+            captured.update(kwargs)
+            return {"analysis_mode": kwargs["analysis_mode"], "evidence_fingerprint": "e" * 64}
+
+    monkeypatch.setattr(
+        chat_routes,
+        "_resolve_odysseus_note_evidence",
+        lambda owner, note_ids: [{
+            "id": note_ids[0], "evidence_type": "odysseus_note", "title": "Pinned memo",
+            "content": "bounded memo", "stat_fingerprint": "f" * 64,
+            "verification_state": "verified",
+        }],
+    )
+    result = chat_routes._prepare_contract_review_context(
+        Service(),
+        owner="alice",
+        session_id="session-1",
+        raw={
+            "mode": "general",
+            "note_ids": ["11111111-1111-4111-8111-111111111111"],
+            "selected_paths": [],
+            "kordoc_job_ids": [],
+            "law_job_ids": [],
+        },
+    )
+
+    assert result["analysis_mode"] == "general"
+    assert captured["analysis_mode"] == "general"
+    assert captured["odysseus_note_evidence"][0]["content"] == "bounded memo"
+    completed_evidence.assert_not_called()
+
+
+def test_chat_rejects_unknown_source_mode_and_too_many_note_ids():
+    jobs = SimpleNamespace(runtime_id="b" * 32, completed_evidence=MagicMock())
+    service = SimpleNamespace(job_manager=jobs)
+
+    with pytest.raises(HTTPException) as invalid_mode:
+        chat_routes._prepare_contract_review_context(
+            service, owner="alice", session_id="session-1",
+            raw={"mode": "unsafe", "selected_paths": [], "note_ids": []},
+        )
+    assert invalid_mode.value.status_code == 400
+
+    with pytest.raises(HTTPException) as too_many:
+        chat_routes._prepare_contract_review_context(
+            service, owner="alice", session_id="session-1",
+            raw={"mode": "general", "selected_paths": [], "note_ids": [str(i) for i in range(9)]},
+        )
+    assert too_many.value.status_code == 422
+
+
+def test_all_contract_evidence_turns_disable_background_memory_extraction():
+    source = Path(chat_routes.__file__).read_text(encoding="utf-8")
+
+    assert source.count(
+        "not tool_policy.block_all_tool_calls and not bool(contract_context)"
+    ) == 3
 
 
 @pytest.mark.asyncio

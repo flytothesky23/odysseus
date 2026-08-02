@@ -1,6 +1,7 @@
 """Chat routes — /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -29,7 +30,7 @@ from routes.session_routes import _verify_session_owner
 from routes.document_helpers import _owner_session_filter
 from core.database import SessionLocal, get_session_mode, set_session_mode
 from core.database import Session as DBSession, ChatMessage as DBChatMessage
-from core.database import Document as DBDocument, ModelEndpoint
+from core.database import Document as DBDocument, ModelEndpoint, Note as DBNote
 from core.log_safety import redact_url
 from routes.research_routes import _resolve_research_endpoint
 from routes.model_routes import _visible_models
@@ -63,6 +64,64 @@ logger = logging.getLogger(__name__)
 _active_streams: Dict[str, dict] = {}
 
 
+def _resolve_odysseus_note_evidence(owner: str, note_ids: List[str]) -> List[Dict[str, Any]]:
+    """Resolve opaque note ids against the current owner and bound their content."""
+
+    if len(note_ids) > 8:
+        raise HTTPException(422, "Too many Odysseus note sources")
+    unique_ids = list(dict.fromkeys(str(item or "") for item in note_ids))
+    if any(re.fullmatch(r"[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}", item, re.I) is None for item in unique_ids):
+        raise HTTPException(400, "Invalid Odysseus note source")
+    if not unique_ids:
+        return []
+    db = SessionLocal()
+    try:
+        rows = db.query(DBNote).filter(DBNote.id.in_(unique_ids)).all()
+        by_id = {str(row.id): row for row in rows}
+        resolved = []
+        for note_id in unique_ids:
+            row = by_id.get(note_id)
+            if row is None or (owner and str(row.owner or "") != owner):
+                raise HTTPException(404, "Odysseus note source not found")
+            if row.note_type == "todo" and row.items:
+                try:
+                    items = json.loads(row.items)
+                except (TypeError, ValueError):
+                    items = []
+                content = "\n".join(
+                    f"- [{'x' if item.get('done') else ' '}] {str(item.get('text') or '').strip()}"
+                    for item in items if isinstance(item, dict) and str(item.get("text") or "").strip()
+                )
+            else:
+                content = str(row.content or "")
+            # Redact local absolute paths before the note becomes evidence.
+            content = re.sub(r"(?<![/\w])/(?:[^/\s]+/)+[^/\s,;)}\]]+", "[redacted-path]", content)
+            content = re.sub(r"(?<!\w)[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])+[^\\/\s,;)}\]]+", "[redacted-path]", content)
+            content = content[:24_000]
+            fingerprint_payload = json.dumps({
+                "id": note_id,
+                "title": str(row.title or ""),
+                "content": str(row.content or ""),
+                "items": str(row.items or ""),
+                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+            }, ensure_ascii=False, sort_keys=True)
+            resolved.append({
+                "id": note_id,
+                "evidence_type": "odysseus_note",
+                "title": str(row.title or "Memo")[:200],
+                "content": content,
+                "stat_fingerprint": hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest(),
+                "verification_state": "verified",
+            })
+        return resolved
+    finally:
+        db.close()
+
+
+def _is_legal_contract_context(context: Any) -> bool:
+    return bool(context and context.get("analysis_mode") == "legal")
+
+
 def _prepare_contract_review_context(service, *, owner: str, session_id: str, raw: Any):
     """Resolve opaque browser ids into freshly revalidated bounded evidence."""
 
@@ -80,13 +139,19 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
     if not isinstance(payload, dict):
         raise HTTPException(400, "Invalid Contract Review context")
     selected = payload.get("selected_paths") or []
+    note_ids = payload.get("note_ids") or []
     kordoc_ids = payload.get("kordoc_job_ids") or []
     law_ids = payload.get("law_job_ids") or []
     note_scope = payload.get("note_scope")
-    if not all(isinstance(value, list) for value in (selected, kordoc_ids, law_ids)):
+    mode = str(payload.get("mode") or "legal")
+    if mode not in {"general", "legal"}:
+        raise HTTPException(400, "Invalid Contract Review mode")
+    if not all(isinstance(value, list) for value in (selected, note_ids, kordoc_ids, law_ids)):
         raise HTTPException(400, "Invalid Contract Review selection")
-    if len(kordoc_ids) > 20 or len(law_ids) > 20:
+    if len(note_ids) > 8 or len(kordoc_ids) > 20 or len(law_ids) > 20:
         raise HTTPException(422, "Too many Contract Review evidence jobs")
+    if mode != "legal" and law_ids:
+        raise HTTPException(400, "Official legal evidence requires legal mode")
     jobs = getattr(service, "job_manager", None)
     if jobs is None:
         raise HTTPException(503, "Contract Review evidence jobs are unavailable")
@@ -98,6 +163,7 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
     try:
         local_evidence = jobs.completed_evidence(owner, kordoc_ids, kind="kordoc") if kordoc_ids else []
         legal_evidence = jobs.completed_evidence(owner, law_ids, kind="law") if law_ids else []
+        note_evidence = _resolve_odysseus_note_evidence(owner, note_ids)
         return service.build_turn_context(
             owner=owner,
             session_id=session_id,
@@ -107,6 +173,8 @@ def _prepare_contract_review_context(service, *, owner: str, session_id: str, ra
             note_scope=note_scope,
             local_document_evidence=local_evidence,
             official_legal_evidence=legal_evidence,
+            odysseus_note_evidence=note_evidence,
+            analysis_mode=mode,
         )
     except ContractReviewError as exc:
         raise HTTPException(exc.status_code, {"error": exc.code, "message": str(exc)}) from exc
@@ -700,9 +768,10 @@ def setup_chat_routes(
             session_id=session,
             raw=chat_request.contract_review_context,
         ) if chat_request.contract_review_context else None
+        legal_contract_context = _is_legal_contract_context(contract_context)
         tool_policy = (
             contract_review_tool_policy()
-            if contract_context
+            if legal_contract_context
             else build_effective_tool_policy(last_user_message=message)
         )
         allow_tool_preprocessing = not tool_policy.block_all_tool_calls
@@ -724,11 +793,11 @@ def setup_chat_routes(
             use_web=use_web,
             time_filter=time_filter,
             webhook_manager=webhook_manager,
-            allow_tool_preprocessing=allow_tool_preprocessing and not bool(contract_context),
-            no_memory=bool(contract_context),
-            use_rag=False if contract_context else None,
+            allow_tool_preprocessing=allow_tool_preprocessing and not legal_contract_context,
+            no_memory=legal_contract_context,
+            use_rag=False if legal_contract_context else None,
             additional_untrusted_context=contract_context,
-            additional_system_prompt=contract_review_system_prompt() if contract_context else None,
+            additional_system_prompt=contract_review_system_prompt() if legal_contract_context else None,
             redact_message_event=bool(contract_context),
         )
 
@@ -767,7 +836,7 @@ def setup_chat_routes(
         _reply_md = {"model": sess.model}
         _reply_for_save = reply
         contract_result = None
-        if contract_context:
+        if legal_contract_context:
             try:
                 contract_result = extract_contract_review_result(
                     reply,
@@ -801,7 +870,7 @@ def setup_chat_routes(
         response: Dict[str, Any] = {"response": _reply_for_save}
         if contract_result:
             response["contract_review_result"] = contract_result
-        elif contract_context:
+        elif legal_contract_context:
             response["contract_review_error"] = _reply_md.get("contract_review_error")
         return response
 
@@ -1087,7 +1156,8 @@ def setup_chat_routes(
             session_id=session,
             raw=contract_review_raw,
         ) if contract_review_raw else None
-        if contract_context:
+        legal_contract_context = _is_legal_contract_context(contract_context)
+        if legal_contract_context:
             # Evidence lookup already happened through the dedicated adapters.
             # The model turn itself is tool-free and must not blend unrelated
             # memory/RAG/research into the review result.
@@ -1100,17 +1170,17 @@ def setup_chat_routes(
             search_context = None
 
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
-        no_memory = str(form_data.get("no_memory", "")).lower() == "true" or bool(contract_context)
+        no_memory = str(form_data.get("no_memory", "")).lower() == "true" or legal_contract_context
         if image_generation_session:
             no_memory = True
             use_rag = "false"
             search_context = None
         pre_context_tool_policy = (
             contract_review_tool_policy()
-            if contract_context
+            if legal_contract_context
             else build_effective_tool_policy(last_user_message=message)
         )
-        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls and not bool(contract_context)
+        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls and not legal_contract_context
 
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
@@ -1134,7 +1204,7 @@ def setup_chat_routes(
             agent_mode=(chat_mode == "agent"),
             allow_tool_preprocessing=allow_tool_preprocessing,
             additional_untrusted_context=contract_context,
-            additional_system_prompt=contract_review_system_prompt() if contract_context else None,
+            additional_system_prompt=contract_review_system_prompt() if legal_contract_context else None,
             redact_message_event=bool(contract_context),
         )
 
@@ -1356,7 +1426,7 @@ def setup_chat_routes(
 
         tool_policy = (
             contract_review_tool_policy()
-            if contract_context
+            if legal_contract_context
             else build_effective_tool_policy(
                 disabled_tools=disabled_tools,
                 last_user_message=message,
@@ -1778,7 +1848,7 @@ def setup_chat_routes(
                             if full_response:
                                 _metrics_to_save = dict(last_metrics or {})
                                 _response_to_save = full_response
-                                if contract_context:
+                                if legal_contract_context:
                                     try:
                                         _contract_result = extract_contract_review_result(
                                             full_response,
@@ -1990,7 +2060,9 @@ def setup_chat_routes(
                                     skills_manager=skills_manager,
                                     owner=_user,
                                     extract_skills=user_requested_agent,
-                                    allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    allow_background_extraction=(
+                                        not tool_policy.block_all_tool_calls and not bool(contract_context)
+                                    ),
                                 )
                             _stream_set(session, status="done")
                             yield chunk

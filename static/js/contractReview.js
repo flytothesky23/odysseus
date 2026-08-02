@@ -11,12 +11,15 @@ import {
   updateSelectedPathSelection,
 } from './contractReviewState.js';
 import { isPathIncludedByScope } from './contractReviewExplorerState.js';
+import { extractLegalLookup } from './contractReviewLegal.js';
 
 let API_BASE = '';
 let modal = null;
 let indexedNotes = [];
 let visibleNotes = [];
 let activeJobId = null;
+let activeLawJobId = null;
+let sourceRenderGeneration = 0;
 
 function loadState() {
   return sanitizePersistedState(Storage.getJSON(KEYS.CONTRACT_REVIEW, {}));
@@ -32,8 +35,98 @@ function saveState(next) {
 
 function syncIndicator(state = loadState()) {
   const button = document.getElementById('overflow-contract-review-btn');
-  if (button) button.classList.toggle('active', state.active);
+  if (button) {
+    button.classList.toggle('active', state.law_enabled);
+    button.setAttribute('aria-pressed', state.law_enabled ? 'true' : 'false');
+  }
   try { document.dispatchEvent(new CustomEvent('overflow-state-change')); } catch (_) {}
+}
+
+function sourceLabel(path) {
+  return String(path || '').split('/').pop()?.replace(/\.md$/i, '') || 'Vault 노트';
+}
+
+async function noteTitle(id) {
+  try {
+    const response = await fetch(`${API_BASE}/api/notes/${encodeURIComponent(id)}`, {
+      credentials: 'same-origin',
+    });
+    if (!response.ok) return '메모';
+    const note = await response.json();
+    return String(note.title || '메모').trim().slice(0, 80) || '메모';
+  } catch (_) {
+    return '메모';
+  }
+}
+
+export async function renderPinnedSources(state = loadState()) {
+  const host = document.getElementById('pinned-tools-bar');
+  if (!host) return;
+  const generation = ++sourceRenderGeneration;
+  const pinnedVaultPaths = state.vault_active ? state.selected_paths : [];
+  const vaultPills = pinnedVaultPaths.map(path => `
+    <button type="button" class="chat-source-chip" data-remove-vault-source="${uiModule.esc(path)}" title="Vault 근거 해제">
+      <span>Vault · ${uiModule.esc(sourceLabel(path))}</span><span aria-hidden="true">×</span>
+    </button>`).join('');
+  const notePills = state.note_ids.map(id => `
+    <button type="button" class="chat-source-chip" data-remove-note-source="${uiModule.esc(id)}" title="메모 근거 해제">
+      <span data-note-source-title="${uiModule.esc(id)}">메모 · 불러오는 중…</span><span aria-hidden="true">×</span>
+    </button>`).join('');
+  const lawPill = state.law_enabled ? `
+    <button type="button" class="chat-source-chip chat-source-chip-law" data-toggle-law-source aria-pressed="true" title="법률 검증 끄기">
+      <span>${activeLawJobId ? '법률 검증 중…' : '법률 검증'}</span><span aria-hidden="true">×</span>
+    </button>` : '';
+  const similar = pinnedVaultPaths.length ? `
+    <button type="button" class="chat-source-action" data-find-similar-source>유사 노트 찾기</button>` : '';
+  host.innerHTML = vaultPills || notePills || lawPill
+    ? `<div class="chat-source-chips" aria-label="고정된 분석 근거">${vaultPills}${notePills}${lawPill}${similar}</div>`
+    : '';
+  host.querySelectorAll('[data-remove-vault-source]').forEach(button => button.addEventListener('click', () => {
+    const current = loadState();
+    const selected = current.selected_paths.filter(path => path !== button.dataset.removeVaultSource);
+    saveState({
+      ...current,
+      selected_paths: selected,
+      vault_active: selected.length > 0,
+      active: Boolean(selected.length || current.note_ids.length || current.law_enabled),
+    });
+  }));
+  host.querySelectorAll('[data-remove-note-source]').forEach(button => button.addEventListener('click', () => {
+    const current = loadState();
+    const noteIds = current.note_ids.filter(id => id !== button.dataset.removeNoteSource);
+    saveState({ ...current, note_ids: noteIds, active: Boolean(current.selected_paths.length || noteIds.length || current.law_enabled) });
+  }));
+  host.querySelector('[data-toggle-law-source]')?.addEventListener('click', () => toggleLawVerification(false));
+  host.querySelector('[data-find-similar-source]')?.addEventListener('click', () => {
+    const current = loadState();
+    document.dispatchEvent(new CustomEvent('contract-review-find-similar', {
+      detail: { query: sourceLabel(current.vault_active ? current.selected_paths[0] : '') },
+    }));
+  });
+  await Promise.all(state.note_ids.map(async id => {
+    const title = await noteTitle(id);
+    if (generation !== sourceRenderGeneration) return;
+    const target = host.querySelector(`[data-note-source-title="${CSS.escape(id)}"]`);
+    if (target) target.textContent = `메모 · ${title}`;
+  }));
+}
+
+function toggleLawVerification(force) {
+  const current = loadState();
+  const enabled = typeof force === 'boolean' ? force : !current.law_enabled;
+  if (!enabled && activeLawJobId) {
+    api(`/jobs/${encodeURIComponent(activeLawJobId)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  saveState({
+    ...current,
+    active: enabled || (current.vault_active && current.selected_paths.length > 0) || current.note_ids.length > 0,
+    mode: enabled ? 'legal' : 'general',
+    law_enabled: enabled,
+    law_job_ids: enabled ? current.law_job_ids : [],
+  });
+  uiModule.showToast?.(enabled
+    ? '법률 검증이 켜졌습니다. 질문에 정확한 법령명 또는 사건번호를 포함하세요.'
+    : '법률 검증을 껐습니다.');
 }
 
 async function api(path, options = {}) {
@@ -162,11 +255,10 @@ async function indexVault() {
     ? previous.note_scope
     : { default_included: true, rules: [] };
   saveState({
-    active: false, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
+    ...previous,
+    active: Boolean(previous.active && (previous.note_ids.length || previous.law_enabled)),
+    snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
     vault_path: vaultPath, note_scope: noteScope, selected_paths: [],
-    kordoc_job_ids: previous.kordoc_job_ids, law_job_ids: previous.law_job_ids,
-    mcp_runtime_id: previous.mcp_runtime_id,
-    mcp_runtime_stale: previous.mcp_runtime_stale,
   });
   document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
     detail: { notes: indexedNotes, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id },
@@ -222,6 +314,78 @@ async function pollJob(job) {
     throw error;
   }
   return current;
+}
+
+async function pollDetachedJob(job) {
+  activeLawJobId = job.id;
+  renderPinnedSources();
+  let current = job;
+  try {
+    while (['admitted', 'running', 'cancelling'].includes(current.state)) {
+      await new Promise(resolve => setTimeout(resolve, 350));
+      current = await api(`/jobs/${encodeURIComponent(job.id)}`);
+    }
+  } finally {
+    activeLawJobId = null;
+    renderPinnedSources();
+  }
+  if (current.state === 'cancelled') {
+    const error = new Error('법률 근거 조회가 취소되었습니다.');
+    error.code = 'job_cancelled';
+    throw error;
+  }
+  if (current.state !== 'completed') {
+    const error = new Error(current.message || '법률 근거 조회가 실패했습니다.');
+    error.code = current.error || 'job_failed';
+    throw error;
+  }
+  return current;
+}
+
+export async function prepareChatEvidence(message) {
+  const state = loadState();
+  if (!state.law_enabled) return;
+  const lookup = extractLegalLookup(message);
+  if (!lookup && state.law_job_ids.length) {
+    saveState({ ...state, active: true, mode: 'legal' });
+    return;
+  }
+  if (!lookup) {
+    const error = new Error('법률 검증 질문에는 정확한 법령명(예: 민법, 근로기준법) 또는 사건번호를 포함하세요.');
+    error.code = 'legal_identity_required';
+    throw error;
+  }
+  const profile = await refreshMcpRuntime();
+  if (!profile.inventory_available) {
+    const error = new Error('MCP 도구 목록을 확인할 수 없어 법률 검증을 시작하지 않았습니다.');
+    error.code = 'mcp_inventory_unavailable';
+    throw error;
+  }
+  const servers = Array.isArray(profile.korean_law_servers) ? profile.korean_law_servers : [];
+  const server = servers.find(item => Array.isArray(item.tools) && item.tools.includes(lookup.tool));
+  if (!server) {
+    const error = new Error('연결된 Korean Law MCP에서 필요한 읽기 전용 도구를 찾지 못했습니다.');
+    error.code = 'mcp_tool_unavailable';
+    throw error;
+  }
+  const argumentsPayload = lookup.tool === 'search_decisions'
+    ? { domain: 'precedent', query: lookup.query, display: 5 }
+    : { query: lookup.query, display: 5 };
+  const started = await api('/law/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ server_id: server.id, tool: lookup.tool, arguments: argumentsPayload }),
+  });
+  const completed = await pollDetachedJob(started);
+  const current = loadState();
+  saveState({
+    ...current,
+    active: true,
+    mode: 'legal',
+    law_enabled: true,
+    law_job_ids: [...current.law_job_ids, completed.id],
+    mcp_runtime_id: completed.mcp_runtime_id,
+    mcp_runtime_stale: false,
+  });
 }
 
 async function parseDocument() {
@@ -382,8 +546,10 @@ function getModal() {
 
 export function getContractReviewChatContext() {
   const state = loadState();
-  const hasEvidence = state.selected_paths.length || state.kordoc_job_ids.length || state.law_job_ids.length;
-  if (!state.active || !state.snapshot_id || !state.vault_id || !hasEvidence) return null;
+  const hasVault = state.vault_active && state.selected_paths.length > 0;
+  const hasEvidence = hasVault || state.note_ids.length || state.kordoc_job_ids.length || state.law_job_ids.length;
+  if (!state.active || !hasEvidence) return null;
+  if (hasVault && (!state.snapshot_id || !state.vault_id)) return null;
   return buildContractReviewChatContext(state);
 }
 
@@ -404,11 +570,27 @@ export function closeContractReview() {
 export function initContractReview(apiBase = '') {
   API_BASE = apiBase;
   syncIndicator();
+  renderPinnedSources();
   refreshMcpRuntime().catch(() => {});
   document.addEventListener('contract-review-state-change', event => {
     syncIndicator(event.detail);
+    renderPinnedSources(event.detail);
   });
-  document.getElementById('overflow-contract-review-btn')?.addEventListener('click', openContractReview);
+  document.getElementById('overflow-contract-review-btn')?.addEventListener('click', () => toggleLawVerification());
+  document.addEventListener('contract-review-toggle-note-source', event => {
+    const id = String(event.detail?.id || '');
+    const current = loadState();
+    const selected = new Set(current.note_ids);
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    const noteIds = [...selected];
+    saveState({
+      ...current,
+      active: Boolean((current.vault_active && current.selected_paths.length) || noteIds.length || current.law_enabled),
+      mode: current.law_enabled ? 'legal' : 'general',
+      note_ids: noteIds,
+    });
+  });
   document.addEventListener('contract-review-vault-indexed', event => {
     indexedNotes = Array.isArray(event.detail?.notes) ? event.detail.notes : indexedNotes;
     visibleNotes = indexedNotes;
@@ -416,4 +598,11 @@ export function initContractReview(apiBase = '') {
   });
 }
 
-export default { initContractReview, openContractReview, closeContractReview, getContractReviewChatContext };
+export default {
+  initContractReview,
+  openContractReview,
+  closeContractReview,
+  getContractReviewChatContext,
+  prepareChatEvidence,
+  renderPinnedSources,
+};
