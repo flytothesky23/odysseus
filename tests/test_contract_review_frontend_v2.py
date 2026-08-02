@@ -74,6 +74,44 @@ def test_renderer_requires_v2_schema_and_labels_estimated_usage():
     assert "Official legal evidence" in html
 
 
+def test_renderer_handles_actual_codex_interpretation_and_follow_up_objects():
+    renderer_url = (ROOT / "static/js/contractReviewRenderer.js").as_uri()
+    payload = {
+        "schema_version": "contract-review.v2", "generated_at": "2026-08-02T17:00:00+09:00",
+        "usage": {"source": "actual", "input_tokens": 2180, "output_tokens": 1139},
+        "blocks": {
+            "review_summary": {"content": "두 가지 위험이 확인되었습니다."},
+            "local_document_evidence": [], "vault_note_evidence": [],
+            "official_legal_evidence": [],
+            "model_interpretation": {
+                "items": [{"risk": "검수 완료 시점 불명확", "analysis": "기산점 분쟁 위험"}],
+                "evidence_ids": [],
+            },
+            "uncertainty_and_follow_up": [{
+                "issue": "직접 적용 법령 미확인",
+                "detail": "공식 근거의 직접성이 제한됨",
+                "follow_up": "현행 조문 추가 확인",
+            }],
+        },
+    }
+    data = _node(f"""
+      import {{ renderContractReviewResult }} from {json.dumps(renderer_url)};
+      const html = renderContractReviewResult({json.dumps(payload, ensure_ascii=False)});
+      console.log(JSON.stringify({{html}}));
+    """)
+    html = data["html"]
+    assert "검수 완료 시점 불명확" in html
+    assert "기산점 분쟁 위험" in html
+    assert "현행 조문 추가 확인" in html
+    assert "[object Object]" not in html
+
+
+def test_contract_review_chat_progress_does_not_claim_web_search():
+    source = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+    assert "const hasContractReviewContext = !!contractReviewContext;" in source
+    assert "el('web-toggle').checked && !_isAgent && !hasContractReviewContext" in source
+
+
 def test_chat_renderer_and_live_chat_reference_contract_renderer():
     renderer = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
     chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")

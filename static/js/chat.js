@@ -1720,6 +1720,7 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
         fd.append('preset_id', presetsModule.getSelectedPreset());
       }
       const contractReviewContext = contractReviewModule.getContractReviewChatContext();
+      const hasContractReviewContext = !!contractReviewContext;
       if (contractReviewContext) {
         fd.append('contract_review_context', JSON.stringify(contractReviewContext));
         // Evidence lookup happens through dedicated server adapters before the
@@ -1782,7 +1783,7 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
 
       let loadingText = 'Initializing...';
 
-      if (el('web-toggle').checked && !_isAgent) {
+      if (el('web-toggle').checked && !_isAgent && !hasContractReviewContext) {
         const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
         loadingText = `Searching via ${_searchLabel}...<br>
                        <span style="font-size: 0.9em; opacity: 0.8;">
@@ -1812,7 +1813,7 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
       spinner.start();
       
       // Update spinner message based on mode
-      if (el('web-toggle').checked && !_isAgent) {
+      if (el('web-toggle').checked && !_isAgent && !hasContractReviewContext) {
         spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
         setTimeout(() => spinner.updateMessage('Processing results'), 1500);
       } else if (el('research-toggle').checked) {

@@ -20,14 +20,17 @@ function renderValue(value) {
     if (!value.length) return '<p class="contract-review-empty">No verified evidence.</p>';
     return `<ul>${value.map(item => {
       if (!item || typeof item !== 'object') return `<li>${esc(item)}</li>`;
-      const label = item.title || item.path || item.citation_id || item.id || 'Evidence';
+      const label = item.title || item.path || item.citation_id || item.risk || item.issue || item.id || 'Evidence';
       const state = item.verification_state ? `<span class="contract-review-proof">${esc(item.verification_state)}</span>` : '';
-      const detail = item.text || item.content || item.excerpt || '';
-      return `<li><div><strong>${esc(label)}</strong>${state}</div>${detail ? `<p>${esc(detail)}</p>` : ''}</li>`;
+      const detail = item.text || item.content || item.excerpt || item.analysis || item.detail || '';
+      const followUp = item.follow_up ? `<p><strong>Follow-up:</strong> ${esc(item.follow_up)}</p>` : '';
+      return `<li><div><strong>${esc(label)}</strong>${state}</div>${detail ? `<p>${esc(detail)}</p>` : ''}${followUp}</li>`;
     }).join('')}</ul>`;
   }
   if (value && typeof value === 'object') {
     if (value.text) return `<p>${esc(value.text)}</p>`;
+    if (value.content) return `<p>${esc(value.content)}</p>`;
+    if (Array.isArray(value.items)) return renderValue(value.items);
     return `<dl>${Object.entries(value).map(([key, item]) => `<dt>${esc(key)}</dt><dd>${esc(item)}</dd>`).join('')}</dl>`;
   }
   return `<p>${esc(value || 'No content.')}</p>`;

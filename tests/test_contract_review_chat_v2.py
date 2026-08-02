@@ -212,3 +212,90 @@ def test_model_interpretation_cannot_cite_an_invented_evidence_id():
             },
         )
     assert exc.value.code == "unsupported_evidence"
+
+
+def test_actual_codex_interpretation_array_is_normalized_without_inventing_citations():
+    """The real Codex provider may express multiple interpretations as an array."""
+
+    local_id = "local-verified"
+    note_id = "note-verified"
+    law_id = "law-verified"
+    payload = {
+        "schema_version": "contract-review.v2",
+        "review_summary": {"content": "Two bounded risks were found."},
+        "local_document_evidence": [{
+            "id": local_id,
+            "evidence_type": "local_document",
+            "path": "documents/contract.pdf",
+            "verification_state": "verified",
+            "content": "Payment is due within thirty days after acceptance.",
+        }],
+        "vault_note_evidence": [{
+            "id": note_id,
+            "evidence_type": "vault_note",
+            "path": "Agreements/Main.md",
+            "verification_state": "verified",
+            "content": "검수 완료 후 삼십 일 이내에 대금을 지급한다.",
+        }],
+        "official_legal_evidence": [{
+            "id": law_id,
+            "evidence_type": "official_legal",
+            "source": "law.go.kr",
+            "verification_state": "verified",
+            "citation_id": "law.go.kr · 대한민국헌법 · MST 61603",
+            "content": "법령명: 대한민국헌법",
+        }],
+        "model_interpretation": [
+            {"risk": "검수 완료 시점 불명확", "analysis": "기산점 분쟁 위험이 있다."},
+            {"risk": "지급 지연 보호수단 부족", "analysis": "후속 조치를 확인해야 한다."},
+        ],
+        "uncertainty_and_follow_up": [{
+            "issue": "직접 적용 법령 미확인",
+            "detail": "제공된 공식 근거의 직접성이 제한된다.",
+            "follow_up": "관련 현행 조문을 추가 확인한다.",
+        }],
+    }
+    result = extract_contract_review_result(
+        "```contract-review-result\n" + json.dumps(payload, ensure_ascii=False) + "\n```",
+        session_id="session-actual-codex",
+        evidence_fingerprint="e" * 64,
+        metrics={"usage_source": "actual", "input_tokens": 2180, "output_tokens": 1139},
+        evidence_context={
+            "local_document_evidence": [payload["local_document_evidence"][0]],
+            "vault_note_evidence": [payload["vault_note_evidence"][0]],
+            "official_legal_evidence": [payload["official_legal_evidence"][0]],
+        },
+    )
+
+    interpretation = result["blocks"]["model_interpretation"]
+    assert interpretation["items"] == payload["model_interpretation"]
+    assert interpretation["evidence_ids"] == []
+    assert result["usage"] == {"source": "actual", "input_tokens": 2180, "output_tokens": 1139}
+
+
+def test_interpretation_array_still_rejects_an_invented_item_evidence_id():
+    payload = {
+        "schema_version": "contract-review.v2",
+        "review_summary": {"text": "Summary"},
+        "local_document_evidence": [],
+        "vault_note_evidence": [],
+        "official_legal_evidence": [],
+        "model_interpretation": [{
+            "risk": "Unsupported",
+            "analysis": "Invented citation",
+            "evidence_ids": ["invented"],
+        }],
+        "uncertainty_and_follow_up": ["Verify"],
+    }
+    with pytest.raises(ContractReviewError) as exc:
+        extract_contract_review_result(
+            "```contract-review-result\n" + json.dumps(payload) + "\n```",
+            session_id="session-1",
+            evidence_fingerprint="e" * 64,
+            evidence_context={
+                "local_document_evidence": [],
+                "vault_note_evidence": [],
+                "official_legal_evidence": [],
+            },
+        )
+    assert exc.value.code == "unsupported_evidence"
