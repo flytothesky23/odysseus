@@ -397,3 +397,10 @@ def test_contract_review_clears_stale_mcp_output_before_each_new_job():
     source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
     assert "modal.querySelector('#contract-review-parser-output').textContent = '';" in source
     assert "modal.querySelector('#contract-review-law-output').textContent = '';" in source
+
+
+def test_reopening_vault_explorer_does_not_reindex_and_deactivate_live_evidence():
+    source = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
+    assert (
+        "state.snapshot_id && state.vault_id && !indexedNotes.length" in source
+    )

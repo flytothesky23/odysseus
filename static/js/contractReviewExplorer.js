@@ -484,7 +484,7 @@ export function openPanel() {
   bringToFront();
   wirePanel();
   renderTree();
-  if (workspaceModule.getWorkspace() && state.snapshot_id && state.vault_id) {
+  if (workspaceModule.getWorkspace() && state.snapshot_id && state.vault_id && !indexedNotes.length) {
     indexVault({ preserveSelection: true }).catch(handleIndexError);
   }
 }
