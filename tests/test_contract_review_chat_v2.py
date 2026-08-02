@@ -151,6 +151,15 @@ def test_all_contract_evidence_turns_disable_background_memory_extraction():
     ) == 3
 
 
+def test_all_pinned_evidence_turns_exclude_unrelated_memory_and_rag():
+    source = Path(chat_routes.__file__).read_text(encoding="utf-8")
+
+    assert "no_memory=bool(contract_context)" in source
+    assert "use_rag=False if contract_context else None" in source
+    assert 'or bool(contract_context)' in source
+    assert 'if contract_context:\n            use_rag = "false"' in source
+
+
 @pytest.mark.asyncio
 async def test_contract_evidence_enters_existing_context_before_compaction(monkeypatch):
     captured = {}

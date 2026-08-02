@@ -794,8 +794,8 @@ def setup_chat_routes(
             time_filter=time_filter,
             webhook_manager=webhook_manager,
             allow_tool_preprocessing=allow_tool_preprocessing and not legal_contract_context,
-            no_memory=legal_contract_context,
-            use_rag=False if legal_contract_context else None,
+            no_memory=bool(contract_context),
+            use_rag=False if contract_context else None,
             additional_untrusted_context=contract_context,
             additional_system_prompt=contract_review_system_prompt() if legal_contract_context else None,
             redact_message_event=bool(contract_context),
@@ -1169,8 +1169,11 @@ def setup_chat_routes(
             use_rag = "false"
             search_context = None
 
+        if contract_context:
+            use_rag = "false"
+
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
-        no_memory = str(form_data.get("no_memory", "")).lower() == "true" or legal_contract_context
+        no_memory = str(form_data.get("no_memory", "")).lower() == "true" or bool(contract_context)
         if image_generation_session:
             no_memory = True
             use_rag = "false"
