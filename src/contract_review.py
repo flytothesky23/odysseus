@@ -1431,7 +1431,7 @@ def _bind_result_to_evidence_context(
     normalized = dict(result)
     blocks = OrderedDict((key, value) for key, value in result["blocks"].items())
     identity_fields = (
-        "id", "evidence_type", "path", "source", "verification_state",
+        "id", "evidence_type", "path", "source", "citation_id", "verification_state",
         "stat_fingerprint", "descriptor_fingerprint", "tool",
     )
     for block_name, sources in block_sources.items():

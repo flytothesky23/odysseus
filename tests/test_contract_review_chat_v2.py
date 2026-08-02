@@ -299,3 +299,47 @@ def test_interpretation_array_still_rejects_an_invented_item_evidence_id():
             },
         )
     assert exc.value.code == "unsupported_evidence"
+
+
+def test_official_citation_identity_is_server_owned_when_model_omits_or_changes_it():
+    canonical = {
+        "id": "law-verified",
+        "evidence_type": "official_legal",
+        "source": "law.go.kr",
+        "citation_id": "law.go.kr · 대한민국헌법 · MST 61603",
+        "verification_state": "verified",
+    }
+    payload = {
+        "schema_version": "contract-review.v2",
+        "review_summary": {"text": "Summary"},
+        "local_document_evidence": [],
+        "vault_note_evidence": [],
+        "official_legal_evidence": [{
+            key: value for key, value in canonical.items() if key != "citation_id"
+        }],
+        "model_interpretation": {"text": "Interpretation", "evidence_ids": [canonical["id"]]},
+        "uncertainty_and_follow_up": ["Verify"],
+    }
+    kwargs = {
+        "session_id": "session-1",
+        "evidence_fingerprint": "e" * 64,
+        "evidence_context": {
+            "local_document_evidence": [],
+            "vault_note_evidence": [],
+            "official_legal_evidence": [canonical],
+        },
+    }
+
+    result = extract_contract_review_result(
+        "```contract-review-result\n" + json.dumps(payload, ensure_ascii=False) + "\n```",
+        **kwargs,
+    )
+    assert result["blocks"]["official_legal_evidence"][0]["citation_id"] == canonical["citation_id"]
+
+    payload["official_legal_evidence"][0]["citation_id"] = "law.go.kr · forged · MST 0"
+    with pytest.raises(ContractReviewError) as exc:
+        extract_contract_review_result(
+            "```contract-review-result\n" + json.dumps(payload, ensure_ascii=False) + "\n```",
+            **kwargs,
+        )
+    assert exc.value.code == "unsupported_evidence"
