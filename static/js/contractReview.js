@@ -25,6 +25,7 @@ function saveState(next) {
   const safe = sanitizePersistedState(next);
   Storage.setJSON(KEYS.CONTRACT_REVIEW, safe);
   syncIndicator(safe);
+  document.dispatchEvent(new CustomEvent('contract-review-state-change', { detail: safe }));
   return safe;
 }
 
@@ -133,6 +134,9 @@ async function indexVault() {
     active: true, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id,
     vault_path: vaultPath, selected_paths: [], kordoc_job_ids: [], law_job_ids: [],
   });
+  document.dispatchEvent(new CustomEvent('contract-review-vault-indexed', {
+    detail: { notes: indexedNotes, snapshot_id: indexed.snapshot_id, vault_id: indexed.vault_id },
+  }));
   renderNotes(visibleNotes);
   setStatus(`${indexed.note_count}개 노트 metadata 인덱싱 완료 · 본문 읽기 0회`, 'ok');
 }
@@ -332,6 +336,11 @@ export function initContractReview(apiBase = '') {
   API_BASE = apiBase;
   syncIndicator();
   document.getElementById('overflow-contract-review-btn')?.addEventListener('click', openContractReview);
+  document.addEventListener('contract-review-vault-indexed', event => {
+    indexedNotes = Array.isArray(event.detail?.notes) ? event.detail.notes : indexedNotes;
+    visibleNotes = indexedNotes;
+    if (modal) renderNotes(visibleNotes);
+  });
 }
 
 export default { initContractReview, openContractReview, closeContractReview, getContractReviewChatContext };

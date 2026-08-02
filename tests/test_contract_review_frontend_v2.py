@@ -46,6 +46,67 @@ def test_note_selection_survives_metadata_search_result_changes():
     assert data["deselected"] == ["amendments/Liability.md"]
 
 
+def test_vault_explorer_builds_nested_tree_and_searches_all_safe_metadata_fields():
+    explorer_url = (ROOT / "static/js/contractReviewExplorerState.js").as_uri()
+    data = _node(f"""
+      import {{ buildVaultTree, filterVaultNotes }} from {json.dumps(explorer_url)};
+      const notes = [
+        {{path: '10_업무체계/계약/2026 계약.md', filename: '2026 계약.md', title: '공사 도급계약', aliases: ['지수공장']}},
+        {{path: '00_System/안내.md', filename: '안내.md', title: 'Vault 안내', aliases: []}},
+        {{path: '10_업무체계/계약/2025 계약.md', filename: '2025 계약.md', title: '이전 계약', aliases: []}},
+      ];
+      const tree = buildVaultTree(notes);
+      console.log(JSON.stringify({{
+        rootFolders: tree.folders.map(folder => folder.name),
+        contractNotes: tree.folders[1].folders[0].notes.map(note => note.filename),
+        filename: filterVaultNotes(notes, '2026 계약.md').map(note => note.path),
+        title: filterVaultNotes(notes, '공사 도급계약').map(note => note.path),
+        korean: filterVaultNotes(notes, '지수공장').map(note => note.path),
+        path: filterVaultNotes(notes, '10_업무체계').map(note => note.path),
+      }}));
+    """)
+    assert data["rootFolders"] == ["00_System", "10_업무체계"]
+    assert data["contractNotes"] == ["2025 계약.md", "2026 계약.md"]
+    assert data["filename"] == ["10_업무체계/계약/2026 계약.md"]
+    assert data["title"] == ["10_업무체계/계약/2026 계약.md"]
+    assert data["korean"] == ["10_업무체계/계약/2026 계약.md"]
+    assert data["path"] == [
+        "10_업무체계/계약/2025 계약.md",
+        "10_업무체계/계약/2026 계약.md",
+    ]
+
+
+def test_vault_explorer_folder_selection_is_tri_state_and_never_silently_exceeds_chat_cap():
+    explorer_url = (ROOT / "static/js/contractReviewExplorerState.js").as_uri()
+    data = _node(f"""
+      import {{ folderSelectionState, updateBoundedSelection }} from {json.dumps(explorer_url)};
+      const paths = Array.from({{length: 10}}, (_, i) => `Folder/note-${{i}}.md`);
+      const added = updateBoundedSelection([], paths, true, 8);
+      const mixed = folderSelectionState(paths, added.selected_paths);
+      const cleared = updateBoundedSelection(added.selected_paths, paths, false, 8);
+      console.log(JSON.stringify({{added, mixed, cleared}}));
+    """)
+    assert len(data["added"]["selected_paths"]) == 8
+    assert data["added"]["rejected_count"] == 2
+    assert data["mixed"] == {"state": "mixed", "selected": 8, "total": 10}
+    assert data["cleared"] == {"selected_paths": [], "rejected_count": 0}
+
+
+def test_vault_explorer_is_a_sidebar_tool_opening_a_notes_style_right_panel():
+    html = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    explorer = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
+    manager = (ROOT / "static/js/modalManager.js").read_text(encoding="utf-8")
+    assert 'id="tool-vault-explorer-btn"' in html
+    assert 'id="rail-vault-explorer"' in html
+    assert "import contractReviewExplorerModule from './js/contractReviewExplorer.js'" in app
+    assert "'rail-vault-explorer': 'tool-vault-explorer-btn'" in app
+    assert "contractReviewExplorerModule.togglePanel()" in app
+    assert "notes-pane vault-explorer-pane" in explorer
+    assert "applyEdgeDock(pane, 'right')" in explorer
+    assert "vault-explorer-panel" in manager
+
+
 def test_precedent_search_is_scoped_to_the_verified_precedent_domain():
     source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
     assert "{ domain: 'precedent', query, display: 5 }" in source

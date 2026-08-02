@@ -6,6 +6,7 @@ import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
 import contractReviewModule from './js/contractReview.js';
+import contractReviewExplorerModule from './js/contractReviewExplorer.js';
 import fileHandlerModule from './js/fileHandler.js';
 import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
@@ -170,6 +171,7 @@ function initRailHoverLabels() {
     'rail-gallery': 'Gallery',
     'rail-archive': 'Library',
     'rail-memory': 'Brain',
+    'rail-vault-explorer': 'Explorer',
     'rail-notes': 'Notes',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
@@ -1083,8 +1085,22 @@ function initializeEventListeners() {
   if (toolNotesBtn) {
     toolNotesBtn.addEventListener('click', () => {
       if (notesModule) {
+        if (!notesModule.isPanelOpen() && contractReviewExplorerModule.isPanelOpen()) {
+          contractReviewExplorerModule.closePanel();
+        }
         notesModule.togglePanel();
       }
+    });
+  }
+
+  // Obsidian Vault Explorer shares the right-side workspace dock with Notes.
+  const toolVaultExplorerBtn = el('tool-vault-explorer-btn');
+  if (toolVaultExplorerBtn) {
+    toolVaultExplorerBtn.addEventListener('click', () => {
+      if (!contractReviewExplorerModule.isPanelOpen() && notesModule?.isPanelOpen()) {
+        notesModule.closePanel();
+      }
+      contractReviewExplorerModule.togglePanel();
     });
   }
   // Refresh notes due-reminder badge on load and every 5 minutes
@@ -1215,6 +1231,7 @@ function initializeEventListeners() {
     '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
+    '/explorer': () => document.getElementById('tool-vault-explorer-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
   };
   const _opener = _routeOpen[urlPath];
@@ -1955,6 +1972,7 @@ function initializeEventListeners() {
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
   try { workspaceModule.initWorkspace(); } catch (_) {}
   try { contractReviewModule.initContractReview(API_BASE); } catch (_) {}
+  try { contractReviewExplorerModule.initContractReviewExplorer(API_BASE); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
   function bringOpenDocumentToFrontOnMobile() {
@@ -2729,6 +2747,7 @@ function initializeEventListeners() {
     'tool-research':       '#tool-research-btn',
     'tool-gallery':        '#tool-gallery-btn',
     'tool-library':        '#tool-library-btn',
+    'tool-vault-explorer': '#tool-vault-explorer-btn',
     'tool-memory':         '#tool-memory-btn',
     'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
@@ -3772,6 +3791,7 @@ function startOdysseusApp() {
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
     'rail-calendar':  'tool-calendar-btn',
+    'rail-vault-explorer': 'tool-vault-explorer-btn',
     'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',
     'rail-theme':     'tool-theme-btn',

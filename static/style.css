@@ -41350,3 +41350,313 @@ body.theme-frosted .modal {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
 }
+
+/* ── Contract Review · Obsidian Vault Explorer ─────────────────────────── */
+.vault-explorer-pane {
+  min-width: 320px;
+  color: var(--fg);
+}
+.vault-explorer-header .notes-pane-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent, var(--red));
+}
+.vault-explorer-readonly {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 26%, var(--border));
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--fg) 56%, transparent);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.vault-explorer-rootbar {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.85fr) minmax(92px, 1fr) 32px;
+  gap: 6px;
+  padding: 8px 10px 4px;
+}
+.vault-explorer-rootbar button,
+.vault-explorer-rootbar input,
+.vault-explorer-searchbar,
+.vault-explorer-scope-actions button {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.vault-explorer-rootbar button,
+.vault-explorer-scope-actions button {
+  cursor: pointer;
+}
+.vault-explorer-root-btn {
+  min-width: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 10px !important;
+}
+.vault-explorer-root-btn span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-explorer-rootbar input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 6px;
+  outline: none;
+  font-size: 10px;
+}
+.vault-explorer-rootbar input:focus,
+.vault-explorer-searchbar:focus-within {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 62%, var(--border));
+}
+.vault-explorer-icon-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+}
+.vault-explorer-rootbar button:hover,
+.vault-explorer-scope-actions button:hover,
+.vault-explorer-footer button:hover {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 58%, var(--border));
+}
+.vault-explorer-searchbar {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 5px;
+  margin: 6px 10px 5px;
+  padding: 0 5px 0 9px;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--fg) 52%, transparent);
+}
+.vault-explorer-searchbar input {
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+}
+.vault-explorer-searchbar button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+}
+.vault-explorer-meta {
+  padding: 1px 12px 7px;
+  border-bottom: 1px dotted var(--border);
+  color: color-mix(in srgb, var(--fg) 52%, transparent);
+  font-size: 9px;
+  letter-spacing: 0.025em;
+}
+.vault-explorer-scope-actions {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-bottom: 1px dotted var(--border);
+}
+.vault-explorer-scope-actions button {
+  height: 25px;
+  padding: 0 7px;
+  border-radius: 5px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.vault-explorer-scope-actions span {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--fg) 44%, transparent);
+  font-size: 8px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-explorer-tree.notes-pane-body {
+  min-height: 0;
+  gap: 0;
+  padding: 6px 7px 16px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--border) 28%, transparent) 1px, transparent 1px) 18px 0 / 18px 100%,
+    var(--panel);
+}
+.vault-explorer-tree ul {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.vault-explorer-folder-row,
+.vault-explorer-note-row {
+  --tree-indent: calc((var(--tree-level) - 1) * 14px);
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  color: var(--fg);
+}
+.vault-explorer-folder-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 27px;
+  align-items: center;
+}
+.vault-explorer-folder-row[data-scope-state="mixed"] {
+  background: linear-gradient(90deg, transparent 42%, color-mix(in srgb, var(--accent, var(--red)) 7%, transparent));
+}
+.vault-explorer-folder-toggle {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: calc(12px + var(--tree-indent)) 16px minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  padding: 0 5px 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.vault-explorer-folder-toggle:hover,
+.vault-explorer-note-row:hover {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+.vault-explorer-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(7px + var(--tree-indent));
+  width: 1px;
+  background: color-mix(in srgb, var(--border) 68%, transparent);
+  pointer-events: none;
+}
+.vault-explorer-caret {
+  grid-column: 2;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: color-mix(in srgb, var(--fg) 56%, transparent);
+  transition: transform 120ms ease;
+}
+.vault-explorer-caret.is-expanded { transform: rotate(90deg); }
+.vault-explorer-folder-name {
+  grid-column: 3;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-explorer-folder-toggle small {
+  grid-column: 4;
+  color: color-mix(in srgb, var(--fg) 42%, transparent);
+  font-size: 8px;
+  white-space: nowrap;
+}
+.vault-explorer-folder-row > input,
+.vault-explorer-note-row > input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent, var(--red));
+  cursor: pointer;
+}
+.vault-explorer-folder-row > input {
+  grid-column: 2;
+  justify-self: center;
+}
+.vault-explorer-note-row {
+  display: grid;
+  grid-template-columns: calc(15px + var(--tree-indent)) 18px 20px minmax(0, 1fr);
+  align-items: center;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+.vault-explorer-note-row[data-included="true"] {
+  border-left-color: color-mix(in srgb, var(--accent, var(--red)) 70%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);
+}
+.vault-explorer-note-row > input { grid-column: 2; justify-self: center; z-index: 1; }
+.vault-explorer-note-icon {
+  grid-column: 3;
+  display: grid;
+  place-items: center;
+  color: color-mix(in srgb, var(--fg) 46%, transparent);
+}
+.vault-explorer-note-copy {
+  grid-column: 4;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding-right: 8px;
+  line-height: 1.2;
+}
+.vault-explorer-note-copy strong,
+.vault-explorer-note-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vault-explorer-note-copy strong { font-size: 10.5px; font-weight: 540; }
+.vault-explorer-note-copy small { color: color-mix(in srgb, var(--fg) 38%, transparent); font-size: 7.5px; }
+.vault-explorer-empty {
+  margin: auto;
+  max-width: 300px;
+  padding: 28px 22px;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  font-size: 11px;
+  line-height: 1.65;
+  text-align: center;
+}
+.vault-explorer-status {
+  min-height: 28px;
+  margin: 0;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 52%, transparent);
+  font-size: 9px;
+  line-height: 1.4;
+}
+.vault-explorer-status[data-tone="ok"] { color: var(--green, #50fa7b); }
+.vault-explorer-status[data-tone="warning"] { color: var(--warn, #f0ad4e); }
+.vault-explorer-status[data-tone="error"] { color: var(--red, #e06c75); }
+.vault-explorer-footer button { min-height: 32px; font-size: 10px; }
+.vault-explorer-footer #vault-explorer-use-chat { flex: 1.35; }
+
+@media (max-width: 768px) {
+  body.vault-explorer-view .vault-explorer-pane {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    min-width: 0;
+    max-width: 100% !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 14px 14px 0 0 !important;
+    transform: none !important;
+  }
+  body.vault-explorer-view .chat-container { display: none; }
+  .vault-explorer-rootbar { grid-template-columns: minmax(105px, .8fr) minmax(90px, 1fr) 32px; }
+  .vault-explorer-readonly { display: none; }
+}
