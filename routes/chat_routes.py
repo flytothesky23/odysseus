@@ -50,11 +50,59 @@ from src.tool_policy import (
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
 )
+from src.contract_review import (
+    ContractReviewError,
+    contract_review_system_prompt,
+    contract_review_tool_policy,
+    extract_contract_review_result,
+)
 
 logger = logging.getLogger(__name__)
 
 # Track active streams for partial-save safety net
 _active_streams: Dict[str, dict] = {}
+
+
+def _prepare_contract_review_context(service, *, owner: str, session_id: str, raw: Any):
+    """Resolve opaque browser ids into freshly revalidated bounded evidence."""
+
+    if not raw:
+        return None
+    if service is None:
+        raise HTTPException(503, "Contract Review is unavailable")
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Invalid Contract Review context") from exc
+    else:
+        payload = raw
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid Contract Review context")
+    selected = payload.get("selected_paths") or []
+    kordoc_ids = payload.get("kordoc_job_ids") or []
+    law_ids = payload.get("law_job_ids") or []
+    if not all(isinstance(value, list) for value in (selected, kordoc_ids, law_ids)):
+        raise HTTPException(400, "Invalid Contract Review selection")
+    if len(kordoc_ids) > 20 or len(law_ids) > 20:
+        raise HTTPException(422, "Too many Contract Review evidence jobs")
+    jobs = getattr(service, "job_manager", None)
+    if jobs is None:
+        raise HTTPException(503, "Contract Review evidence jobs are unavailable")
+    try:
+        local_evidence = jobs.completed_evidence(owner, kordoc_ids, kind="kordoc") if kordoc_ids else []
+        legal_evidence = jobs.completed_evidence(owner, law_ids, kind="law") if law_ids else []
+        return service.build_turn_context(
+            owner=owner,
+            session_id=session_id,
+            snapshot_id=str(payload.get("snapshot_id") or ""),
+            vault_id=str(payload.get("vault_id") or ""),
+            selected_paths=selected,
+            local_document_evidence=local_evidence,
+            official_legal_evidence=legal_evidence,
+        )
+    except ContractReviewError as exc:
+        raise HTTPException(exc.status_code, {"error": exc.code, "message": str(exc)}) from exc
 
 
 def _stream_set(session_id: str, **fields) -> None:
@@ -91,7 +139,12 @@ def _last_user_plain_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], current_message: str) -> List[Dict[str, Any]]:
+def _ensure_current_request_is_latest_user(
+    messages: List[Dict[str, Any]],
+    current_message: str,
+    *,
+    redact_log: bool = False,
+) -> List[Dict[str, Any]]:
     """Defensively keep detached streams grounded on the request that created them."""
     current = str(current_message or "").strip()
     if not current:
@@ -99,11 +152,16 @@ def _ensure_current_request_is_latest_user(messages: List[Dict[str, Any]], curre
     latest = _last_user_plain_text(messages).strip()
     if latest == current or current in latest or latest in current:
         return messages
-    logger.warning(
-        "[chat_stream] latest user context mismatch; appending current request for model call. latest=%r current=%r",
-        latest[:120],
-        current[:120],
-    )
+    if redact_log:
+        logger.warning(
+            "[chat_stream] latest sensitive user context mismatch; appending the current request without logging content."
+        )
+    else:
+        logger.warning(
+            "[chat_stream] latest user context mismatch; appending current request for model call. latest=%r current=%r",
+            latest[:120],
+            current[:120],
+        )
     repaired = list(messages or [])
     repaired.append({"role": "user", "content": current})
     return repaired
@@ -584,14 +642,15 @@ def setup_chat_routes(
     memory_vector=None,
     webhook_manager=None,
     skills_manager=None,
+    contract_review_service=None,
 ) -> APIRouter:
     router = APIRouter(tags=["chat"])
 
     # ------------------------------------------------------------------ #
     # POST /api/chat (non-streaming)
     # ------------------------------------------------------------------ #
-    @router.post("/api/chat", response_model=Dict[str, str])
-    async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, str]:
+    @router.post("/api/chat")
+    async def chat_endpoint(request: Request, chat_request: ChatRequest) -> Dict[str, Any]:
         _set_user_time_from_request(request)
 
         message = chat_request.message
@@ -628,7 +687,17 @@ def setup_chat_routes(
         # non-streaming path can't be used to bypass).
         _enforce_chat_privileges(request, sess)
 
-        tool_policy = build_effective_tool_policy(last_user_message=message)
+        contract_context = _prepare_contract_review_context(
+            contract_review_service,
+            owner=str(owner or ""),
+            session_id=session,
+            raw=chat_request.contract_review_context,
+        ) if chat_request.contract_review_context else None
+        tool_policy = (
+            contract_review_tool_policy()
+            if contract_context
+            else build_effective_tool_policy(last_user_message=message)
+        )
         allow_tool_preprocessing = not tool_policy.block_all_tool_calls
 
         # Inline memory command
@@ -648,7 +717,12 @@ def setup_chat_routes(
             use_web=use_web,
             time_filter=time_filter,
             webhook_manager=webhook_manager,
-            allow_tool_preprocessing=allow_tool_preprocessing,
+            allow_tool_preprocessing=allow_tool_preprocessing and not bool(contract_context),
+            no_memory=bool(contract_context),
+            use_rag=False if contract_context else None,
+            additional_untrusted_context=contract_context,
+            additional_system_prompt=contract_review_system_prompt() if contract_context else None,
+            redact_message_event=bool(contract_context),
         )
 
         # Research injection
@@ -683,7 +757,23 @@ def setup_chat_routes(
                 chat_request.reasoning_effort,
             ),
         )
-        _clean_reply, _clean_md = clean_thinking_for_save(reply, {"model": sess.model})
+        _reply_md = {"model": sess.model}
+        _reply_for_save = reply
+        contract_result = None
+        if contract_context:
+            try:
+                contract_result = extract_contract_review_result(
+                    reply,
+                    session_id=session,
+                    evidence_fingerprint=contract_context["evidence_fingerprint"],
+                    metrics={"usage_source": "unavailable"},
+                    evidence_context=contract_context,
+                )
+                _reply_md["contract_review_result"] = contract_result
+            except ContractReviewError as exc:
+                _reply_md["contract_review_error"] = {"error": exc.code, "message": str(exc)}
+                _reply_for_save = "Contract Review result validation failed."
+        _clean_reply, _clean_md = clean_thinking_for_save(_reply_for_save, _reply_md)
         sess.add_message(ChatMessage("assistant", _clean_reply, metadata=_clean_md))
 
         from core.database import update_session_last_accessed
@@ -696,10 +786,17 @@ def setup_chat_routes(
             ctx.uprefs, memory_manager, memory_vector, webhook_manager,
             character_name=ctx.preset.character_name,
             owner=ctx.user,
-            allow_background_extraction=not tool_policy.block_all_tool_calls,
+            allow_background_extraction=(
+                not tool_policy.block_all_tool_calls and not bool(contract_context)
+            ),
         )
 
-        return {"response": reply}
+        response: Dict[str, Any] = {"response": _reply_for_save}
+        if contract_result:
+            response["contract_review_result"] = contract_result
+        elif contract_context:
+            response["contract_review_error"] = _reply_md.get("contract_review_error")
+        return response
 
     # ------------------------------------------------------------------ #
     # POST /api/chat_stream
@@ -742,6 +839,10 @@ def setup_chat_routes(
         requested_reasoning_effort = (
             form_data.get("reasoning_effort")
             or (body or {}).get("reasoning_effort")
+        )
+        contract_review_raw = (
+            form_data.get("contract_review_context")
+            or (body or {}).get("contract_review_context")
         )
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
@@ -973,16 +1074,36 @@ def setup_chat_routes(
             except Exception as e:
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
+        contract_context = _prepare_contract_review_context(
+            contract_review_service,
+            owner=str(owner or ""),
+            session_id=session,
+            raw=contract_review_raw,
+        ) if contract_review_raw else None
+        if contract_context:
+            # Evidence lookup already happened through the dedicated adapters.
+            # The model turn itself is tool-free and must not blend unrelated
+            # memory/RAG/research into the review result.
+            chat_mode = "chat"
+            plan_mode = False
+            do_research = False
+            use_research = None
+            use_web = None
+            use_rag = "false"
+            search_context = None
+
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
-        no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        no_memory = str(form_data.get("no_memory", "")).lower() == "true" or bool(contract_context)
         if image_generation_session:
             no_memory = True
             use_rag = "false"
             search_context = None
-        pre_context_tool_policy = build_effective_tool_policy(
-            last_user_message=message,
+        pre_context_tool_policy = (
+            contract_review_tool_policy()
+            if contract_context
+            else build_effective_tool_policy(last_user_message=message)
         )
-        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
+        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls and not bool(contract_context)
 
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
@@ -1005,6 +1126,9 @@ def setup_chat_routes(
             # index would be useless / unwanted noise.
             agent_mode=(chat_mode == "agent"),
             allow_tool_preprocessing=allow_tool_preprocessing,
+            additional_untrusted_context=contract_context,
+            additional_system_prompt=contract_review_system_prompt() if contract_context else None,
+            redact_message_event=bool(contract_context),
         )
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
@@ -1223,9 +1347,13 @@ def setup_chat_routes(
             from src.tool_security import plan_mode_disabled_tools
             disabled_tools.update(plan_mode_disabled_tools())
 
-        tool_policy = build_effective_tool_policy(
-            disabled_tools=disabled_tools,
-            last_user_message=message,
+        tool_policy = (
+            contract_review_tool_policy()
+            if contract_context
+            else build_effective_tool_policy(
+                disabled_tools=disabled_tools,
+                last_user_message=message,
+            )
         )
         disabled_tools = tool_policy.all_disabled_names()
         research_blocked_by_policy = bool(
@@ -1400,7 +1528,11 @@ def setup_chat_routes(
                     _active_streams.pop(session, None)
                     return
 
-            messages = _ensure_current_request_is_latest_user(ctx.messages, message)
+            messages = _ensure_current_request_is_latest_user(
+                ctx.messages,
+                message,
+                redact_log=bool(contract_context),
+            )
 
             # Auto-compact notification
             if ctx.was_compacted:
@@ -1578,6 +1710,11 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "usage":
                                     last_metrics = data.get("data", {})
+                                    if (
+                                        isinstance(last_metrics.get("input_tokens"), int)
+                                        and isinstance(last_metrics.get("output_tokens"), int)
+                                    ):
+                                        last_metrics.setdefault("usage_source", "actual")
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -1633,10 +1770,30 @@ def setup_chat_routes(
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
                                 _metrics_to_save = dict(last_metrics or {})
+                                _response_to_save = full_response
+                                if contract_context:
+                                    try:
+                                        _contract_result = extract_contract_review_result(
+                                            full_response,
+                                            session_id=session,
+                                            evidence_fingerprint=contract_context["evidence_fingerprint"],
+                                            metrics=_metrics_to_save,
+                                            evidence_context=contract_context,
+                                        )
+                                        _metrics_to_save["contract_review_result"] = _contract_result
+                                        yield f'data: {json.dumps({"type": "contract_review_result", "data": _contract_result}, ensure_ascii=False)}\n\n'
+                                    except ContractReviewError as _contract_exc:
+                                        _contract_error = {
+                                            "error": _contract_exc.code,
+                                            "message": str(_contract_exc),
+                                        }
+                                        _metrics_to_save["contract_review_error"] = _contract_error
+                                        _response_to_save = "Contract Review result validation failed."
+                                        yield f'data: {json.dumps({"type": "contract_review_error", "data": _contract_error}, ensure_ascii=False)}\n\n'
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
-                                    sess, session_manager, session, full_response, _metrics_to_save,
+                                    sess, session_manager, session, _response_to_save, _metrics_to_save,
                                     character_name=ctx.preset.character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
@@ -1648,12 +1805,14 @@ def setup_chat_routes(
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
-                                    sess, session_manager, session, message, full_response,
+                                    sess, session_manager, session, message, _response_to_save,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
                                     incognito=incognito, compare_mode=compare_mode,
                                     character_name=ctx.preset.character_name,
                                     owner=_user,
-                                    allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    allow_background_extraction=(
+                                        not tool_policy.block_all_tool_calls and not bool(contract_context)
+                                    ),
                                 )
                             _stream_set(session, status="done")
                             yield chunk
@@ -1778,6 +1937,11 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "metrics":
                                     last_metrics = data.get("data", {})
+                                    if (
+                                        isinstance(last_metrics.get("input_tokens"), int)
+                                        and isinstance(last_metrics.get("output_tokens"), int)
+                                    ):
+                                        last_metrics.setdefault("usage_source", "actual")
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model

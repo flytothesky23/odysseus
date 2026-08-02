@@ -153,13 +153,20 @@ class ToolPolicy:
     def blocks(self, tool_name: Optional[str]) -> bool:
         if not tool_name:
             return False
-        return self.block_all_tool_calls or tool_name in self.disabled_tools or tool_name in self.hidden_tools
+        return (
+            self.block_all_tool_calls
+            or (self.disable_mcp and tool_name.startswith("mcp__"))
+            or tool_name in self.disabled_tools
+            or tool_name in self.hidden_tools
+        )
 
     def reason_for(self, tool_name: Optional[str]) -> str:
         if tool_name and tool_name in self.reasons:
             return self.reasons[tool_name]
         if self.block_all_tool_calls and self.mode == "guide_only":
             return "Tool use is disabled for this guide-only turn."
+        if tool_name and self.disable_mcp and tool_name.startswith("mcp__"):
+            return "Generic MCP execution is disabled for this turn."
         return "Tool use is disabled for this turn."
 
 

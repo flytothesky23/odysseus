@@ -51,6 +51,7 @@ import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict
 
 from contextlib import asynccontextmanager
@@ -674,6 +675,8 @@ from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
 # Chat
+from src.contract_review import ContractReviewWorkspaceService
+contract_review_service = ContractReviewWorkspaceService()
 from routes.chat_routes import setup_chat_routes
 app.include_router(setup_chat_routes(
     session_manager, chat_handler, chat_processor,
@@ -681,6 +684,7 @@ app.include_router(setup_chat_routes(
     memory_vector=memory_vector,
     webhook_manager=webhook_manager,
     skills_manager=skills_manager,
+    contract_review_service=contract_review_service,
 ))
 
 # Research (background deep-research tasks)
@@ -810,6 +814,8 @@ from routes.mcp_routes import setup_mcp_routes
 mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)
 app.include_router(setup_mcp_routes(mcp_manager))
+from routes.contract_review_routes import setup_contract_review_routes
+app.include_router(setup_contract_review_routes(contract_review_service, mcp_manager))
 logger.info("MCP routes initialized")
 
 # AI Interaction tools (debates, pipelines, self-managing AI, UI control)
@@ -930,7 +936,10 @@ async def get_version():
 
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds"),
+    }
 
 @app.post("/api/client-perf")
 async def client_perf(request: Request):

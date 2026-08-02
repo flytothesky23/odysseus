@@ -481,11 +481,21 @@ def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, inco
     chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
 
-def fire_message_event(request, webhook_manager, session_id: str, sess, message: str, compare_mode: bool = False):
+def fire_message_event(
+    request,
+    webhook_manager,
+    session_id: str,
+    sess,
+    message: str,
+    compare_mode: bool = False,
+    redact_message: bool = False,
+):
     """Fire webhook and event_bus events for a new user message."""
     if webhook_manager and not compare_mode:
         webhook_manager.fire_and_forget("chat.message", {
-            "session_id": session_id, "model": sess.model, "message": message[:2000],
+            "session_id": session_id,
+            "model": sess.model,
+            "message": "[sensitive content omitted]" if redact_message else message[:2000],
         })
     from src.event_bus import fire_event
     user = effective_user(request)
@@ -687,6 +697,9 @@ async def build_chat_context(
     use_enhanced_message: bool = False,
     agent_mode: bool = False,
     allow_tool_preprocessing: bool = True,
+    additional_untrusted_context: Any = None,
+    additional_system_prompt: str | None = None,
+    redact_message_event: bool = False,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -718,7 +731,15 @@ async def build_chat_context(
 
     # Fire events
     if not incognito:
-        fire_message_event(request, webhook_manager, session_id, sess, message, compare_mode)
+        fire_message_event(
+            request,
+            webhook_manager,
+            session_id,
+            sess,
+            message,
+            compare_mode,
+            redact_message=redact_message_event,
+        )
 
     # Resolve owner-scoped prefs/context. Browser requests keep the cookie user;
     # bearer-token chat requests use the token owner instead of the "api" sentinel.
@@ -784,12 +805,31 @@ async def build_chat_context(
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
+    if additional_system_prompt:
+        preface.append({"role": "system", "content": str(additional_system_prompt)})
+
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
 
     # Inject pre-fetched search context (compare mode)
     if search_context and allow_tool_preprocessing and not casual_low_signal:
         preface.append(untrusted_context_message("prefetched search context", search_context))
+
+    # Contract Review prepares this evidence server-side after owner, Vault,
+    # path/stat, and MCP descriptor revalidation. It is still untrusted source
+    # material, so keep it inside the standard untrusted-context envelope and
+    # insert it before the normal compaction/context-budget pass.
+    if additional_untrusted_context:
+        if isinstance(additional_untrusted_context, str):
+            contract_context = additional_untrusted_context
+        else:
+            contract_context = json.dumps(
+                additional_untrusted_context,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        preface.append(untrusted_context_message("contract review evidence", contract_context))
 
     # YouTube transcripts
     for transcript in preprocessed.youtube_transcripts:

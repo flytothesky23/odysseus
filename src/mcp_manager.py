@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import asyncio 
+import hashlib
 from typing import Any, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
@@ -610,13 +611,24 @@ class McpManager:
                 result.append({
                     "server_id": server_id,
                     "server_name": conn.get("name", server_id),
+                    "connection_identity_hash": hashlib.sha256(
+                        str(conn.get("identity", "")).encode("utf-8")
+                    ).hexdigest(),
+                    "connection_status": conn.get("status", "disconnected"),
+                    "inventory_generation": self._generation,
                     "name": tool["name"],
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
                     "input_schema": tool.get("input_schema") or {},
+                    "annotations": tool.get("annotations") or {},
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
+
+    @property
+    def inventory_generation(self) -> int:
+        """Monotonic non-secret identity for the currently discovered inventory."""
+        return self._generation
 
     def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.

@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
+import chatRenderer from './chatRenderer.js?v=20260802contractreviewv2';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -24,6 +24,8 @@ import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
 import { getSelectedReasoningEffort } from './modelPicker.js?v=20260728codexreasoning1';
+import contractReviewModule from './contractReview.js';
+import { renderContractReviewResult } from './contractReviewRenderer.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
@@ -1717,6 +1719,17 @@ import { getSelectedReasoningEffort } from './modelPicker.js?v=20260728codexreas
       if (presetsModule.getSelectedPreset()) {
         fd.append('preset_id', presetsModule.getSelectedPreset());
       }
+      const contractReviewContext = contractReviewModule.getContractReviewChatContext();
+      if (contractReviewContext) {
+        fd.append('contract_review_context', JSON.stringify(contractReviewContext));
+        // Evidence lookup happens through dedicated server adapters before the
+        // model call. The chat completion itself is deliberately tool-free.
+        fd.set('mode', 'chat');
+        fd.set('plan_mode', 'false');
+        fd.set('use_rag', 'false');
+        fd.delete('use_web');
+        fd.delete('use_research');
+      }
 
 
       const abortCtrl = new AbortController();
@@ -2964,6 +2977,22 @@ import { getSelectedReasoningEffort } from './modelPicker.js?v=20260728codexreas
                   refreshChatContextHeader('metrics');
                 }
 
+              } else if (json.type === 'contract_review_result') {
+                if (_isBg) continue;
+                holder._contractReviewResult = json.data;
+                const contractBody = holder.querySelector('.body');
+                const contractHtml = renderContractReviewResult(json.data);
+                if (contractBody && contractHtml) contractBody.innerHTML = contractHtml;
+
+              } else if (json.type === 'contract_review_error') {
+                if (_isBg) continue;
+                holder._contractReviewError = json.data;
+                const contractBody = holder.querySelector('.body');
+                if (contractBody) {
+                  contractBody.innerHTML = `<div class="contract-review-result-error" role="alert">${uiModule.esc(json.data?.message || 'Contract Review result validation failed.')}</div>`;
+                }
+                uiModule.showError?.(json.data?.message || 'Contract Review result validation failed.');
+
               } else if (json.type === 'message_saved') {
                 // Wire the persisted DB id onto the just-streamed bubble so it
                 // can be edited/deleted immediately, without reloading the chat.
@@ -3606,6 +3635,14 @@ import { getSelectedReasoningEffort } from './modelPicker.js?v=20260728codexreas
           }
         }
 
+        if (holder._contractReviewResult) {
+          const contractTarget = roundHolder.querySelector('.body') || holder.querySelector('.body');
+          const contractHtml = renderContractReviewResult(holder._contractReviewResult);
+          if (contractTarget && contractHtml) {
+            contractTarget.innerHTML = contractHtml;
+            roundHolder._contractReviewResult = holder._contractReviewResult;
+          }
+        }
 
         if (window.hljs) {
           roundHolder.querySelectorAll('pre code').forEach((block) => {

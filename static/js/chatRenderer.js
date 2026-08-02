@@ -10,6 +10,7 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import { renderContractReviewResult } from './contractReviewRenderer.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -2360,7 +2361,14 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          if (isLastTextRound && metadata?.contract_review_result) {
+            body.innerHTML = renderContractReviewResult(metadata.contract_review_result);
+            wrap._contractReviewResult = metadata.contract_review_result;
+          } else if (isLastTextRound && metadata?.contract_review_error) {
+            body.innerHTML = `<div class="contract-review-result-error" role="alert">${uiModule.esc(metadata.contract_review_error.message || 'Contract Review result validation failed.')}</div>`;
+          } else {
+            body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          }
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
@@ -2557,7 +2565,12 @@ export function addMessage(role, content, modelName, metadata) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
     }
     // If thinking is stored in metadata (not in text), reconstruct the full display
-    if (role === 'assistant' && metadata?.thinking) {
+    if (role === 'assistant' && metadata?.contract_review_result) {
+      b.innerHTML = renderContractReviewResult(metadata.contract_review_result);
+      wrap._contractReviewResult = metadata.contract_review_result;
+    } else if (role === 'assistant' && metadata?.contract_review_error) {
+      b.innerHTML = `<div class="contract-review-result-error" role="alert">${uiModule.esc(metadata.contract_review_error.message || 'Contract Review result validation failed.')}</div>`;
+    } else if (role === 'assistant' && metadata?.thinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
         '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text

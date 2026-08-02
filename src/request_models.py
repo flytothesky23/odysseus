@@ -13,6 +13,10 @@ class ChatRequest(BaseModel):
     time_filter: Optional[str] = Field(default=None, description="Time filter for search")
     preset_id: Optional[str] = Field(default=None, description="Preset identifier")
     reasoning_effort: Optional[str] = Field(default=None, description="Model reasoning effort")
+    contract_review_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Opaque Contract Review snapshot, selection, and completed job identifiers",
+    )
     
     @field_validator('message')
     @classmethod

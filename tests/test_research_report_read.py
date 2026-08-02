@@ -14,6 +14,7 @@ These tests pin both halves:
    web_fetching the HTML report.
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ import pytest
 from src.tool_implementations import do_manage_research
 from src.agent_loop import TOOL_SECTIONS
 
-_DATA_DIR = Path("data/deep_research")
+_DATA_DIR = Path(os.environ.get("ODYSSEUS_DATA_DIR", "data")) / "deep_research"
 
 
 @pytest.fixture
