@@ -7,6 +7,7 @@ import {
   buildContractReviewChatContext,
   buildVaultSearchRequest,
   sanitizePersistedState,
+  updateSelectedPathSelection,
 } from './contractReviewState.js';
 
 let API_BASE = '';
@@ -88,8 +89,7 @@ async function loadProfile() {
 }
 
 function selectedPaths() {
-  if (!modal) return loadState().selected_paths;
-  return [...modal.querySelectorAll('[data-contract-note]:checked')].map(input => input.dataset.contractNote);
+  return loadState().selected_paths;
 }
 
 function renderNotes(items) {
@@ -109,7 +109,15 @@ function renderNotes(items) {
       <span><strong>${uiModule.esc(note.title || note.stem || path)}</strong><div class="muted">${uiModule.esc(path)} · ${uiModule.esc(note.evidence_level || 'metadata')}</div>${aliases}${excerpt}</span></label>`;
   }).join('');
   list.querySelectorAll('[data-contract-note]').forEach(input => input.addEventListener('change', () => {
-    saveState({ ...loadState(), selected_paths: selectedPaths() });
+    const state = loadState();
+    saveState({
+      ...state,
+      selected_paths: updateSelectedPathSelection(
+        state.selected_paths,
+        input.dataset.contractNote,
+        input.checked,
+      ),
+    });
   }));
 }
 
@@ -196,12 +204,15 @@ async function parseDocument() {
 async function searchLaw() {
   const query = modal.querySelector('#contract-review-law-query').value.trim();
   const serverId = modal.querySelector('#contract-review-law-server').value;
+  const tool = modal.querySelector('#contract-review-law-tool').value;
   if (!query) throw new Error('법령 검색어를 입력하세요.');
   if (!serverId) throw new Error('연결된 Korean Law MCP가 없습니다. Settings에서 먼저 연결하세요.');
   const started = await api('/law/jobs', { method: 'POST', body: JSON.stringify({
     server_id: serverId,
-    tool: modal.querySelector('#contract-review-law-tool').value,
-    arguments: { query, display: 5 },
+    tool,
+    arguments: tool === 'search_decisions'
+      ? { domain: 'precedent', query, display: 5 }
+      : { query, display: 5 },
   }) });
   const completed = await pollJob(started);
   if (completed.state !== 'completed') return;

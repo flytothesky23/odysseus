@@ -259,6 +259,15 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         except HTTPException:
             return False
 
+    def _owns_session(session_id: str, user: str) -> bool:
+        if session_manager is None:
+            return False
+        try:
+            session = session_manager.get_session(session_id)
+        except (KeyError, LookupError):
+            return False
+        return _auth_disabled() or getattr(session, "owner", None) == user
+
     def _require_owned_or_active_research_path(session_id: str, user: str) -> Path | None:
         """Validate ownership once and return the completed on-disk path.
 
@@ -316,6 +325,8 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         user = _require_user(request)
         _validate_session_id(session_id)
         if not _owns_in_memory(session_id, user):
+            if _owns_session(session_id, user):
+                return {"status": "idle", "progress": {}}
             raise HTTPException(404, "No research found for this session")
         status = research_handler.get_status(session_id)
         if status is None:

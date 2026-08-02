@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -8,6 +9,13 @@ from routes import chat_helpers, chat_routes
 from src.agent_tools import ToolBlock
 from src.contract_review import ContractReviewError, contract_review_tool_policy, extract_contract_review_result
 from src.tool_execution import execute_tool_block
+
+
+def _route(router, path: str, method: str):
+    for route in router.routes:
+        if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
+            return route.endpoint
+    raise AssertionError(f"{method} {path} route not registered")
 
 
 def test_contract_review_question_is_redacted_from_events_and_mismatch_logs(monkeypatch, caplog):
@@ -36,6 +44,17 @@ def test_contract_review_question_is_redacted_from_events_and_mismatch_logs(monk
     assert events[0][1]["message"] == "[sensitive content omitted]"
     assert repaired[-1]["content"] == secret_question
     assert secret_question not in caplog.text
+
+
+def test_inactive_chat_stream_status_is_an_idle_success(monkeypatch):
+    monkeypatch.setattr(chat_routes, "_verify_session_owner", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(chat_routes.agent_runs, "is_active", lambda _session_id: False)
+    router = chat_routes.setup_chat_routes(*[MagicMock() for _ in range(6)])
+    target = _route(router, "/api/chat/stream_status/{session_id}", "GET")
+
+    result = asyncio.run(target(SimpleNamespace(), "session-1"))
+
+    assert result == {"status": "idle", "detached": False}
 
 
 @pytest.mark.asyncio

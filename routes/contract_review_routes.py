@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -26,6 +28,25 @@ from src.contract_review import (
     validate_contract_review_result,
 )
 from src.runtime_paths import get_app_root
+
+
+def _bounded_timeout_from_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(value):
+        return float(default)
+    return max(0.05, min(value, 900.0))
+
+
+def contract_review_timeouts_from_env() -> tuple[float, float]:
+    """Return bounded adapter timeouts without weakening production defaults."""
+
+    return (
+        _bounded_timeout_from_env("ODYSSEUS_CONTRACT_REVIEW_KORDOC_TIMEOUT_SECONDS", 300.0),
+        _bounded_timeout_from_env("ODYSSEUS_CONTRACT_REVIEW_LAW_TIMEOUT_SECONDS", 60.0),
+    )
 
 
 def _error_response(exc: ContractReviewError) -> JSONResponse:

@@ -33,6 +33,24 @@ def test_browser_state_persists_identifiers_not_private_content():
         assert secret not in serialized
 
 
+def test_note_selection_survives_metadata_search_result_changes():
+    state_url = (ROOT / "static/js/contractReviewState.js").as_uri()
+    data = _node(f"""
+      import {{ updateSelectedPathSelection }} from {json.dumps(state_url)};
+      let selected = updateSelectedPathSelection([], 'Agreement.md', true);
+      selected = updateSelectedPathSelection(selected, 'amendments/Liability.md', true);
+      const deselected = updateSelectedPathSelection(selected, 'Agreement.md', false);
+      console.log(JSON.stringify({{selected, deselected}}));
+    """)
+    assert data["selected"] == ["Agreement.md", "amendments/Liability.md"]
+    assert data["deselected"] == ["amendments/Liability.md"]
+
+
+def test_precedent_search_is_scoped_to_the_verified_precedent_domain():
+    source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    assert "{ domain: 'precedent', query, display: 5 }" in source
+
+
 def test_renderer_requires_v2_schema_and_labels_estimated_usage():
     renderer_url = (ROOT / "static/js/contractReviewRenderer.js").as_uri()
     payload = {

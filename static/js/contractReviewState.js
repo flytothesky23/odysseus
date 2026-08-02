@@ -13,6 +13,17 @@ function sanitizeJobIds(value) {
   return [...new Set(value.map(String).filter(id => /^[a-f0-9]{32}$/.test(id)))].slice(0, 20);
 }
 
+export function updateSelectedPathSelection(current, path, checked) {
+  const selected = new Set(
+    (Array.isArray(current) ? current : []).filter(candidate => isRelativePath(candidate)),
+  );
+  const normalizedPath = typeof path === 'string' ? path.trim().replace(/\\/g, '/') : '';
+  if (!isRelativePath(normalizedPath)) return [...selected].slice(0, 8);
+  if (checked) selected.add(normalizedPath);
+  else selected.delete(normalizedPath);
+  return [...selected].slice(0, 8);
+}
+
 export function sanitizePersistedState(value) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const selected = Array.isArray(input.selected_paths)

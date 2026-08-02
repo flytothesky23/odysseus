@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from src.tool_execution import vet_workspace
 from src.tool_policy import ToolPolicy, known_tool_names
+from src.mcp_manager import stdio_launch_identity_hash
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -47,6 +48,7 @@ KOREAN_LAW_READ_ONLY_TOOLS = (
     "get_decision_text",
 )
 KORDOC_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx", ".xls", ".hwp", ".hwpx", ".hml"})
+KORDOC_LAUNCH_IDENTITY = stdio_launch_identity_hash("npx", ["-y", "kordoc@4.2.5", "mcp"])
 
 CONTRACT_REVIEW_BLOCKS = (
     "review_summary",
@@ -744,6 +746,7 @@ def _resolve_descriptor(manager: Any, server_id: str, tool: str) -> dict[str, An
             raw.get("connection_identity_hash")
             or _digest(str(raw.get("connection_identity") or status.get("identity") or ""))
         ),
+        "launch_identity_hash": str(raw.get("launch_identity_hash") or status.get("launch_identity_hash") or ""),
         "connection_status": state,
         "inventory_generation": int(raw.get("inventory_generation", _manager_generation(manager)) or 0),
         "name": tool,
@@ -786,6 +789,7 @@ class _McpAdmission:
     relative_path: str = ""
     absolute_path: str = ""
     stat_fingerprint: str = ""
+    verification_descriptor: Mapping[str, Any] | None = None
 
 
 class KordocAdapter:
@@ -807,10 +811,36 @@ class KordocAdapter:
             raise ContractReviewError("kordoc_tool_forbidden", "That Kordoc tool is not allowed.", 403)
         if not isinstance(arguments, Mapping):
             raise ContractReviewError("invalid_request", "Kordoc arguments must be an object.", 400)
-        for key in arguments:
-            folded = str(key).casefold()
-            if folded == "file_path" or "output" in folded or "template" in folded or folded.endswith("_path"):
-                raise ContractReviewError("kordoc_argument_forbidden", "Kordoc path arguments are server-controlled.", 403)
+        allowed_arguments = {
+            "parse_document": frozenset({"ocr"}),
+            "detect_format": frozenset(),
+            "parse_metadata": frozenset(),
+            "parse_pages": frozenset({"pages"}),
+            "parse_table": frozenset({"table_index"}),
+            "parse_chunks": frozenset({"granularity", "include_table_cells"}),
+            "parse_form": frozenset(),
+        }[tool]
+        if any(str(key) not in allowed_arguments for key in arguments):
+            raise ContractReviewError("kordoc_argument_forbidden", "That Kordoc argument is not allowed.", 403)
+        if "ocr" in arguments and not isinstance(arguments["ocr"], bool):
+            raise ContractReviewError("invalid_request", "Kordoc OCR must be true or false.", 400)
+        if tool == "parse_pages" and (
+            not isinstance(arguments.get("pages"), str)
+            or len(arguments["pages"]) > 128
+            or re.fullmatch(r"\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*", arguments["pages"].replace(" ", "")) is None
+        ):
+            raise ContractReviewError("invalid_request", "Kordoc pages must be a bounded page-range string.", 400)
+        if tool == "parse_table" and (
+            isinstance(arguments.get("table_index"), bool)
+            or not isinstance(arguments.get("table_index"), int)
+            or not 0 <= arguments["table_index"] <= 10_000
+        ):
+            raise ContractReviewError("invalid_request", "Kordoc table_index must be a non-negative integer.", 400)
+        if tool == "parse_chunks":
+            if arguments.get("granularity", "section") not in {"section", "block"}:
+                raise ContractReviewError("invalid_request", "Kordoc granularity must be section or block.", 400)
+            if "include_table_cells" in arguments and not isinstance(arguments["include_table_cells"], bool):
+                raise ContractReviewError("invalid_request", "Kordoc include_table_cells must be true or false.", 400)
         relative = _safe_relative_path(relative_path)
         if Path(relative).suffix.casefold() not in KORDOC_EXTENSIONS:
             raise ContractReviewError("unsupported_document", "The selected document type is not supported.", 422)
@@ -818,8 +848,20 @@ class KordocAdapter:
         stat_result = os.stat(absolute, follow_symlinks=False)
         descriptor = _resolve_descriptor(self.mcp_manager, server_id, tool)
         _require_server_product(descriptor, frozenset({"kordoc", "kordocmcp"}), "kordoc_server_forbidden")
+        isolated_fixture = (
+            os.getenv("ODYSSEUS_CONTRACT_REVIEW_ALLOW_TEST_FIXTURES") == "1"
+            and server_id == "kordoc-fixture"
+        )
+        if descriptor["launch_identity_hash"] != KORDOC_LAUNCH_IDENTITY and not isolated_fixture:
+            raise ContractReviewError(
+                "kordoc_server_forbidden",
+                "Contract Review requires the pinned Kordoc 4.2.5 stdio profile.",
+                403,
+            )
         args = dict(arguments)
         args["file_path"] = absolute
+        if tool == "parse_document":
+            args.setdefault("ocr", False)
         return _McpAdmission(
             str(owner or ""), "kordoc", MappingProxyType(descriptor), MappingProxyType(args),
             _validated_workspace(workspace), relative, absolute, _stat_fingerprint(stat_result),
@@ -897,33 +939,59 @@ class KoreanLawAdapter:
             raise ContractReviewError("invalid_request", "Law arguments must be an object.", 400)
         if any("key" in str(key).casefold() or "token" in str(key).casefold() for key in arguments):
             raise ContractReviewError("law_argument_forbidden", "Credentials cannot be supplied in review arguments.", 403)
+        allowed_arguments = {
+            "search_law": frozenset({"query", "display", "jo"}),
+            "get_law_text": frozenset({"mst", "lawId", "jo", "efYd"}),
+            "search_decisions": frozenset({"domain", "query", "display", "page", "sort"}),
+            "get_decision_text": frozenset({"domain", "id", "full"}),
+        }[tool]
+        if any(str(key) not in allowed_arguments for key in arguments):
+            raise ContractReviewError("law_argument_forbidden", "That Korean Law argument is not allowed.", 403)
         if tool in {"search_law", "search_decisions"} and not str(arguments.get("query") or "").strip():
             raise ContractReviewError("invalid_request", "A law search query is required.", 400)
+        if tool == "get_law_text" and not (str(arguments.get("mst") or "").strip() or str(arguments.get("lawId") or "").strip()):
+            raise ContractReviewError("invalid_request", "A verified law identifier is required.", 400)
+        if tool in {"search_decisions", "get_decision_text"} and str(arguments.get("domain") or "precedent") != "precedent":
+            raise ContractReviewError("law_argument_forbidden", "Contract Review permits the precedent decision domain only.", 403)
+        if tool == "get_decision_text" and not str(arguments.get("id") or "").strip():
+            raise ContractReviewError("invalid_request", "A verified decision identifier is required.", 400)
         descriptor = _resolve_descriptor(self.mcp_manager, server_id, tool)
         _require_server_product(
             descriptor,
             frozenset({"koreanlaw", "koreanlawmcp"}),
             "law_server_forbidden",
         )
+        verification_tool = {
+            "search_law": "get_law_text",
+            "search_decisions": "get_decision_text",
+        }.get(tool)
+        verification_descriptor = None
+        if verification_tool:
+            verification_descriptor = _resolve_descriptor(self.mcp_manager, server_id, verification_tool)
+            _require_server_product(
+                verification_descriptor,
+                frozenset({"koreanlaw", "koreanlawmcp"}),
+                "law_server_forbidden",
+            )
         return _McpAdmission(
-            str(owner or ""), "law", MappingProxyType(descriptor), MappingProxyType(dict(arguments)),
+            str(owner or ""),
+            "law",
+            MappingProxyType(descriptor),
+            MappingProxyType(dict(arguments)),
+            verification_descriptor=(
+                MappingProxyType(verification_descriptor) if verification_descriptor is not None else None
+            ),
         )
 
-    async def execute(self, admission: _McpAdmission) -> dict[str, Any]:
-        await asyncio.sleep(0)
-        _revalidate_descriptor(self.mcp_manager, admission.descriptor)
+    async def _call_tool(self, descriptor: Mapping[str, Any], arguments: Mapping[str, Any]) -> str:
+        _revalidate_descriptor(self.mcp_manager, descriptor)
         try:
-            result = await asyncio.wait_for(
-                self.mcp_manager.call_tool(admission.descriptor["qualified_name"], dict(admission.arguments)),
-                timeout=self.timeout,
-            )
-        except asyncio.TimeoutError as exc:
-            raise ContractReviewError("law_timeout", "Official law lookup timed out.", 504) from exc
+            result = await self.mcp_manager.call_tool(descriptor["qualified_name"], dict(arguments))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             raise ContractReviewError("law_runtime_error", "Official law lookup failed.", 502) from exc
-        _revalidate_descriptor(self.mcp_manager, admission.descriptor)
+        _revalidate_descriptor(self.mcp_manager, descriptor)
         if not isinstance(result, Mapping):
             raise ContractReviewError("law_runtime_error", "Official law lookup returned an invalid result.", 502)
         exit_code = result.get("exit_code", 0)
@@ -936,15 +1004,149 @@ class KoreanLawAdapter:
         output = _sanitize_external_output(raw, private_paths=(str(Path.home()),), limit=32_000)
         if not output.strip():
             raise ContractReviewError("law_empty_result", "Official law lookup returned no evidence.", 422)
+        if "[NOT_FOUND]" in output:
+            raise ContractReviewError("law_not_found", "Official law evidence was not found.", 422)
+        return output
+
+    @staticmethod
+    def _exact_law_candidate(output: str) -> dict[str, str]:
+        marker = re.search(r"📍\s*정확매칭[^\n]*\n", output)
+        if marker is None:
+            raise ContractReviewError(
+                "law_exact_match_required",
+                "The law search did not return an exact official title match.",
+                422,
+            )
+        section = output[marker.end():]
+        boundary = re.search(r"(?m)^(?:📂|💡|⚠️\s*정확매칭 없음)", section)
+        if boundary:
+            section = section[:boundary.start()]
+        lines = section.splitlines()
+        title = mst = law_id = ""
+        for index, line in enumerate(lines):
+            match = re.match(r"^\s*\d+\.\s+(.+?)\s*$", line)
+            if not match:
+                continue
+            title = re.sub(r"\s*(?:⚠️)?\[(?:현행|연혁-과거버전)\]\s*$", "", match.group(1)).strip()
+            for detail in lines[index + 1:]:
+                if re.match(r"^\s*\d+\.\s+", detail):
+                    break
+                mst_match = re.search(r"MST:\s*(\d+)", detail)
+                law_id_match = re.search(r"법령ID:\s*([^\s]+)", detail)
+                if mst_match:
+                    mst = mst_match.group(1)
+                if law_id_match:
+                    law_id = law_id_match.group(1)
+            break
+        if not title or not mst:
+            raise ContractReviewError(
+                "law_identity_unverified",
+                "The exact law title or MST identifier could not be verified.",
+                422,
+            )
+        return {"title": title, "mst": mst, "law_id": law_id}
+
+    @staticmethod
+    def _decision_candidate(output: str) -> dict[str, str]:
+        match = re.search(r"(?m)^\[([^\]\s]+)\]\s+(.+?)\s*$", output)
+        if match is None:
+            raise ContractReviewError(
+                "law_identity_unverified",
+                "The precedent search did not return a verifiable decision identifier.",
+                422,
+            )
+        block = output[match.end():]
+        next_result = re.search(r"(?m)^\[[^\]\s]+\]\s+", block)
+        if next_result:
+            block = block[:next_result.start()]
+        case_match = re.search(r"(?m)^\s*사건번호:\s*(.+?)\s*$", block)
+        case_number = "" if case_match is None or case_match.group(1).strip() == "N/A" else case_match.group(1).strip()
+        return {"id": match.group(1), "title": match.group(2).strip(), "case_number": case_number}
+
+    @staticmethod
+    def _normalized_identity(value: Any) -> str:
+        return re.sub(r"[^0-9a-z가-힣]+", "", unicodedata.normalize("NFKC", str(value or "")).casefold())
+
+    def _verify_law_body(self, candidate: Mapping[str, str], output: str) -> None:
+        match = re.search(r"(?m)^법령명:\s*(.+?)\s*$", output)
+        if match is None or self._normalized_identity(match.group(1)) != self._normalized_identity(candidate["title"]):
+            raise ContractReviewError("law_identity_mismatch", "The official law text identity did not match the search result.", 409)
+
+    def _verify_decision_body(self, candidate: Mapping[str, str], output: str) -> None:
+        case_number = candidate.get("case_number") or ""
+        if case_number:
+            match = re.search(r"(?m)^\s*사건번호:\s*(.+?)\s*$", output)
+            if match is None or self._normalized_identity(match.group(1)) != self._normalized_identity(case_number):
+                raise ContractReviewError("law_identity_mismatch", "The official decision identity did not match the search result.", 409)
+            return
+        if self._normalized_identity(candidate.get("title")) not in self._normalized_identity(output):
+            raise ContractReviewError("law_identity_mismatch", "The official decision title did not match the search result.", 409)
+
+    async def _execute_bounded(self, admission: _McpAdmission) -> dict[str, Any]:
+        tool = str(admission.descriptor["name"])
+        output = await self._call_tool(admission.descriptor, admission.arguments)
+        verified_tool = tool
+        citation_id = f"law.go.kr · {tool}"
+        descriptor_fingerprint = str(admission.descriptor["fingerprint"])
+        discovery_tool = ""
+
+        if tool == "search_law":
+            candidate = self._exact_law_candidate(output)
+            verification = admission.verification_descriptor
+            if verification is None:
+                raise ContractReviewError("law_identity_unverified", "The official law verification tool is unavailable.", 503)
+            verify_args = {"mst": candidate["mst"]}
+            if str(admission.arguments.get("jo") or "").strip():
+                verify_args["jo"] = str(admission.arguments["jo"]).strip()
+            output = await self._call_tool(verification, verify_args)
+            self._verify_law_body(candidate, output)
+            verified_tool = "get_law_text"
+            discovery_tool = tool
+            citation_id = f"law.go.kr · {candidate['title']} · MST {candidate['mst']}"
+            descriptor_fingerprint = _digest(admission.descriptor["fingerprint"], verification["fingerprint"])
+        elif tool == "search_decisions":
+            candidate = self._decision_candidate(output)
+            verification = admission.verification_descriptor
+            if verification is None:
+                raise ContractReviewError("law_identity_unverified", "The official decision verification tool is unavailable.", 503)
+            output = await self._call_tool(verification, {"domain": "precedent", "id": candidate["id"]})
+            self._verify_decision_body(candidate, output)
+            verified_tool = "get_decision_text"
+            discovery_tool = tool
+            citation_label = candidate["case_number"] or candidate["title"]
+            citation_id = f"law.go.kr · {citation_label} · ID {candidate['id']}"
+            descriptor_fingerprint = _digest(admission.descriptor["fingerprint"], verification["fingerprint"])
+        elif tool == "get_law_text":
+            title_match = re.search(r"(?m)^법령명:\s*(.+?)\s*$", output)
+            if title_match is None:
+                raise ContractReviewError("law_identity_unverified", "The official law text did not identify its title.", 422)
+            identifier = str(admission.arguments.get("mst") or admission.arguments.get("lawId") or "")
+            citation_id = f"law.go.kr · {title_match.group(1).strip()} · {identifier}"
+        elif tool == "get_decision_text":
+            identifier = str(admission.arguments.get("id") or "")
+            citation_id = f"law.go.kr · decision ID {identifier}"
+
         return {
             "state": "completed",
             "evidence_type": "official_legal",
             "source": "law.go.kr",
-            "tool": admission.descriptor["name"],
+            "tool": verified_tool,
+            "discovery_tool": discovery_tool,
+            "citation_id": citation_id,
             "output": output,
-            "descriptor_fingerprint": admission.descriptor["fingerprint"],
+            "descriptor_fingerprint": descriptor_fingerprint,
             "completed_at": kst_now(),
         }
+
+    async def execute(self, admission: _McpAdmission) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        try:
+            async with asyncio.timeout(self.timeout):
+                return await self._execute_bounded(admission)
+        except TimeoutError as exc:
+            raise ContractReviewError("law_timeout", "Official law lookup timed out.", 504) from exc
+        except asyncio.CancelledError:
+            raise
 
     async def call(self, **kwargs) -> dict[str, Any]:
         return await self.execute(self.admit(**kwargs))
@@ -1052,6 +1254,8 @@ class ContractReviewJobManager:
                 self.kordoc.mcp_manager if kind == "kordoc" else self.law.mcp_manager,
                 admission.descriptor,
             )
+            if admission.verification_descriptor is not None:
+                _revalidate_descriptor(self.law.mcp_manager, admission.verification_descriptor)
             result = dict(job["result"])
             if kind == "kordoc":
                 self.kordoc._revalidate_source(admission)
@@ -1070,8 +1274,9 @@ class ContractReviewJobManager:
                     "evidence_type": "official_legal",
                     "source": "law.go.kr",
                     "tool": result["tool"],
+                    "citation_id": result["citation_id"],
                     "content": result["output"],
-                    "descriptor_fingerprint": admission.descriptor["fingerprint"],
+                    "descriptor_fingerprint": result["descriptor_fingerprint"],
                     "verification_state": "verified",
                 })
         return evidence

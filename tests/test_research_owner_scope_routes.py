@@ -92,6 +92,19 @@ def test_detail_rejects_cross_owner_and_null_owner_reports(tmp_path, monkeypatch
         assert exc.value.status_code == 404
 
 
+def test_status_returns_idle_for_an_owned_session_without_research():
+    handler = _research_handler()
+    session_manager = SimpleNamespace(
+        get_session=lambda session_id: SimpleNamespace(id=session_id, owner="alice"),
+    )
+    router = setup_research_routes(handler, session_manager=session_manager)
+    target = _route(router, "/api/research/status/{session_id}", "GET")
+
+    result = asyncio.run(target(session_id="session-1", request=_request("alice")))
+
+    assert result == {"status": "idle", "progress": {}}
+
+
 def test_report_rejects_null_owner_before_generating_html(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"

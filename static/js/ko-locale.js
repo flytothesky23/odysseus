@@ -117,6 +117,7 @@
       ['Search conversations...', '대화 검색...'],
       ['Search models', '모델 검색'],
       ['Search models...', '모델 검색...'],
+      ['Search models…', '모델 검색…'],
       ['No models connected', '연결된 모델이 없습니다'],
       ['Search memories…', '기억 검색...'],
       ['Search skills…', '기능 검색...'],

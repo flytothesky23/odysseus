@@ -814,8 +814,14 @@ from routes.mcp_routes import setup_mcp_routes
 mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)
 app.include_router(setup_mcp_routes(mcp_manager))
-from routes.contract_review_routes import setup_contract_review_routes
-app.include_router(setup_contract_review_routes(contract_review_service, mcp_manager))
+from routes.contract_review_routes import contract_review_timeouts_from_env, setup_contract_review_routes
+_contract_kordoc_timeout, _contract_law_timeout = contract_review_timeouts_from_env()
+app.include_router(setup_contract_review_routes(
+    contract_review_service,
+    mcp_manager,
+    kordoc_timeout=_contract_kordoc_timeout,
+    law_timeout=_contract_law_timeout,
+))
 logger.info("MCP routes initialized")
 
 # AI Interaction tools (debates, pipelines, self-managing AI, UI control)

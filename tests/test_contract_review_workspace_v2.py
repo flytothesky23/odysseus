@@ -21,6 +21,7 @@ from src.contract_review import (
     contract_review_tool_policy,
     validate_contract_review_result,
 )
+from src.mcp_manager import stdio_launch_identity_hash
 
 
 def _write(path: Path, text: str) -> None:
@@ -228,6 +229,10 @@ class FakeMcpManager:
         self.inventory_generation = 7
         self.raise_inventory = False
         self.schema_version = 1
+        self.launch_identity_hash = (
+            stdio_launch_identity_hash("npx", ["-y", "kordoc@4.2.5", "mcp"])
+            if kind == "kordoc" else "law-fixture"
+        )
 
     def get_server_status(self, server_id):
         return {
@@ -239,25 +244,31 @@ class FakeMcpManager:
     def get_all_tools(self, disabled_map=None):
         if self.raise_inventory:
             raise RuntimeError("inventory unavailable")
-        tool = "parse_document" if self.kind == "kordoc" else "search_law"
-        schema = {
-            "type": "object",
-            "properties": {"file_path" if self.kind == "kordoc" else "query": {"type": "string"}},
-            "x-version": self.schema_version,
-        }
+        tools = ["parse_document"] if self.kind == "kordoc" else [
+            "search_law", "get_law_text", "search_decisions", "get_decision_text",
+        ]
         return [{
             "server_id": self.kind,
             "server_name": self.server_name,
             "connection_identity": f"{self.kind}-local",
+            "launch_identity_hash": self.launch_identity_hash,
             "connection_status": self.status,
             "inventory_generation": self.inventory_generation,
             "name": tool,
             "qualified_name": f"mcp__{self.kind}__{tool}",
             "description": "read-only fixture",
-            "input_schema": schema,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_path" if self.kind == "kordoc" else (
+                        "query" if tool.startswith("search_") else "mst" if tool == "get_law_text" else "id"
+                    ): {"type": "string"},
+                },
+                "x-version": self.schema_version,
+            },
             "annotations": {"readOnlyHint": True},
             "is_disabled": False,
-        }]
+        } for tool in tools]
 
     async def call_tool(self, name, arguments):
         self.calls.append((name, arguments))
@@ -265,6 +276,21 @@ class FakeMcpManager:
             await asyncio.sleep(self.delay)
         if isinstance(self.result, Exception):
             raise self.result
+        if self.kind == "korean-law" and self.result == {"stdout": "# Parsed fixture", "exit_code": 0}:
+            if name.endswith("__search_law"):
+                return {
+                    "stdout": "검색 결과 (총 1건):\n\n📍 정확매칭 (1건):\n1. 대한민국헌법 [현행]\n   - 법령ID: 001444\n   - MST: 61603\n",
+                    "exit_code": 0,
+                }
+            if name.endswith("__get_law_text"):
+                return {"stdout": "법령명: 대한민국헌법\n제1조 대한민국은 민주공화국이다.", "exit_code": 0}
+            if name.endswith("__search_decisions"):
+                return {
+                    "stdout": "판례 검색 결과 (총 1건, 1페이지):\n\n[12345] 손해배상\n  사건번호: 2020다12345\n  법원: 대법원\n",
+                    "exit_code": 0,
+                }
+            if name.endswith("__get_decision_text"):
+                return {"stdout": "=== 손해배상 ===\n\n기본 정보:\n  사건번호: 2020다12345\n판결요지:\n검증된 판례", "exit_code": 0}
         return self.result
 
 
@@ -290,7 +316,7 @@ async def test_kordoc_pins_identity_and_revalidates_path_before_and_after_call(c
 
 
 @pytest.mark.asyncio
-async def test_kordoc_inventory_allowlist_timeout_and_parser_failures(contract_workspace):
+async def test_kordoc_inventory_allowlist_timeout_and_parser_failures(contract_workspace, monkeypatch):
     workspace, _vault = contract_workspace
     doc = workspace / "documents" / "contract.hwp"
     doc.parent.mkdir()
@@ -312,6 +338,16 @@ async def test_kordoc_inventory_allowlist_timeout_and_parser_failures(contract_w
                 workspace=str(workspace), relative_path="documents/contract.hwp", arguments={},
             )
         assert exc.value.code == "kordoc_tool_forbidden"
+
+    wrong_version = FakeMcpManager()
+    wrong_version.launch_identity_hash = stdio_launch_identity_hash("npx", ["-y", "kordoc@4.5.0", "mcp"])
+    monkeypatch.setenv("ODYSSEUS_CONTRACT_REVIEW_ALLOW_TEST_FIXTURES", "1")
+    with pytest.raises(ContractReviewError) as exc:
+        KordocAdapter(wrong_version).admit(
+            owner="alice", server_id="kordoc", tool="parse_document",
+            workspace=str(workspace), relative_path="documents/contract.hwp", arguments={},
+        )
+    assert exc.value.code == "kordoc_server_forbidden"
 
     with pytest.raises(ContractReviewError) as exc:
         await KordocAdapter(FakeMcpManager(delay=0.05), timeout=0.001).call(
@@ -345,7 +381,36 @@ async def test_kordoc_supported_fixtures_are_parsed_read_only(contract_workspace
     assert result["state"] == "completed"
     assert result["document"] == f"documents/fixture{suffix}"
     assert manager.calls[0][0] == "mcp__kordoc__parse_document"
+    assert manager.calls[0][1]["ocr"] is False
     assert str(workspace) not in json.dumps(result)
+
+
+def test_kordoc_arguments_match_the_pinned_read_only_4_2_5_schemas(contract_workspace):
+    workspace, _vault = contract_workspace
+    doc = workspace / "documents" / "contract.pdf"
+    doc.parent.mkdir()
+    doc.write_bytes(b"fixture")
+    adapter = KordocAdapter(FakeMcpManager())
+
+    for tool, arguments, expected in (
+        ("parse_document", {"ocr": "yes"}, "invalid_request"),
+        ("parse_document", {"url": "https://example.invalid"}, "kordoc_argument_forbidden"),
+        ("detect_format", {"ocr": False}, "kordoc_argument_forbidden"),
+        ("parse_pages", {"pages": "1;2"}, "invalid_request"),
+        ("parse_table", {"table_index": -1}, "invalid_request"),
+        ("parse_chunks", {"granularity": "document"}, "invalid_request"),
+        ("parse_form", {"fields": []}, "kordoc_argument_forbidden"),
+    ):
+        with pytest.raises(ContractReviewError) as exc:
+            adapter.admit(
+                owner="alice",
+                server_id="kordoc",
+                tool=tool,
+                workspace=str(workspace),
+                relative_path="documents/contract.pdf",
+                arguments=arguments,
+            )
+        assert exc.value.code == expected
 
 
 def test_cloud_placeholder_is_not_accepted_as_evidence(contract_workspace, monkeypatch):
@@ -405,7 +470,6 @@ def test_kordoc_rejects_same_named_tool_from_unapproved_server(contract_workspac
 async def test_korean_law_official_evidence_and_diagnostics():
     ok = FakeMcpManager(
         kind="korean-law",
-        result={"stdout": "법령명: 대한민국헌법\n법령ID: 1\n시행일: 1988-02-25", "exit_code": 0},
     )
     evidence = await KoreanLawAdapter(ok, timeout=1).call(
         owner="alice", server_id="korean-law", tool="search_law",
@@ -414,7 +478,14 @@ async def test_korean_law_official_evidence_and_diagnostics():
     assert evidence["state"] == "completed"
     assert evidence["evidence_type"] == "official_legal"
     assert evidence["source"] == "law.go.kr"
+    assert evidence["tool"] == "get_law_text"
+    assert evidence["discovery_tool"] == "search_law"
+    assert evidence["citation_id"] == "law.go.kr · 대한민국헌법 · MST 61603"
     assert "대한민국헌법" in evidence["output"]
+    assert ok.calls == [
+        ("mcp__korean-law__search_law", {"query": "대한민국헌법", "display": 1}),
+        ("mcp__korean-law__get_law_text", {"mst": "61603"}),
+    ]
 
     with pytest.raises(ContractReviewError) as exc:
         await KoreanLawAdapter(FakeMcpManager(kind="korean-law", result={"stderr": "429", "exit_code": 1})).call(
@@ -429,6 +500,55 @@ async def test_korean_law_official_evidence_and_diagnostics():
             arguments={"tool_name": "anything", "params": {}},
         )
     assert exc.value.code == "law_tool_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_korean_law_rejects_partial_candidates_and_identity_swaps():
+    partial = FakeMcpManager(
+        kind="korean-law",
+        result={"stdout": "검색 결과 (총 1건):\n\n📂 부분매칭 (1건 중 1건 표시):\n1. 대한민국헌법재판소법 [현행]\n   - MST: 999999\n", "exit_code": 0},
+    )
+    with pytest.raises(ContractReviewError) as exc:
+        await KoreanLawAdapter(partial, timeout=1).call(
+            owner="alice", server_id="korean-law", tool="search_law",
+            arguments={"query": "대한민국헌법"},
+        )
+    assert exc.value.code == "law_exact_match_required"
+    assert len(partial.calls) == 1
+
+    swapped = FakeMcpManager(kind="korean-law")
+    original_call = swapped.call_tool
+
+    async def mutate_after_search(name, arguments):
+        result = await original_call(name, arguments)
+        if name.endswith("__search_law"):
+            swapped.schema_version += 1
+        return result
+
+    swapped.call_tool = mutate_after_search
+    with pytest.raises(ContractReviewError) as exc:
+        await KoreanLawAdapter(swapped, timeout=1).call(
+            owner="alice", server_id="korean-law", tool="search_law",
+            arguments={"query": "대한민국헌법"},
+        )
+    assert exc.value.code == "mcp_identity_changed"
+
+
+@pytest.mark.asyncio
+async def test_korean_law_verifies_precedent_search_with_decision_text():
+    manager = FakeMcpManager(kind="korean-law")
+    evidence = await KoreanLawAdapter(manager, timeout=1).call(
+        owner="alice", server_id="korean-law", tool="search_decisions",
+        arguments={"domain": "precedent", "query": "손해배상", "display": 5},
+    )
+
+    assert evidence["tool"] == "get_decision_text"
+    assert evidence["discovery_tool"] == "search_decisions"
+    assert evidence["citation_id"] == "law.go.kr · 2020다12345 · ID 12345"
+    assert manager.calls[-1] == (
+        "mcp__korean-law__get_decision_text",
+        {"domain": "precedent", "id": "12345"},
+    )
 
 
 @pytest.mark.asyncio

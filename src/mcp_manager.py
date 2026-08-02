@@ -18,6 +18,21 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
+
+def stdio_launch_identity_hash(command: str, args: List[str]) -> str:
+    """Return a non-secret identity for the executable name and exact argv."""
+
+    executable = os.path.basename(str(command or "")).casefold()
+    if executable in {"npx.cmd", "npx.exe"}:
+        executable = "npx"
+    payload = json.dumps(
+        ["stdio", executable, [str(value) for value in (args or [])]],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
@@ -236,6 +251,7 @@ class McpManager:
                     "transport": "stdio",
                     "tool_count": len(tools),
                     "identity": identity,
+                    "launch_identity_hash": stdio_launch_identity_hash(command, args),
                 }
 
                 registered = True
@@ -614,6 +630,7 @@ class McpManager:
                     "connection_identity_hash": hashlib.sha256(
                         str(conn.get("identity", "")).encode("utf-8")
                     ).hexdigest(),
+                    "launch_identity_hash": str(conn.get("launch_identity_hash") or ""),
                     "connection_status": conn.get("status", "disconnected"),
                     "inventory_generation": self._generation,
                     "name": tool["name"],

@@ -4198,7 +4198,9 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
         cache: 'no-store',
       });
       if (!_getForegroundStreamState() || _backgroundStreams.has(sid)) return;
-      if (res.status !== 404) return;
+      if (!res.ok) return;
+      const status = await res.json();
+      if (status.status === 'streaming') return;
 
       console.warn('[stream-watchdog] Local stream was stale and server has no active stream. Unlocking composer.');
       if (active.abortCtrl && !active.abortCtrl.signal.aborted) {

@@ -5,7 +5,7 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 
-from routes.contract_review_routes import setup_contract_review_routes
+from routes.contract_review_routes import contract_review_timeouts_from_env, setup_contract_review_routes
 from src.contract_review import ContractReviewWorkspaceService
 
 from tests.test_contract_review_workspace_v2 import FakeMcpManager, _valid_result
@@ -71,7 +71,9 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
         "id": "kordoc", "name": "kordoc", "tools": ["parse_document"],
     }]
     assert profile.json()["korean_law_servers"] == [{
-        "id": "korean-law", "name": "korean-law", "tools": ["search_law"],
+        "id": "korean-law", "name": "korean-law", "tools": [
+            "get_decision_text", "get_law_text", "search_decisions", "search_law",
+        ],
     }]
 
     index_response = await _request(app, "POST", "/api/contract-review/vault/index", json={
@@ -125,6 +127,8 @@ async def test_search_parse_law_context_and_explicit_save(contract_api):
     assert payload["strategy"] == "fresh"
     assert payload["local_document_evidence"]
     assert payload["official_legal_evidence"]
+    assert payload["official_legal_evidence"][0]["citation_id"] == "law.go.kr · 대한민국헌법 · MST 61603"
+    assert payload["official_legal_evidence"][0]["tool"] == "get_law_text"
     assert str(workspace) not in prepared.text
     assert saved == []
 
@@ -189,3 +193,13 @@ async def test_auth_disabled_uses_single_owner_namespace(contract_api, monkeypat
     })
     assert result.status_code == 200
     assert result.json()["results"]
+
+
+def test_contract_review_timeout_configuration_is_bounded(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_CONTRACT_REVIEW_KORDOC_TIMEOUT_SECONDS", "0.25")
+    monkeypatch.setenv("ODYSSEUS_CONTRACT_REVIEW_LAW_TIMEOUT_SECONDS", "not-a-number")
+    assert contract_review_timeouts_from_env() == (0.25, 60.0)
+
+    monkeypatch.setenv("ODYSSEUS_CONTRACT_REVIEW_KORDOC_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("ODYSSEUS_CONTRACT_REVIEW_LAW_TIMEOUT_SECONDS", "99999")
+    assert contract_review_timeouts_from_env() == (0.05, 900.0)
