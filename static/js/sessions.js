@@ -8,6 +8,7 @@ import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260728codexreasoning1';
 import themeModule from './theme.js';
 import spinnerModule from './spinner.js';
+import { parseOdysseusTimestamp } from './time.js';
 
 const API_BASE = window.location.origin;
 
@@ -2865,14 +2866,14 @@ const _arc = { data: [], total: 0, search: '', offset: 0, sort: 'recent', model:
 
 function _arcRelativeTime(iso) {
   if (!iso) return '';
-  const diff = Date.now() - new Date(iso).getTime();
+  const diff = Date.now() - parseOdysseusTimestamp(iso).getTime();
   const mins = Math.floor(diff / 60000);
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+  return parseOdysseusTimestamp(iso).toLocaleDateString();
 }
 
 // ── Actions (pure side-effects, no DOM creation) ──

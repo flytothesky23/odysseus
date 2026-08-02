@@ -12,6 +12,7 @@ import markdownModule from './markdown.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { langIcon } from './langIcons.js';
 import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { parseOdysseusTimestamp } from './time.js';
 
 // ── Injected references from documentModule ──
 let API_BASE = '';
@@ -298,7 +299,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
   function libraryRelativeTime(isoString) {
     if (!isoString) return '';
     const now = Date.now();
-    const then = new Date(isoString).getTime();
+    const then = parseOdysseusTimestamp(isoString).getTime();
     const diffS = Math.floor((now - then) / 1000);
     if (diffS < 60) return 'just now';
     const diffM = Math.floor(diffS / 60);
@@ -310,7 +311,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     if (diffD < 14) return diffD + 'd ago';
     const diffW = Math.floor(diffD / 7);
     if (diffW < 8) return diffW + 'w ago';
-    return new Date(isoString).toLocaleDateString();
+    return parseOdysseusTimestamp(isoString).toLocaleDateString();
   }
 
   async function libraryFetch(append) {
@@ -3146,14 +3147,14 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
 
     function _relTime(iso) {
       if (!iso) return '';
-      const diff = Date.now() - new Date(iso).getTime();
+      const diff = Date.now() - parseOdysseusTimestamp(iso).getTime();
       const mins = Math.floor(diff / 60000);
       if (mins < 60) return mins + 'm ago';
       const hrs = Math.floor(mins / 60);
       if (hrs < 24) return hrs + 'h ago';
       const days = Math.floor(hrs / 24);
       if (days < 30) return days + 'd ago';
-      return new Date(iso).toLocaleDateString();
+      return parseOdysseusTimestamp(iso).toLocaleDateString();
     }
 
     // Switch to the initial tab. Always call this — even when the
