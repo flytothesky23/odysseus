@@ -1,4 +1,5 @@
 from src.report_design import build_design_spec
+from src.research_handler import _design_image_prompt_specs
 
 
 def test_management_design_spec_preserves_document_preset_and_maps_one_scene():
@@ -126,3 +127,29 @@ def test_context_palettes_change_surface_and_secondary_color_not_only_accent():
     assert product.tokens.paper != editorial.tokens.paper
     assert comparison.tokens.accent_secondary != product.tokens.accent_secondary
     assert howto.tokens.surface != comparison.tokens.surface
+
+
+def test_image_prompt_uses_redacted_context_design_not_private_report_text():
+    spec = build_design_spec(
+        category="product",
+        headings=[
+            {
+                "level": 2,
+                "slug": "private-heading-id",
+                "text": "내부 회사명과 매출 91억이 들어간 비공개 제목",
+            }
+        ],
+        image_mode="editorial",
+        assets=[],
+    )
+
+    prompts = _design_image_prompt_specs("product", "editorial", spec)
+    combined = "\n".join(item["prompt"] for item in prompts)
+
+    assert spec.context_profile.visual_metaphor in combined
+    assert spec.manifest.selected_composition in combined
+    assert spec.tokens.paper in combined
+    assert "내부 회사명" not in combined
+    assert "91억" not in combined
+    assert "/Users/" not in combined
+    assert "No readable text" in combined

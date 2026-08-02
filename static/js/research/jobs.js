@@ -72,6 +72,7 @@ async function _reconnectActive(options = {}) {
           result: null, sources: null, findings: null,
           errorMsg: null, avgDuration: null, modelName: null,
           artifact_formats: task.artifact_formats || ['html'],
+          html_renderers: task.html_renderers || ['document'],
           reasoning_effort: task.reasoning_effort || '',
           research_mode: task.research_mode || 'research',
           design_image_mode: task.design_image_mode || 'none',
@@ -116,6 +117,7 @@ async function _syncLibrary(options = {}) {
             thumbnail: item.thumbnail || existing.thumbnail || '',
             category: item.category || existing.category || '',
             artifact_formats: item.artifact_formats || existing.artifact_formats || ['html'],
+            html_renderers: item.html_renderers || existing.html_renderers || ['document'],
             reasoning_effort: item.reasoning_effort || existing.reasoning_effort || '',
             research_mode: item.research_mode || existing.research_mode || 'research',
             design_image_mode: item.design_image_mode || existing.design_image_mode || 'none',
@@ -139,6 +141,7 @@ async function _syncLibrary(options = {}) {
           thumbnail: item.thumbnail || '',
           category: item.category || '',
           artifact_formats: item.artifact_formats || ['html'],
+          html_renderers: item.html_renderers || ['document'],
           reasoning_effort: item.reasoning_effort || '',
           research_mode: item.research_mode || 'research',
           design_image_mode: item.design_image_mode || 'none',
@@ -281,6 +284,7 @@ function _makeJob(query, settings) {
     result: null, sources: null, findings: null,
     category: settings?.category || '',
     artifact_formats: settings?.artifact_formats || ['html'],
+    html_renderers: settings?.html_renderers || ['document'],
     reasoning_effort: settings?.reasoning_effort || '',
     research_mode: settings?.research_mode || 'research',
     design_image_mode: settings?.design_image_mode || 'none',
@@ -318,6 +322,7 @@ async function _launchJob(job) {
   job.status = 'running';
   job.startedAt = Date.now();
   if (data.artifact_formats) job.artifact_formats = data.artifact_formats;
+  if (data.html_renderers) job.html_renderers = data.html_renderers;
   if (data.reasoning_effort !== undefined) job.reasoning_effort = data.reasoning_effort || job.reasoning_effort || '';
   if (data.research_mode) job.research_mode = data.research_mode;
   if (data.design_image_mode) job.design_image_mode = data.design_image_mode;
@@ -368,6 +373,7 @@ async function _pollFallback(job) {
     if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     if (d.research_mode) job.research_mode = d.research_mode;
     if (d.design_image_mode) job.design_image_mode = d.design_image_mode;
+    if (d.html_renderers) job.html_renderers = d.html_renderers;
     if (d.design_assets_status) job.design_assets_status = d.design_assets_status;
     if (d.status !== 'running') {
       _finishJob(job, d.status === 'done' ? 'done' : 'error');
@@ -407,6 +413,7 @@ async function _fetchResult(job) {
     job.findings = d.raw_findings;
     if (d.category && !job.category) job.category = d.category;
     if (d.artifact_formats) job.artifact_formats = d.artifact_formats;
+    if (d.html_renderers) job.html_renderers = d.html_renderers;
     if (d.reasoning_effort !== undefined) job.reasoning_effort = d.reasoning_effort || job.reasoning_effort || '';
     if (d.research_mode) job.research_mode = d.research_mode;
     if (d.design_image_mode) job.design_image_mode = d.design_image_mode;

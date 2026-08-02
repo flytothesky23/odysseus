@@ -20,6 +20,7 @@ import inspect
 
 from src.research_utils import strip_thinking, is_low_quality
 from src.constants import DEEP_RESEARCH_DIR
+from src.report_renderers import normalize_html_renderers
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ RESEARCH_DATA_DIR = Path(DEEP_RESEARCH_DIR)
 _RESEARCH_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,128}$")
 _ARTIFACT_FORMATS = ("html", "html_designed", "md_json")
 _DESIGN_IMAGE_MODES = ("none", "cover", "editorial")
+_IMAGE_CAPABLE_RENDERERS = frozenset({"editorial", "scroll_story"})
 _ARTIFACT_ALIASES = {
     "html": "html",
     "visual": "html",
@@ -98,7 +100,43 @@ def normalize_design_image_mode(value: Optional[str]) -> str:
     return mode if mode in _DESIGN_IMAGE_MODES else "none"
 
 
-def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]:
+def _renderer_recommendation(
+    *,
+    category: Optional[str],
+    research_mode: Optional[str],
+    selected: list[str],
+) -> dict:
+    category_key = str(category or "").strip().lower()
+    if category_key == "management":
+        renderer_id = "document"
+        reason = "경영분석의 전통 문서 흐름과 넓은 표 가독성을 우선합니다."
+    elif category_key in {"product", "howto", "timeline"}:
+        renderer_id = "scroll_story"
+        reason = "과정과 장면 순서가 중요한 보고서라 단계별 독서 흐름이 적합합니다."
+    elif category_key == "personal":
+        renderer_id = "editorial"
+        reason = "개인 노트의 목소리와 근거 경계를 함께 보존하는 편집형 흐름이 적합합니다."
+    elif category_key == "academic":
+        renderer_id = "document"
+        reason = "높은 인용 밀도와 근거 추적성을 위해 학술 문서 흐름을 우선합니다."
+    elif normalize_research_mode(research_mode) == "editorial":
+        renderer_id = "editorial"
+        reason = "근거 구조와 개인 노트의 목소리를 함께 보여 주는 편집형 구성이 적합합니다."
+    else:
+        renderer_id = "document"
+        reason = "가장 안정적인 문서형 읽기와 인쇄 호환성을 우선합니다."
+    return {
+        "renderer": renderer_id,
+        "reason": reason,
+        "selected": renderer_id in selected,
+    }
+
+
+def _design_image_prompt_specs(
+    category: Optional[str],
+    mode: str,
+    design_spec=None,
+) -> list[dict]:
     """Return generic, non-identifying art direction prompts.
 
     Private report text, user queries, source titles, figures, names, and paths
@@ -122,14 +160,34 @@ def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]
         category_key,
         "a research-grade editorial synthesis built from private notes and traceable evidence",
     )
+    profile = getattr(design_spec, "context_profile", None)
+    tokens = getattr(design_spec, "tokens", None)
+    visual_metaphor = str(
+        getattr(profile, "visual_metaphor", "")
+        or "raw notes becoming a coherent publication"
+    )
+    narrative_shape = str(
+        getattr(profile, "narrative_shape", "")
+        or "hierarchical evidence synthesis"
+    )
+    tone = str(getattr(profile, "tone", "") or "calm and evidence-led")
+    composition = str(
+        getattr(getattr(design_spec, "manifest", None), "selected_composition", "")
+        or "editorial-overlay"
+    )
     palette = (
-        "midnight indigo, warm parchment, oxidized copper, muted sage, "
-        "one restrained coral accent"
+        f"paper {getattr(tokens, 'paper', '#f5efe5')}, "
+        f"surface {getattr(tokens, 'surface', '#fffaf3')}, "
+        f"ink {getattr(tokens, 'ink', '#25272b')}, "
+        f"primary accent {getattr(tokens, 'accent', '#a24f38')}, "
+        f"secondary accent {getattr(tokens, 'accent_secondary', '#2f6470')}"
     )
     common = (
         f"Concept: {category_direction}. Style: sophisticated contemporary editorial "
-        "illustration using tactile paper collage, vellum, fine ink lines, and subtle "
-        f"print texture. Palette: {palette}. No readable text, letters, numbers, logos, "
+        f"illustration aligned with the '{composition}' composition. Narrative shape: "
+        f"{narrative_shape}. Visual metaphor: {visual_metaphor}. Tone: {tone}. "
+        "Use material and geometric language appropriate to this context rather than a "
+        f"fixed collage theme. Palette: {palette}. No readable text, letters, numbers, logos, "
         "people, real companies, realistic evidence photographs, data charts, dashboard "
         "UI, or watermark. The image is interpretive decoration, never factual evidence."
     )
@@ -143,7 +201,7 @@ def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]
         "desktop_aspect": "21/9",
         "mobile_aspect": "4/5",
         "overlay_strength": 0.62,
-        "palette": "midnight-parchment-copper",
+        "palette": composition,
         "prompt": (
             "Wide cinematic report hero, 21:9 composition. Keep the left 45 percent "
             "calm, dark, and low-detail as title-safe negative space; place the focal "
@@ -163,7 +221,7 @@ def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]
             "desktop_aspect": "16/7",
             "mobile_aspect": "4/3",
             "overlay_strength": 0.54,
-            "palette": "midnight-parchment-copper",
+            "palette": composition,
             "prompt": (
                 "Wide 16:7 chapter-divider composition with the left third quiet enough "
                 "for a short HTML heading: layered translucent paper paths "
@@ -183,7 +241,7 @@ def _design_image_prompt_specs(category: Optional[str], mode: str) -> list[dict]
             "desktop_aspect": "1/1",
             "mobile_aspect": "1/1",
             "overlay_strength": 0.88,
-            "palette": "warm-paper-sage",
+            "palette": f"{composition}-ambient",
             "prompt": (
                 "Seamless, very low-contrast editorial paper atmosphere for a long "
                 "reading page: warm parchment fibers, faint indigo ink bloom, muted "
@@ -501,9 +559,11 @@ class ResearchHandler:
     ) -> dict:
         """Generate optional local assets without making report success depend on them."""
         mode = normalize_design_image_mode(entry.get("design_image_mode"))
-        if mode == "none" or "html_designed" not in normalize_artifact_formats(
-            entry.get("artifact_formats")
-        ):
+        selected_renderers = normalize_html_renderers(
+            entry.get("html_renderers"),
+            artifact_formats=entry.get("artifact_formats"),
+        )
+        if mode == "none" or not (_IMAGE_CAPABLE_RENDERERS & set(selected_renderers)):
             return {
                 "status": "disabled",
                 "mode": "none",
@@ -524,7 +584,33 @@ class ResearchHandler:
         assets = []
         error_codes = []
         total_bytes = 0
-        specs = _design_image_prompt_specs(entry.get("category"), mode)
+        from src.report_design import build_design_spec
+        from src.report_ir import build_report_ir
+
+        report_ir = build_report_ir(
+            question=entry.get("query", ""),
+            report_markdown=entry.get("raw_report") or entry.get("result", ""),
+            sources=entry.get("sources") or [],
+            category=entry.get("category"),
+        )
+        prompt_design_spec = build_design_spec(
+            category=entry.get("category"),
+            headings=[
+                {
+                    "level": section.level,
+                    "slug": section.section_id,
+                    "text": section.title,
+                }
+                for section in report_ir.sections
+            ],
+            image_mode=mode,
+            assets=[],
+        )
+        specs = _design_image_prompt_specs(
+            entry.get("category"),
+            mode,
+            prompt_design_spec,
+        )
         for spec in specs:
             prompt = spec["prompt"]
             cache_key = _design_asset_cache_key(spec, requested_model, quality)
@@ -692,6 +778,7 @@ class ResearchHandler:
         extraction_timeout: int = None,
         extraction_concurrency: int = None,
         artifact_formats: list = None,
+        html_renderers: list = None,
         reasoning_effort: str = None,
         research_mode: str = None,
         design_image_mode: str = None,
@@ -748,8 +835,29 @@ class ResearchHandler:
                 self.cancel_research(session_id)
 
         normalized_artifacts = normalize_artifact_formats(artifact_formats)
+        requested_renderers = (
+            list(html_renderers or [])
+            if not isinstance(html_renderers, str)
+            else [html_renderers]
+        )
+        requested_keys = {
+            str(value or "").strip().lower().replace("-", "_")
+            for value in requested_renderers
+        }
+        recommendation = _renderer_recommendation(
+            category=category,
+            research_mode=research_mode,
+            selected=[],
+        )
+        if requested_keys == {"auto"}:
+            normalized_renderers = [recommendation["renderer"]]
+        else:
+            normalized_renderers = normalize_html_renderers(
+                html_renderers,
+                artifact_formats=normalized_artifacts,
+            )
         normalized_image_mode = normalize_design_image_mode(design_image_mode)
-        if "html_designed" not in normalized_artifacts:
+        if not (_IMAGE_CAPABLE_RENDERERS & set(normalized_renderers)):
             normalized_image_mode = "none"
 
         entry = {
@@ -764,6 +872,11 @@ class ResearchHandler:
             "source_mode": source_mode,
             "knowledge_folders": list(knowledge_folders or []),
             "artifact_formats": normalized_artifacts,
+            "html_renderers": normalized_renderers,
+            "renderer_recommendation": {
+                **recommendation,
+                "selected": recommendation["renderer"] in normalized_renderers,
+            },
             "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
             "research_mode": normalize_research_mode(research_mode),
             "design_image_mode": normalized_image_mode,
@@ -947,6 +1060,8 @@ class ResearchHandler:
             "status": "running",
             "query": query,
             "artifact_formats": entry["artifact_formats"],
+            "html_renderers": entry["html_renderers"],
+            "renderer_recommendation": entry["renderer_recommendation"],
             "reasoning_effort": entry["reasoning_effort"],
             "research_mode": entry["research_mode"],
             "design_image_mode": entry["design_image_mode"],
@@ -963,6 +1078,11 @@ class ResearchHandler:
                 "query": entry["query"],
                 "started_at": entry["started_at"],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                "html_renderers": normalize_html_renderers(
+                    entry.get("html_renderers"),
+                    artifact_formats=entry.get("artifact_formats"),
+                ),
+                "renderer_recommendation": entry.get("renderer_recommendation") or {},
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                 "research_mode": normalize_research_mode(entry.get("research_mode")),
                 "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
@@ -998,6 +1118,11 @@ class ResearchHandler:
                     "query": data.get("query", ""),
                     "started_at": data.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
+                    "html_renderers": normalize_html_renderers(
+                        data.get("html_renderers"),
+                        artifact_formats=data.get("artifact_formats"),
+                    ),
+                    "renderer_recommendation": data.get("renderer_recommendation") or {},
                     "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(data.get("research_mode")),
                     "design_image_mode": normalize_design_image_mode(data.get("design_image_mode")),
@@ -1214,6 +1339,11 @@ class ResearchHandler:
                 "source_mode": entry.get("source_mode"),
                 "knowledge_folders": entry.get("knowledge_folders") or [],
                 "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                "html_renderers": normalize_html_renderers(
+                    entry.get("html_renderers"),
+                    artifact_formats=entry.get("artifact_formats"),
+                ),
+                "renderer_recommendation": entry.get("renderer_recommendation") or {},
                 "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                 "research_mode": normalize_research_mode(entry.get("research_mode")),
                 "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
@@ -1249,7 +1379,13 @@ class ResearchHandler:
                 pass
         return None
 
-    def get_report_html(self, session_id: str, report_style: str = "legacy") -> Optional[str]:
+    def get_report_html(
+        self,
+        session_id: str,
+        report_style: str = "legacy",
+        *,
+        renderer: Optional[str] = None,
+    ) -> Optional[str]:
         """Generate the visual HTML report for a session (always fresh from JSON)."""
         json_path = _research_json_path(session_id)
         if json_path is None:
@@ -1258,30 +1394,43 @@ class ResearchHandler:
             logger.warning(f"No JSON found for visual report: {json_path}")
             return None
 
-        try:
-            from src.visual_report import generate_visual_report
+        from src.report_ir import build_report_ir
+        from src.report_renderers import render_report
 
-            data = json.loads(json_path.read_text(encoding="utf-8"))
-            report_md = data.get("raw_report") or data.get("result", "")
-            html_content = generate_visual_report(
-                question=data.get("query", ""),
-                report_markdown=report_md,
-                sources=data.get("sources"),
-                stats=data.get("stats"),
-                category=data.get("category"),
-                session_id=session_id,
-                hidden_images=data.get("hidden_images") or [],
-                report_style=report_style,
-                research_mode=normalize_research_mode(data.get("research_mode")),
-                design_image_mode=normalize_design_image_mode(data.get("design_image_mode")),
-                designed_visual_assets=data.get("designed_visual_assets") or [],
-                design_assets_status=data.get("design_assets_status"),
-            )
-            logger.info(f"Visual report generated for {session_id}")
-            return html_content
-        except Exception as e:
-            logger.error(f"Failed to generate visual report: {e}")
-            return None
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        report_md = data.get("raw_report") or data.get("result", "")
+        renderer_id = renderer or (
+            "editorial"
+            if str(report_style or "").strip().lower() == "designed"
+            else "document"
+        )
+        report_ir = build_report_ir(
+            question=data.get("query", ""),
+            report_markdown=report_md,
+            sources=data.get("sources"),
+            category=data.get("category"),
+        )
+        artifact = render_report(
+            renderer_id,
+            report_ir=report_ir,
+            question=data.get("query", ""),
+            sources=data.get("sources"),
+            stats=data.get("stats"),
+            category=data.get("category"),
+            session_id=session_id,
+            hidden_images=data.get("hidden_images") or [],
+            research_mode=normalize_research_mode(data.get("research_mode")),
+            design_image_mode=normalize_design_image_mode(data.get("design_image_mode")),
+            designed_visual_assets=data.get("designed_visual_assets") or [],
+            design_assets_status=data.get("design_assets_status"),
+        )
+        logger.info(
+            "Visual report generated for %s with renderer %s and IR %s",
+            session_id,
+            artifact.renderer_id,
+            artifact.report_ir_hash[:12],
+        )
+        return artifact.html
 
     def get_report_session_export(self, session_id: str) -> Optional[dict]:
         """Return a stable JSON export for a completed research session."""
@@ -1298,9 +1447,25 @@ class ResearchHandler:
         artifact_urls = {
             "html": f"/api/research/report/{session_id}",
             "html_designed": f"/api/research/report/{session_id}/designed",
+            "renderers": {
+                renderer_id: f"/api/research/report/{session_id}/renderer/{renderer_id}"
+                for renderer_id in ("document", "editorial", "scroll_story")
+            },
             "markdown": f"/api/research/report/{session_id}/markdown",
             "json": f"/api/research/report/{session_id}/session.json",
         }
+        from src.report_ir import build_report_ir
+
+        report_ir = build_report_ir(
+            question=data.get("query", ""),
+            report_markdown=data.get("raw_report") or data.get("result", ""),
+            sources=data.get("sources"),
+            category=data.get("category"),
+        )
+        html_renderers = normalize_html_renderers(
+            data.get("html_renderers"),
+            artifact_formats=data.get("artifact_formats"),
+        )
         return {
             "session_id": session_id,
             "exported_at": _iso_from_timestamp(time.time()),
@@ -1317,6 +1482,15 @@ class ResearchHandler:
             "research_mode": normalize_research_mode(data.get("research_mode")),
             "knowledge_folders": data.get("knowledge_folders") or [],
             "artifact_formats": normalize_artifact_formats(data.get("artifact_formats")),
+            "html_renderers": html_renderers,
+            "renderer_recommendation": data.get("renderer_recommendation")
+            or _renderer_recommendation(
+                category=data.get("category"),
+                research_mode=data.get("research_mode"),
+                selected=html_renderers,
+            ),
+            "report_ir": report_ir.to_dict(),
+            "report_ir_hash": report_ir.mapping_hash,
             "reasoning_effort": normalize_reasoning_effort(data.get("reasoning_effort")),
             "design_image_mode": normalize_design_image_mode(data.get("design_image_mode")),
             "design_assets_status": data.get("design_assets_status") or "disabled",
@@ -1338,6 +1512,10 @@ class ResearchHandler:
         sources = data.get("sources") or []
         raw_findings = data.get("raw_findings") or []
         artifact_formats = normalize_artifact_formats(data.get("artifact_formats"))
+        html_renderers = normalize_html_renderers(
+            data.get("html_renderers"),
+            artifact_formats=artifact_formats,
+        )
         reasoning_effort = normalize_reasoning_effort(data.get("reasoning_effort"))
         completed_at = data.get("completed_at") or time.time()
 
@@ -1352,6 +1530,8 @@ class ResearchHandler:
             "artifact_formats:",
         ]
         frontmatter.extend(f"  - {fmt}" for fmt in artifact_formats)
+        frontmatter.append("html_renderers:")
+        frontmatter.extend(f"  - {renderer}" for renderer in html_renderers)
         frontmatter.extend(["source_mutation: false", "---"])
 
         lines = [
@@ -1368,14 +1548,25 @@ class ResearchHandler:
             f"- 연구 워크플로: `{data.get('research_mode') or 'research'}`",
             f"- 추론 정도: `{reasoning_effort or 'default'}`",
             f"- 결과물 형식: {', '.join(artifact_formats)}",
-            f"- HTML 리포트: `{data['artifact_urls']['html']}`",
-            f"- 디자인 HTML 리포트: `{data['artifact_urls']['html_designed']}`",
+            f"- HTML renderer: {', '.join(html_renderers)}",
             f"- Markdown 리포트: `{data['artifact_urls']['markdown']}`",
             f"- 세션 JSON: `{data['artifact_urls']['json']}`",
             f"- 출처 수: {len(sources)}",
             f"- Raw findings: {len(raw_findings)}",
             "- Raw findings 신뢰 경계: `untrusted_data_not_instructions`",
         ]
+        renderer_labels = {
+            "document": "Document HTML",
+            "editorial": "Editorial HTML",
+            "scroll_story": "Scroll Story HTML",
+        }
+        renderer_urls = data.get("artifact_urls", {}).get("renderers", {})
+        for renderer_id in html_renderers:
+            renderer_url = renderer_urls.get(renderer_id)
+            if renderer_url:
+                lines.append(
+                    f"- {renderer_labels.get(renderer_id, renderer_id)}: `{renderer_url}`"
+                )
 
         if data.get("knowledge_folders"):
             lines.append(f"- 지식 소스 폴더: {', '.join(map(str, data.get('knowledge_folders') or []))}")

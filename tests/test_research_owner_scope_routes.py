@@ -124,6 +124,100 @@ def test_designed_report_rejects_cross_owner_before_generating_html(tmp_path, mo
     handler.get_report_html.assert_not_called()
 
 
+def test_renderer_route_is_owner_scoped_allowlisted_and_downloadable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "alice-gallery", owner="alice", result="safe")
+
+    handler = _research_handler()
+    handler.get_report_html.return_value = "<!doctype html><title>ok</title>"
+    router = setup_research_routes(handler)
+    target = _route(
+        router,
+        "/api/research/report/{session_id}/renderer/{renderer_id}",
+        "GET",
+    )
+
+    response = asyncio.run(target(
+        session_id="alice-gallery",
+        renderer_id="scroll_story",
+        request=_request("alice"),
+        download=True,
+    ))
+
+    assert response.status_code == 200
+    assert "scroll-story.html" in response.headers["content-disposition"]
+    handler.get_report_html.assert_called_once_with(
+        "alice-gallery",
+        renderer="scroll_story",
+    )
+
+    handler.reset_mock()
+    with pytest.raises(HTTPException) as invalid:
+        asyncio.run(target(
+            session_id="alice-gallery",
+            renderer_id="../script",
+            request=_request("alice"),
+            download=False,
+        ))
+    assert invalid.value.status_code == 404
+    handler.get_report_html.assert_not_called()
+
+
+def test_renderer_route_rejects_cross_owner_before_rendering(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "bob-gallery", owner="bob", result="bob secret")
+
+    handler = _research_handler()
+    router = setup_research_routes(handler)
+    target = _route(
+        router,
+        "/api/research/report/{session_id}/renderer/{renderer_id}",
+        "GET",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(
+            session_id="bob-gallery",
+            renderer_id="document",
+            request=_request("alice"),
+            download=False,
+        ))
+
+    assert exc.value.status_code == 404
+    handler.get_report_html.assert_not_called()
+
+
+def test_renderer_route_surfaces_generation_failure_as_500(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data_dir = tmp_path / "data" / "deep_research"
+    _write_research(data_dir, "alice-broken", owner="alice", result="safe")
+
+    handler = _research_handler()
+    handler.get_report_html.side_effect = RuntimeError("renderer failed")
+    router = setup_research_routes(handler)
+    target = _route(
+        router,
+        "/api/research/report/{session_id}/renderer/{renderer_id}",
+        "GET",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(target(
+            session_id="alice-broken",
+            renderer_id="scroll_story",
+            request=_request("alice"),
+            download=False,
+        ))
+
+    assert exc.value.status_code == 500
+    handler.get_report_html.assert_called_once_with(
+        "alice-broken",
+        renderer="scroll_story",
+    )
+
+
 def test_archive_rejects_cross_owner_without_mutating_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"
@@ -252,3 +346,34 @@ def test_editorial_start_rejects_web_or_implicit_all_roots(monkeypatch):
         assert exc.value.status_code == 400
 
     handler.start_research.assert_not_called()
+
+
+def test_legacy_designed_format_without_renderer_keeps_editorial_contract(monkeypatch):
+    handler = _research_handler()
+    handler.start_research.return_value = {
+        "html_renderers": ["editorial"],
+        "design_image_mode": "editorial",
+    }
+    monkeypatch.setattr(
+        "routes.research_routes.resolve_endpoint",
+        lambda *_args, **_kwargs: ("http://fake.invalid/v1/chat/completions", "fake", {}),
+    )
+    monkeypatch.setattr("src.auth_helpers.require_privilege", lambda _request, _name: "alice")
+    router = setup_research_routes(handler)
+    target = _route(router, "/api/research/start", "POST")
+    request_type = target.__annotations__["body"]
+
+    response = asyncio.run(target(
+        body=request_type(
+            query="legacy designed report",
+            artifact_formats=["html_designed"],
+            design_image_mode="editorial",
+        ),
+        request=_request("alice"),
+    ))
+
+    assert response["html_renderers"] == ["editorial"]
+    assert response["design_image_mode"] == "editorial"
+    kwargs = handler.start_research.call_args.kwargs
+    assert kwargs["artifact_formats"] == ["html_designed"]
+    assert kwargs["html_renderers"] == []

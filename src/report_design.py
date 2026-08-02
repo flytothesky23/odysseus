@@ -200,6 +200,60 @@ _PRESETS = {
             ambient_opacity=0.075,
         ),
     ),
+    "academic": (
+        "scholarly-evidence",
+        DesignTokens(
+            accent="#355b8c",
+            accent_soft="#dfe8f3",
+            accent_secondary="#7c5a3b",
+            accent_secondary_soft="#eadfce",
+            paper="#f1f3f5",
+            surface="#ffffff",
+            surface_alt="#e5e9ed",
+            ink="#1b2733",
+            ink_muted="#5d6872",
+            hero_scrim="#182b40",
+            hero_text="#f8fbff",
+            hero_kicker="#d8c397",
+            ambient_opacity=0.045,
+        ),
+    ),
+    "personal": (
+        "intimate-essay",
+        DesignTokens(
+            accent="#8b4f68",
+            accent_soft="#eedde5",
+            accent_secondary="#486c62",
+            accent_secondary_soft="#dbe8e2",
+            paper="#f8f1ed",
+            surface="#fffaf7",
+            surface_alt="#eee0da",
+            ink="#30262b",
+            ink_muted="#74636a",
+            hero_scrim="#432c38",
+            hero_text="#fff8fb",
+            hero_kicker="#edc58f",
+            ambient_opacity=0.085,
+        ),
+    ),
+    "timeline": (
+        "chronology-spine",
+        DesignTokens(
+            accent="#a04b35",
+            accent_soft="#f0ded7",
+            accent_secondary="#355e75",
+            accent_secondary_soft="#d9e5eb",
+            paper="#f4f0e8",
+            surface="#fffdf8",
+            surface_alt="#e9e2d7",
+            ink="#292722",
+            ink_muted="#69645b",
+            hero_scrim="#33251f",
+            hero_text="#fffaf1",
+            hero_kicker="#efc47f",
+            ambient_opacity=0.07,
+        ),
+    ),
     "default": (
         "editorial-overlay",
         DesignTokens(
@@ -283,6 +337,54 @@ def _context_profile(
             accessibility=("mobile", "print", "reduced-motion", "screen-reader"),
             visual_metaphor="intersecting evidence paths",
         )
+    if category_key == "academic":
+        return ContextProfile(
+            genre="academic-evidence",
+            audience="research readers",
+            purpose="audit claims and preserve source traceability",
+            tone="measured and scholarly",
+            narrative_shape="thesis and evidence",
+            evidence_density="very high",
+            source_modality="citations, notes, and structured evidence",
+            emotional_temperature="low",
+            data_weight="medium",
+            image_weight="low" if image_mode == "none" else "supporting",
+            uncertainty_treatment="limitations and counter-evidence are explicit",
+            accessibility=("mobile", "print", "reduced-motion", "screen-reader"),
+            visual_metaphor="layers of evidence converging on a defensible thesis",
+        )
+    if category_key == "personal":
+        return ContextProfile(
+            genre="personal-knowledge-essay",
+            audience="author and trusted readers",
+            purpose="preserve personal voice while clarifying evidence and inference",
+            tone="intimate, humane, and precise",
+            narrative_shape="reflective braided essay",
+            evidence_density="medium",
+            source_modality="personal notes, memories, and reference fragments",
+            emotional_temperature="medium-high",
+            data_weight="low",
+            image_weight="supporting" if image_mode != "none" else "low",
+            uncertainty_treatment="memory and interpretation remain visibly qualified",
+            accessibility=("mobile", "print", "reduced-motion", "screen-reader"),
+            visual_metaphor="separate note fragments braided into a readable personal thread",
+        )
+    if category_key == "timeline":
+        return ContextProfile(
+            genre="event-timeline",
+            audience="readers reconstructing change over time",
+            purpose="separate sequence, revision, causality, and unresolved gaps",
+            tone="investigative and chronological",
+            narrative_shape="chronology",
+            evidence_density="high",
+            source_modality="dated records and source fragments",
+            emotional_temperature="medium",
+            data_weight="medium",
+            image_weight="supporting" if image_mode != "none" else "low",
+            uncertainty_treatment="missing intervals and disputed ordering stay explicit",
+            accessibility=("mobile", "print", "reduced-motion", "screen-reader"),
+            visual_metaphor="dated evidence markers connected along a transparent chronology",
+        )
     return ContextProfile(
         genre="research-editorial",
         audience="thoughtful general readers",
@@ -337,6 +439,27 @@ def _composition_plan(
         rationale = (
             "상충 근거가 핵심이므로 비교 경로와 불확실성 표지를 우선합니다.",
             "시각 강조는 결론이 아니라 근거 대조 순서를 따릅니다.",
+        )
+    elif profile.genre == "academic-evidence":
+        candidates = ("scholarly-evidence", "minimal-paper", "evidence-dossier")
+        selected = "scholarly-evidence"
+        rationale = (
+            "인용 밀도가 높으므로 장식보다 논지와 근거 계층을 우선합니다.",
+            "한계와 반대 근거를 결론과 같은 가시성으로 유지합니다.",
+        )
+    elif profile.genre == "personal-knowledge-essay":
+        candidates = ("intimate-essay", "editorial-overlay", "split-narrative")
+        selected = "intimate-essay"
+        rationale = (
+            "개인의 목소리를 보존하면서 사실과 기억의 경계를 드러냅니다.",
+            "넓은 여백과 느린 단락 리듬으로 장문 읽기를 돕습니다.",
+        )
+    elif profile.genre == "event-timeline":
+        candidates = ("chronology-spine", "evidence-dossier", "scroll-sequence")
+        selected = "chronology-spine"
+        rationale = (
+            "시간 순서와 기록의 개정 관계를 장면 순서에 직접 매핑합니다.",
+            "누락 구간과 불확실한 인과를 타임라인에서 숨기지 않습니다.",
         )
     else:
         candidates = (

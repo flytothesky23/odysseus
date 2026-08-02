@@ -30,7 +30,7 @@ const FASTEMBED_CACHE = process.env.ODYSSEUS_QA_FASTEMBED_CACHE
   || path.join(REPO, 'data/fastembed_cache');
 const PDFTOPPM = process.env.ODYSSEUS_QA_PDFTOPPM || '/opt/homebrew/bin/pdftoppm';
 const QA_ROOT = process.env.ODYSSEUS_QA_ROOT
-  || path.join(os.homedir(), 'Downloads/odysseus-qa/editorial-research-rc-2026-07-29');
+  || path.join(os.homedir(), 'Downloads/odysseus-qa/generative-renderer-gallery-rc-2026-07-29');
 const RUNTIME = path.join(QA_ROOT, 'runtime');
 const DATA_DIR = path.join(RUNTIME, 'odysseus-data');
 const SELECTED_ROOT = path.join(RUNTIME, 'fixtures', 'selected-corpus');
@@ -45,7 +45,7 @@ const FAKE_LLM_PORT = Number(process.env.ODYSSEUS_QA_LLM_PORT || 18088);
 const BASE_URL = `http://127.0.0.1:${APP_PORT}`;
 const FAKE_LLM_URL = `http://127.0.0.1:${FAKE_LLM_PORT}/v1`;
 const FAKE_IMAGE_URL = FAKE_LLM_URL;
-const MODEL_ID = 'odysseus-editorial-e2e-fake';
+const MODEL_ID = 'odysseus-renderer-gallery-e2e-fake';
 const IMAGE_MODEL_ID = 'gpt-image-1.5';
 const TINY_PNG_BASE64 = (
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z7mcAAAAASUVORK5CYII='
@@ -58,7 +58,7 @@ let browserHandle = null;
 let browserContextHandle = null;
 const evidence = {
   generated_at: GENERATED_AT,
-  fixture_id: 'editorial-research-synthetic-v1',
+  fixture_id: 'renderer-gallery-synthetic-v1',
   model: MODEL_ID,
   app_url: BASE_URL,
   requests: [],
@@ -90,8 +90,13 @@ function writeFile(file, content) {
 }
 
 function safeResetGeneratedDirectories() {
-  const expectedSuffix = path.join('odysseus-qa', 'editorial-research-rc-2026-07-29');
-  if (!QA_ROOT.endsWith(expectedSuffix)) {
+  const normalized = path.resolve(QA_ROOT);
+  const expectedParent = path.join(os.homedir(), 'Downloads', 'odysseus-qa');
+  const basename = path.basename(normalized);
+  if (
+    path.dirname(normalized) !== expectedParent
+    || !/^generative-renderer-gallery-rc-\d{4}-\d{2}-\d{2}$/.test(basename)
+  ) {
     throw new Error(`Refusing to reset unexpected QA path: ${QA_ROOT}`);
   }
   for (const dir of [RUNTIME, REPORTS_DIR, SCREENSHOTS_DIR, LOGS_DIR, FIXTURE_DIR]) {
@@ -658,8 +663,9 @@ async function waitForJob(sessionId, timeoutMs = 180000) {
 
 async function saveArtifacts(job, stem) {
   const routes = {
-    legacy: `/api/research/report/${job.session_id}`,
-    designed: `/api/research/report/${job.session_id}/designed`,
+    document: `/api/research/report/${job.session_id}/renderer/document`,
+    editorial: `/api/research/report/${job.session_id}/renderer/editorial`,
+    scroll_story: `/api/research/report/${job.session_id}/renderer/scroll_story`,
     markdown: `/api/research/report/${job.session_id}/markdown?download=1`,
     json: `/api/research/report/${job.session_id}/session.json?download=1`,
   };
@@ -673,6 +679,29 @@ async function saveArtifacts(job, stem) {
     assertCheck(response.ok, `${stem} ${kind} artifact route`, { status: response.status, file });
     assertCheck(content.length > 200, `${stem} ${kind} artifact non-empty`, { bytes: Buffer.byteLength(content) });
     paths[kind] = file;
+  }
+  const hashes = ['document', 'editorial', 'scroll_story'].map((kind) => {
+    const content = fs.readFileSync(paths[kind], 'utf8');
+    return content.match(/data-report-ir-hash="([a-f0-9]{64})"/)?.[1] || '';
+  });
+  assertCheck(
+    hashes.every(Boolean) && new Set(hashes).size === 1,
+    `${stem} all HTML renderers consume the same immutable ReportIR`,
+    hashes,
+  );
+  for (const renderer of ['document', 'editorial', 'scroll_story']) {
+    const response = await fetch(
+      `${BASE_URL}/api/research/report/${job.session_id}/renderer/${renderer}?download=1`,
+    );
+    assertCheck(
+      response.ok
+        && /attachment/i.test(response.headers.get('content-disposition') || ''),
+      `${stem} ${renderer} download route succeeds`,
+      {
+        status: response.status,
+        content_disposition: response.headers.get('content-disposition') || '',
+      },
+    );
   }
   return paths;
 }
@@ -708,7 +737,14 @@ async function renderArtifact(browser, file, stem, kind) {
       const documentElement = document.documentElement;
       const anchorProblems = Array.from(document.querySelectorAll('a[href^="#"]'))
         .map((anchor) => anchor.getAttribute('href'))
-        .filter((href) => href && href.length > 1 && !document.querySelector(href));
+        .filter((href) => {
+          if (!href || href.length <= 1) return false;
+          try {
+            return !document.getElementById(decodeURIComponent(href.slice(1)));
+          } catch {
+            return true;
+          }
+        });
       const eventAttrs = Array.from(document.querySelectorAll('*')).flatMap((element) => (
         Array.from(element.attributes)
           .filter((attribute) => /^on/i.test(attribute.name))
@@ -725,6 +761,10 @@ async function renderArtifact(browser, file, stem, kind) {
         xssExecuted: Boolean(window.__ODYSSEUS_XSS_EXECUTED__),
         tableScrollCount: document.querySelectorAll('.table-scroll').length,
         reportStyle: document.body?.dataset?.reportStyle || document.documentElement?.dataset?.reportStyle || '',
+        renderer: document.body?.dataset?.htmlRenderer || '',
+        reportIrHash: document.body?.dataset?.reportIrHash || '',
+        landmarkCount: document.querySelectorAll('main, nav[aria-label], article').length,
+        searchableTextLength: (document.querySelector('main')?.innerText || '').trim().length,
       };
     });
     const screenshot = path.join(SCREENSHOTS_DIR, `${stem}-${kind}-${run.label}.png`);
@@ -748,8 +788,11 @@ async function renderArtifact(browser, file, stem, kind) {
     assertCheck(pageConsoleErrors.length === 0, `${stem} ${kind} ${run.label} console error count is zero`, pageConsoleErrors);
     assertCheck(pageRequestFailures.length === 0, `${stem} ${kind} ${run.label} failed request count is zero`, pageRequestFailures);
     assertCheck(remoteRequests.length === 0, `${stem} ${kind} ${run.label} is offline with no remote fetch`, remoteRequests);
-    if (kind === 'designed') {
-      assertCheck(layout.reportStyle === 'designed', `${stem} designed artifact identifies its style`, layout.reportStyle);
+    assertCheck(layout.renderer === kind, `${stem} ${kind} artifact identifies its renderer`, layout.renderer);
+    assertCheck(layout.reportIrHash.length === 64, `${stem} ${kind} exposes immutable ReportIR hash`, layout.reportIrHash);
+    assertCheck(layout.searchableTextLength > 200, `${stem} ${kind} keeps report text searchable in the DOM`, layout);
+    if (kind === 'scroll_story') {
+      assertCheck(layout.landmarkCount >= 3, `${stem} scroll story exposes semantic landmarks`, layout);
     }
     await context.close();
   }
@@ -790,6 +833,81 @@ async function renderArtifact(browser, file, stem, kind) {
   });
 }
 
+async function auditScrollStoryFallbacks(browser, file, stem) {
+  const reducedContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    reducedMotion: 'reduce',
+    serviceWorkers: 'block',
+  });
+  const reducedPage = await reducedContext.newPage();
+  await reducedPage.goto(pathToFileURL(file).href, { waitUntil: 'load' });
+  const reduced = await reducedPage.evaluate(() => ({
+    renderer: document.body?.dataset?.htmlRenderer || '',
+    behavior: getComputedStyle(document.documentElement).scrollBehavior,
+    motionReduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+    overflow: document.documentElement.scrollWidth - innerWidth,
+  }));
+  await reducedPage.screenshot({
+    path: path.join(SCREENSHOTS_DIR, `${stem}-scroll_story-reduced-motion.png`),
+    fullPage: true,
+  });
+  assertCheck(reduced.renderer === 'scroll_story', `${stem} reduced-motion keeps scroll renderer`, reduced);
+  assertCheck(reduced.motionReduced && reduced.behavior === 'auto', `${stem} reduced-motion disables smooth motion`, reduced);
+  assertCheck(reduced.overflow <= 1, `${stem} reduced-motion has no horizontal overflow`, reduced);
+  await reducedContext.close();
+
+  const jsOffContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    javaScriptEnabled: false,
+    serviceWorkers: 'block',
+  });
+  const jsOffPage = await jsOffContext.newPage();
+  await jsOffPage.goto(pathToFileURL(file).href, { waitUntil: 'load' });
+  const jsOff = await jsOffPage.evaluate(() => ({
+    mainTextLength: (document.querySelector('main')?.innerText || '').trim().length,
+    sceneCount: document.querySelectorAll('article[data-section-id]').length,
+    overflow: document.documentElement.scrollWidth - innerWidth,
+  }));
+  await jsOffPage.screenshot({
+    path: path.join(SCREENSHOTS_DIR, `${stem}-scroll_story-js-off.png`),
+    fullPage: true,
+  });
+  assertCheck(jsOff.mainTextLength > 200 && jsOff.sceneCount > 0, `${stem} JS-off keeps semantic report content`, jsOff);
+  assertCheck(jsOff.overflow <= 1, `${stem} JS-off has no horizontal overflow`, jsOff);
+  await jsOffContext.close();
+
+  const scrollContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    serviceWorkers: 'block',
+  });
+  const scrollPage = await scrollContext.newPage();
+  await scrollPage.goto(pathToFileURL(file).href, { waitUntil: 'load' });
+  const scrollHeight = await scrollPage.evaluate(() => document.documentElement.scrollHeight);
+  const positions = [
+    ['beginning', 0],
+    ['middle', Math.max(0, Math.floor(scrollHeight / 2) - 450)],
+    ['end', Math.max(0, scrollHeight - 900)],
+  ];
+  for (const [label, y] of positions) {
+    await scrollPage.evaluate((nextY) => window.scrollTo(0, nextY), y);
+    await scrollPage.waitForTimeout(100);
+    await scrollPage.screenshot({
+      path: path.join(SCREENSHOTS_DIR, `${stem}-scroll_story-${label}.png`),
+      fullPage: false,
+    });
+  }
+  const keyboard = await scrollPage.evaluate(() => {
+    const railLink = document.querySelector('.scroll-story-route a');
+    railLink?.focus();
+    return {
+      activeTag: document.activeElement?.tagName || '',
+      activeHref: document.activeElement?.getAttribute('href') || '',
+    };
+  });
+  assertCheck(keyboard.activeTag === 'A' && keyboard.activeHref.startsWith('#'), `${stem} route rail is keyboard focusable`, keyboard);
+  await scrollContext.close();
+}
+
 async function securityRouteChecks() {
   const researchDir = path.join(DATA_DIR, 'deep_research');
   ensureDir(researchDir);
@@ -807,6 +925,8 @@ async function securityRouteChecks() {
   const checks = [
     ['cross-owner legacy', `${BASE_URL}/api/research/report/rp-other-owner`, 404],
     ['cross-owner designed', `${BASE_URL}/api/research/report/rp-other-owner/designed`, 404],
+    ['cross-owner renderer', `${BASE_URL}/api/research/report/rp-other-owner/renderer/scroll_story`, 404],
+    ['unknown renderer', `${BASE_URL}/api/research/report/rp-other-owner/renderer/not-a-renderer`, 404],
     ['symlink escape', `${BASE_URL}/api/research/report/rp-symlink`, 404],
     ['path traversal', `${BASE_URL}/api/research/report/%2e%2e%2foutside-secret`, 400],
   ];
@@ -849,7 +969,12 @@ async function runUiJourney(page, config) {
   );
   assertCheck(!unselectedSelected, `${config.stem} UI leaves distractor root unselected`);
   await page.locator('#research-output-html').check();
-  await page.locator('#research-output-html-designed').check();
+  if (await page.locator('#research-renderer-auto').isChecked()) {
+    await page.locator('#research-renderer-auto').uncheck();
+  }
+  for (const renderer of ['document', 'editorial', 'scroll-story']) {
+    await page.locator(`#research-renderer-${renderer}`).check();
+  }
   await page.locator('#research-design-image-mode').selectOption(config.designImageMode || 'none');
   await page.locator('#research-output-md-json').check();
   await page.locator('#research-query').fill(config.query);
@@ -883,9 +1008,16 @@ NEW_MUTABLE_TRUTH: 프로젝트 알파의 2026-07-29 재검증된 측정값은 4
   );
   assertCheck(
     Array.isArray(requestData.artifact_formats)
-      && ['html', 'html_designed', 'md_json'].every((format) => requestData.artifact_formats.includes(format)),
-    `${config.stem} payload selects legacy, designed, and MD+JSON`,
+      && ['html', 'md_json'].every((format) => requestData.artifact_formats.includes(format))
+      && !requestData.artifact_formats.includes('html_designed'),
+    `${config.stem} payload separates HTML format from renderer selection`,
     requestData.artifact_formats,
+  );
+  assertCheck(
+    Array.isArray(requestData.html_renderers)
+      && ['document', 'editorial', 'scroll_story'].every((renderer) => requestData.html_renderers.includes(renderer)),
+    `${config.stem} payload selects document, editorial, and scroll story`,
+    requestData.html_renderers,
   );
   assertCheck(
     requestData.design_image_mode === (config.designImageMode || 'none'),
@@ -902,8 +1034,9 @@ NEW_MUTABLE_TRUTH: 프로젝트 알파의 2026-07-29 재검증된 측정값은 4
   }
   await page.locator(`[data-job-id="${responseData.session_id}"].done`).waitFor({ timeout: 30000 });
   const buttonLabels = await page.locator(`[data-job-id="${responseData.session_id}"] .research-job-actions`).innerText();
-  assertCheck(buttonLabels.includes('Legacy HTML'), `${config.stem} shows legacy result button`, buttonLabels);
-  assertCheck(buttonLabels.includes('Design HTML'), `${config.stem} shows designed result button`, buttonLabels);
+  assertCheck(buttonLabels.includes('Document HTML'), `${config.stem} shows document result button`, buttonLabels);
+  assertCheck(buttonLabels.includes('Editorial HTML'), `${config.stem} shows editorial result button`, buttonLabels);
+  assertCheck(buttonLabels.includes('Scroll Story HTML'), `${config.stem} shows scroll-story result button`, buttonLabels);
   assertCheck(buttonLabels.includes('Markdown') && buttonLabels.includes('JSON'), `${config.stem} shows MD+JSON result buttons`, buttonLabels);
   const jobLlmCalls = evidence.fake_llm_calls.slice(llmCallIndexStart);
   const researchLlmCalls = jobLlmCalls.filter((call) => call.stage !== 'probe');
@@ -1067,15 +1200,21 @@ async function main() {
   const persisted = await page.evaluate(() => ({
     researchMode: document.getElementById('research-mode')?.value,
     sourceMode: document.getElementById('research-source-mode')?.value,
-    legacy: document.getElementById('research-output-html')?.checked,
-    designed: document.getElementById('research-output-html-designed')?.checked,
+    html: document.getElementById('research-output-html')?.checked,
+    renderers: Array.from(document.querySelectorAll('input[name="research-html-renderer"]:checked')).map((element) => element.value),
     mdJson: document.getElementById('research-output-md-json')?.checked,
     designImageMode: document.getElementById('research-design-image-mode')?.value,
     selectedFolders: Array.from(document.getElementById('research-knowledge-folders')?.selectedOptions || []).map((option) => option.value),
   }));
   assertCheck(persisted.researchMode === 'editorial', 'workflow option persists after refresh', persisted);
   assertCheck(persisted.sourceMode === 'local', 'source option persists after refresh', persisted);
-  assertCheck(persisted.legacy && persisted.designed && persisted.mdJson, 'artifact options persist after refresh', persisted);
+  assertCheck(
+    persisted.html
+      && persisted.mdJson
+      && ['document', 'editorial', 'scroll_story'].every((renderer) => persisted.renderers.includes(renderer)),
+    'artifact formats and all three renderer options persist after refresh',
+    persisted,
+  );
   assertCheck(persisted.designImageMode === 'editorial', 'designed image mode persists after refresh', persisted);
   assertCheck(
     persisted.selectedFolders.length === 1 && persisted.selectedFolders[0] === registration.selected.token,
@@ -1174,27 +1313,35 @@ async function main() {
     'personal-knowledge candidate preserves its genre-specific editorial section',
   );
 
-  const designedHtml = fs.readFileSync(jobs[1].artifacts.designed, 'utf8');
-  assertCheck(designedHtml.includes('DESIGNED_REPORT_TOKENS'), 'designed HTML contains independent design tokens');
-  assertCheck(!/https?:\/\/(?:fonts|cdn)\./i.test(designedHtml), 'designed HTML has no remote font/CDN dependency');
-  const legacyHtml = fs.readFileSync(jobs[1].artifacts.legacy, 'utf8');
-  assertCheck(legacyHtml.includes('data-report-style="legacy"'), 'legacy HTML keeps legacy style contract');
-  assertCheck(designedHtml.includes('data-report-style="designed"'), 'designed HTML is a separate artifact');
+  const editorialHtml = fs.readFileSync(jobs[1].artifacts.editorial, 'utf8');
+  assertCheck(editorialHtml.includes('DESIGNED_REPORT_TOKENS'), 'editorial HTML contains independent design tokens');
+  assertCheck(!/https?:\/\/(?:fonts|cdn)\./i.test(editorialHtml), 'editorial HTML has no remote font/CDN dependency');
+  const documentHtml = fs.readFileSync(jobs[1].artifacts.document, 'utf8');
+  const scrollStoryHtml = fs.readFileSync(jobs[1].artifacts.scroll_story, 'utf8');
+  assertCheck(documentHtml.includes('data-report-style="legacy"'), 'document renderer keeps legacy style contract');
+  assertCheck(editorialHtml.includes('data-report-style="designed"'), 'editorial renderer is a separate artifact');
   assertCheck(
-    designedHtml.includes('data:image/png;base64,')
-      && designedHtml.includes('사실 근거나 데이터 시각화가 아닙니다'),
-    'designed HTML embeds local generated assets with a non-evidence disclosure',
+    scrollStoryHtml.includes('class="scroll-story-route"')
+      && scrollStoryHtml.includes('class="scroll-story-scene"'),
+    'scroll story has route rail and ordered semantic scenes',
   );
   assertCheck(
-    !legacyHtml.includes('data:image/png;base64,')
-      && !legacyHtml.includes('generated-report-figure'),
-    'legacy HTML remains unaffected by designed generated assets',
+    editorialHtml.includes('data:image/png;base64,')
+      && editorialHtml.includes('사실 근거나 데이터 시각화가 아닙니다'),
+    'editorial HTML embeds local generated assets with a non-evidence disclosure',
+  );
+  assertCheck(
+    !documentHtml.includes('data:image/png;base64,')
+      && !documentHtml.includes('generated-report-figure'),
+    'document HTML remains unaffected by editorial generated assets',
   );
 
   for (const job of jobs) {
-    await renderArtifact(browser, job.artifacts.legacy, job.stem, 'legacy');
-    await renderArtifact(browser, job.artifacts.designed, job.stem, 'designed');
+    await renderArtifact(browser, job.artifacts.document, job.stem, 'document');
+    await renderArtifact(browser, job.artifacts.editorial, job.stem, 'editorial');
+    await renderArtifact(browser, job.artifacts.scroll_story, job.stem, 'scroll_story');
   }
+  await auditScrollStoryFallbacks(browser, jobs[1].artifacts.scroll_story, jobs[1].stem);
   await securityRouteChecks();
   await context.close();
   browserContextHandle = null;
@@ -1279,6 +1426,26 @@ async function main() {
         : '**FAIL** — semantic-real/summary.json 참조';
     } catch {}
   }
+  writeFile(path.join(QA_ROOT, 'WHAT_CHANGED_KO.md'), `# 무엇이 달라졌나요
+
+이 패키지는 같은 로컬 근거 심층조사 결과를 한 번만 만든 뒤, 동일한 immutable ReportIR에서 서로 다른 세 HTML 표현을 생성했음을 보여 줍니다.
+
+- **Document HTML**: 기존 보고서 흐름을 보존합니다. 경영분석은 카드형 대시보드로 바꾸지 않고 넓은 표만 안전하게 스크롤합니다.
+- **Editorial HTML**: 생성 이미지와 타이포그래피를 결합할 수 있는 독립 디자인 산출물입니다.
+- **Scroll Story HTML**: 주요 절을 순서 있는 장면으로 나누되, 본문·인용·표는 검색하고 복사할 수 있는 semantic HTML로 유지합니다.
+
+UI에서 세 renderer를 각각 또는 동시에 선택할 수 있고, 조사와 작문을 renderer마다 다시 실행하지 않습니다. 세 결과의 \
+\`data-report-ir-hash\`가 같아야 통과하며, source/citation 손실이 있으면 실패합니다.
+
+## 로컬 근거 처리의 차이
+
+후보 워크플로는 단순 요약 한 번으로 끝나지 않습니다. 선택 자료를 색인한 뒤 질문 분해, 반복 retrieval, source inventory, outline, draft, critic, rewrite, citation audit 순서로 처리합니다. 테스트 fixture에는 사실, 개인 의견, 중복, 상충, 불확실성, prompt injection, 대량 distractor가 있으며 웹 provider 호출은 0회여야 합니다.
+
+## 이번 자동 검증의 경계
+
+브라우저 전체 흐름은 결정론적 fake LLM/image endpoint로 검증하므로 실제 개인 자료와 OAuth 비밀값을 사용하지 않습니다. 실제 모델의 한국어 문장 미감은 이 실행만으로 통과했다고 주장하지 않으며 \
+\`NOT TESTED\`로 분리합니다. 실제 생성 이미지 시각 검수는 이전 editorial RC의 비식별 검수본을 별도 참고할 수 있습니다.
+`);
   writeFile(path.join(QA_ROOT, 'README.md'), `# Odysseus 로컬 근거 기반 심층보고서 검증 패키지
 
 - 생성 시각: ${GENERATED_AT}
@@ -1298,42 +1465,47 @@ async function main() {
 
 ## 대표 보고서
 
-- [기준선 Legacy HTML](reports/baseline-general-legacy.html)
-- [기준선 Design HTML](reports/baseline-general-designed.html)
-- [일반 후보 Legacy HTML](reports/candidate-general-legacy.html)
-- [일반 후보 Design HTML](reports/candidate-general-designed.html)
+- [기준선 Document HTML](reports/baseline-general-document.html)
+- [기준선 Editorial HTML](reports/baseline-general-editorial.html)
+- [기준선 Scroll Story HTML](reports/baseline-general-scroll_story.html)
+- [일반 후보 Document HTML](reports/candidate-general-document.html)
+- [일반 후보 Editorial HTML](reports/candidate-general-editorial.html)
+- [일반 후보 Scroll Story HTML](reports/candidate-general-scroll_story.html)
 - [일반 후보 Markdown](reports/candidate-general-markdown.md)
 - [일반 후보 JSON](reports/candidate-general-json.json)
-- [경영분석 후보 Legacy HTML](reports/candidate-management-legacy.html)
-- [경영분석 후보 Design HTML](reports/candidate-management-designed.html)
-- [혼합 개인 지식 후보 Legacy HTML](reports/candidate-personal-knowledge-legacy.html)
-- [혼합 개인 지식 후보 Design HTML](reports/candidate-personal-knowledge-designed.html)
+- [경영분석 후보 Document HTML](reports/candidate-management-document.html)
+- [경영분석 후보 Editorial HTML](reports/candidate-management-editorial.html)
+- [경영분석 후보 Scroll Story HTML](reports/candidate-management-scroll_story.html)
+- [혼합 개인 지식 후보 Document HTML](reports/candidate-personal-knowledge-document.html)
+- [혼합 개인 지식 후보 Editorial HTML](reports/candidate-personal-knowledge-editorial.html)
+- [혼합 개인 지식 후보 Scroll Story HTML](reports/candidate-personal-knowledge-scroll_story.html)
 
-### 생성 이미지·Figma 디자인 검수
+### 5개 문맥 renderer gallery
 
-- [이미지 없는 Design HTML](generated-image-design/candidate-designed-no-images.html)
-- [실제 생성 이미지 포함 offline Design HTML](generated-image-design/candidate-designed-generated-images.html)
-- [생성 이미지 디자인 검수 인덱스](generated-image-design/README.md)
-- [Round 0 참고 이미지 배치형](generated-image-design/round-0-reference-figure.html)
-- [Figma DesignSpec](generated-image-design/figma/design-spec-final.png)
-- [Figma 보고서 캡처](generated-image-design/figma/report-capture.png)
-- [새 Figma 디자인 랩](https://www.figma.com/design/Cnr0NahXXPzkBHe0X3SRkn) — 파일 생성 성공, 연결 팀 좌석이 \`View\`여서 새 편집 variant는 **NOT TESTED**
+- [Gallery 인덱스](renderer-gallery/README.md)
+- [구조 다양성 matrix](renderer-gallery/structural-diversity-matrix.json)
+- [DOM·offline·시각 감사](renderer-gallery/visual-audit.json)
+- [Design recipe provenance](renderer-gallery/asset-recipe-manifest.json)
+- 실제 생성 이미지 검수는 [이전 editorial RC의 비식별 검수본](../editorial-research-rc-2026-07-29/generated-image-design/README.md)을 참고합니다.
+- Figma/Stitch는 core runtime에서 사용하지 않았고, no-Figma/no-Stitch/no-network 경로를 합격 기준으로 삼았습니다.
 
 ## 시각 검증
 
 - [UI desktop](screenshots/ui-research-results-desktop.png)
 - [UI mobile](screenshots/ui-research-results-mobile.png)
-- [일반 후보 Design desktop](screenshots/candidate-general-designed-desktop.png)
-- [일반 후보 Design mobile](screenshots/candidate-general-designed-mobile.png)
-- [일반 후보 Design print](screenshots/candidate-general-designed-print.png)
-- [경영분석 Design desktop](screenshots/candidate-management-designed-desktop.png)
-- [경영분석 Design mobile](screenshots/candidate-management-designed-mobile.png)
-- [경영분석 Design print](screenshots/candidate-management-designed-print.png)
-- [개인 지식 Design desktop](screenshots/candidate-personal-knowledge-designed-desktop.png)
-- [개인 지식 Design mobile](screenshots/candidate-personal-knowledge-designed-mobile.png)
-- [통합 Hero Composer desktop](generated-image-design/screenshots/round-2-overlay-desktop-full.png)
-- [통합 Hero Composer mobile](generated-image-design/screenshots/round-2-overlay-mobile-full.png)
-- [통합 Hero Composer print](generated-image-design/screenshots/round-2-overlay-print-page.png)
+- [일반 후보 Document desktop](screenshots/candidate-general-document-desktop.png)
+- [일반 후보 Editorial desktop](screenshots/candidate-general-editorial-desktop.png)
+- [일반 후보 Scroll Story desktop](screenshots/candidate-general-scroll_story-desktop.png)
+- [일반 후보 Scroll Story mobile](screenshots/candidate-general-scroll_story-mobile.png)
+- [일반 후보 Scroll Story 시작](screenshots/candidate-general-scroll_story-beginning.png)
+- [일반 후보 Scroll Story 중간](screenshots/candidate-general-scroll_story-middle.png)
+- [일반 후보 Scroll Story 끝](screenshots/candidate-general-scroll_story-end.png)
+- [일반 후보 Scroll Story reduced motion](screenshots/candidate-general-scroll_story-reduced-motion.png)
+- [일반 후보 Scroll Story JavaScript off](screenshots/candidate-general-scroll_story-js-off.png)
+- [경영분석 Document desktop](screenshots/candidate-management-document-desktop.png)
+- [경영분석 Document mobile](screenshots/candidate-management-document-mobile.png)
+- [개인 지식 Editorial desktop](screenshots/candidate-personal-knowledge-editorial-desktop.png)
+- [개인 지식 Editorial mobile](screenshots/candidate-personal-knowledge-editorial-mobile.png)
 
 ### 실제 PDF 페이지 렌더링
 
@@ -1343,10 +1515,9 @@ ${printPageLinks}
 
 - [E2E·보안·성능 구조화 증거](e2e-evidence.json)
 - [baseline 대 후보 의미 품질 비교](semantic-ab.json)
-- [실제 OAuth 모델 blind A/B](semantic-real/summary.json)
-- [실제 OAuth baseline](semantic-real/A-baseline-single-pass.md)
-- [실제 OAuth 후보](semantic-real/B-candidate-research-grade.md)
 - [개인정보 제거 실행 요약](logs/sanitized-summary.json)
+
+실제 OAuth 모델 blind A/B는 이 패키지에서 ${semanticGate}이며, 파일이 실제로 존재할 때만 별도 gate로 판정합니다.
 
 MD의 Raw Findings 원문은 literal code block으로 격리되어 HTML·링크로 실행되지 않습니다.
 JSON의 각 Raw Finding은 \`content_trust: "untrusted_data"\`와 상위
@@ -1361,7 +1532,7 @@ JSON의 각 Raw Finding은 \`content_trust: "untrusted_data"\`와 상위
 - 여정별 색인 barrier·후속 조사 시간: [구조화 증거의 \`performance.journey_timings\`](e2e-evidence.json)
 - 시간값은 endpoint probe를 제외한 UI 제출→첫 연구 LLM 호출을 필수 색인 완료 barrier의 관측 상한으로 기록하며, 이후 값은 검색·다단계 합성·artifact 생성·상태 polling을 포함합니다.
 
-생성 이미지 경로는 결정론적 fake image endpoint로 UI→job→로컬 asset→offline designed HTML 전체 배선을 검증했습니다. 같은 base URL의 LLM/image endpoint가 서로 덮어쓰지 않고, image-type endpoint만 이미지 생성에 쓰이며, cache는 같은 owner 안에서만 재사용됩니다. 별도 사용자 검수본에서는 Codex Desktop의 내장 image generation 도구로 비식별 개념 이미지를 실제 생성하고 hero·section·ambient layer로 통합한 뒤 데스크톱·모바일·print·offline 렌더링을 시각 감사했습니다. 이는 Odysseus OAuth 텍스트 endpoint가 이미지 API를 노출한다는 뜻은 아니며, 지원하지 않는 환경에서는 텍스트 중심 designed HTML로 안전하게 fallback합니다. Google Stitch는 현재 callable connector가 없고 공식 MCP 경로가 별도 API key와 billing-enabled Cloud project를 요구하므로 **NOT TESTED**이며, 외부 디자인 랩은 RC의 필수 경로가 아닙니다.
+생성 이미지 경로는 결정론적 fake image endpoint로 UI→job→로컬 asset→offline Editorial/Scroll Story HTML 전체 배선을 검증했습니다. 같은 base URL의 LLM/image endpoint가 서로 덮어쓰지 않고, image-type endpoint만 이미지 생성에 쓰이며, cache는 같은 owner 안에서만 재사용됩니다. 이는 Odysseus OAuth 텍스트 endpoint가 이미지 API를 노출한다는 뜻은 아니며, 지원하지 않는 환경에서는 텍스트·CSS 중심 renderer로 안전하게 fallback합니다. Figma/Stitch 같은 외부 디자인 서비스는 core runtime 의존성이 아닙니다.
 `);
 
   if (failures.length) {

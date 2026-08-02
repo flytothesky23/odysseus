@@ -22,6 +22,7 @@ from src.research_handler import (
     normalize_reasoning_effort,
     normalize_research_mode,
 )
+from src.report_renderers import HTML_RENDERERS, normalize_html_renderers
 from src.auth_helpers import _auth_disabled, get_current_user
 from core.auth import RESERVED_USERNAMES
 from src.constants import DEEP_RESEARCH_DIR
@@ -298,6 +299,11 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "progress": entry.get("progress", {}),
                     "started_at": entry.get("started_at", 0),
                     "artifact_formats": normalize_artifact_formats(entry.get("artifact_formats")),
+                    "html_renderers": normalize_html_renderers(
+                        entry.get("html_renderers"),
+                        artifact_formats=entry.get("artifact_formats"),
+                    ),
+                    "renderer_recommendation": entry.get("renderer_recommendation") or {},
                     "reasoning_effort": normalize_reasoning_effort(entry.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(entry.get("research_mode")),
                     "design_image_mode": normalize_design_image_mode(entry.get("design_image_mode")),
@@ -396,6 +402,44 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if html_content is None:
             raise HTTPException(404, "No designed report available for this session")
         return HTMLResponse(content=html_content)
+
+    @router.get("/api/research/report/{session_id}/renderer/{renderer_id}")
+    async def research_report_renderer(
+        session_id: str,
+        renderer_id: str,
+        request: Request,
+        download: bool = Query(False),
+    ):
+        """Serve one allowlisted renderer from the session's immutable ReportIR."""
+        user = _require_user(request)
+        _validate_session_id(session_id)
+        _assert_owns_research(session_id, user)
+        normalized = str(renderer_id or "").strip().lower().replace("-", "_")
+        if normalized not in HTML_RENDERERS:
+            raise HTTPException(404, "Unknown report renderer")
+        try:
+            html_content = research_handler.get_report_html(
+                session_id,
+                renderer=normalized,
+            )
+        except Exception as e:
+            logger.error(
+                "Renderer %s report generation error: %s",
+                normalized,
+                e,
+                exc_info=True,
+            )
+            raise HTTPException(500, f"Report generation failed: {e}")
+        if html_content is None:
+            raise HTTPException(404, "No report available for this renderer")
+        return HTMLResponse(
+            content=html_content,
+            headers=_download_headers(
+                session_id,
+                f"-{normalized.replace('_', '-')}.html",
+                download,
+            ),
+        )
 
     @router.get("/api/research/report/{session_id}/markdown")
     async def research_report_markdown(
@@ -504,6 +548,11 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "duration": d.get("stats", {}).get("Duration", ""),
                     "rounds": d.get("stats", {}).get("Rounds", ""),
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "html_renderers": normalize_html_renderers(
+                        d.get("html_renderers"),
+                        artifact_formats=d.get("artifact_formats"),
+                    ),
+                    "renderer_recommendation": d.get("renderer_recommendation") or {},
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(d.get("research_mode")),
                     "design_image_mode": normalize_design_image_mode(d.get("design_image_mode")),
@@ -706,6 +755,9 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         source_mode: Optional[str] = None
         knowledge_folders: List[str] = Field(default_factory=list)
         artifact_formats: List[str] = Field(default_factory=lambda: ["html"])
+        # Empty preserves legacy clients that only send artifact_formats;
+        # normalize_html_renderers() then maps html_designed to editorial.
+        html_renderers: List[str] = Field(default_factory=list)
         reasoning_effort: Optional[str] = None
         research_mode: Optional[str] = None
         design_image_mode: Optional[str] = None
@@ -808,14 +860,22 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         except KnowledgeBaseError as e:
             raise HTTPException(400, str(e))
         artifact_formats = normalize_artifact_formats(body.artifact_formats)
+        html_renderers = list(body.html_renderers or [])
         reasoning_effort = normalize_reasoning_effort(body.reasoning_effort)
         design_image_mode = normalize_design_image_mode(body.design_image_mode)
-        if "html_designed" not in artifact_formats:
+        normalized_html_renderers = normalize_html_renderers(
+            html_renderers,
+            artifact_formats=artifact_formats,
+        )
+        if "auto" not in {
+            str(value or "").strip().lower()
+            for value in html_renderers
+        } and not ({"editorial", "scroll_story"} & set(normalized_html_renderers)):
             design_image_mode = "none"
 
         # max_rounds=0 → "Auto", let AI decide; pass 20 as the safety cap.
         effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
-        research_handler.start_research(
+        started = research_handler.start_research(
             session_id=session_id,
             query=body.query,
             llm_endpoint=ep_url,
@@ -830,6 +890,7 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             extraction_timeout=body.extraction_timeout,
             extraction_concurrency=body.extraction_concurrency,
             artifact_formats=artifact_formats,
+            html_renderers=html_renderers,
             reasoning_effort=reasoning_effort,
             research_mode=research_mode,
             design_image_mode=design_image_mode,
@@ -840,10 +901,12 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "status": "running",
             "query": body.query,
             "artifact_formats": artifact_formats,
+            "html_renderers": started.get("html_renderers") or normalized_html_renderers,
+            "renderer_recommendation": started.get("renderer_recommendation") or {},
             "reasoning_effort": reasoning_effort,
             "research_mode": research_mode,
-            "design_image_mode": design_image_mode,
-            "design_assets_status": "pending" if design_image_mode != "none" else "disabled",
+            "design_image_mode": started.get("design_image_mode") or "none",
+            "design_assets_status": started.get("design_assets_status") or "disabled",
         }
 
     @router.get("/api/research/stream/{session_id}")
@@ -897,6 +960,11 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
                     "raw_findings": d.get("raw_findings", []),
                     "category": d.get("category") or "",
                     "artifact_formats": normalize_artifact_formats(d.get("artifact_formats")),
+                    "html_renderers": normalize_html_renderers(
+                        d.get("html_renderers"),
+                        artifact_formats=d.get("artifact_formats"),
+                    ),
+                    "renderer_recommendation": d.get("renderer_recommendation") or {},
                     "reasoning_effort": normalize_reasoning_effort(d.get("reasoning_effort")),
                     "research_mode": normalize_research_mode(d.get("research_mode")),
                     "design_image_mode": normalize_design_image_mode(d.get("design_image_mode")),
@@ -912,6 +980,11 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
             "raw_findings": raw_findings,
             "category": "",
             "artifact_formats": normalize_artifact_formats(task.get("artifact_formats")),
+            "html_renderers": normalize_html_renderers(
+                task.get("html_renderers"),
+                artifact_formats=task.get("artifact_formats"),
+            ),
+            "renderer_recommendation": task.get("renderer_recommendation") or {},
             "reasoning_effort": normalize_reasoning_effort(task.get("reasoning_effort")),
             "research_mode": normalize_research_mode(task.get("research_mode")),
             "design_image_mode": normalize_design_image_mode(task.get("design_image_mode")),

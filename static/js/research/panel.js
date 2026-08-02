@@ -87,6 +87,7 @@ function _saveSettingsToStorage() {
       reasoning_effort: document.getElementById('research-reasoning-effort')?.value || '',
       category: document.getElementById('research-category')?.value || '',
       artifact_formats: _selectedArtifactFormats(),
+      html_renderers: _selectedHtmlRenderers(),
       design_image_mode: document.getElementById('research-design-image-mode')?.value || 'none',
     }));
   } catch {}
@@ -123,6 +124,50 @@ function _selectedArtifactFormats() {
   return _normalizeArtifactFormats(checked);
 }
 
+function _normalizeHtmlRenderers(renderers, artifactFormats = ['html']) {
+  const formats = _normalizeArtifactFormats(artifactFormats);
+  if (!formats.includes('html') && formats.includes('html_designed')) return ['editorial'];
+  const raw = Array.isArray(renderers) ? renderers : [renderers].filter(Boolean);
+  const aliases = {
+    auto: 'auto',
+    legacy: 'document',
+    document: 'document',
+    designed: 'editorial',
+    html_designed: 'editorial',
+    editorial: 'editorial',
+    scroll: 'scroll_story',
+    'scroll-story': 'scroll_story',
+    scroll_story: 'scroll_story',
+  };
+  const out = [];
+  raw.forEach((value) => {
+    const mapped = aliases[String(value || '').trim().toLowerCase()];
+    if (mapped && !out.includes(mapped)) out.push(mapped);
+  });
+  return out.length ? out : ['document'];
+}
+
+function _selectedHtmlRenderers() {
+  const checked = Array.from(document.querySelectorAll('input[name="research-html-renderer"]:checked'))
+    .map(el => el.value)
+    .filter(Boolean);
+  return _normalizeHtmlRenderers(checked, _selectedArtifactFormats());
+}
+
+function _applyHtmlRenderers(renderers, artifactFormats = ['html']) {
+  const normalized = _normalizeHtmlRenderers(renderers, artifactFormats);
+  document.querySelectorAll('input[name="research-html-renderer"]').forEach((el) => {
+    el.checked = normalized.includes(el.value);
+  });
+}
+
+function _ensureHtmlRendererSelection(changedEl) {
+  const checked = Array.from(document.querySelectorAll('input[name="research-html-renderer"]:checked'));
+  if (checked.length) return;
+  if (changedEl) changedEl.checked = true;
+  else document.getElementById('research-renderer-document')?.click();
+}
+
 function _applyArtifactFormats(formats) {
   const normalized = _normalizeArtifactFormats(formats);
   document.querySelectorAll('input[name="research-output-format"]').forEach((el) => {
@@ -138,7 +183,10 @@ function _normalizeDesignImageMode(value) {
 function _syncDesignImageControls() {
   const row = document.getElementById('research-design-image-setting');
   const select = document.getElementById('research-design-image-mode');
-  const enabled = !!document.getElementById('research-output-html-designed')?.checked;
+  const enabled = !!(
+    document.getElementById('research-renderer-editorial')?.checked
+    || document.getElementById('research-renderer-scroll-story')?.checked
+  );
   if (row) row.style.display = enabled ? '' : 'none';
   if (select) select.disabled = !enabled;
 }
@@ -157,6 +205,17 @@ function _jobArtifactFormats(job) {
   return _normalizeArtifactFormats(job?.artifact_formats || job?.settings?.artifact_formats || ['html']);
 }
 
+function _jobHtmlRenderers(job) {
+  return _normalizeHtmlRenderers(
+    job?.html_renderers || job?.settings?.html_renderers,
+    _jobArtifactFormats(job),
+  ).filter(renderer => renderer !== 'auto');
+}
+
+function _rendererArtifactUrl(jobId, renderer, download = false) {
+  return `${_apiBase}/api/research/report/${jobId}/renderer/${renderer}${download ? '?download=1' : ''}`;
+}
+
 function _artifactUrl(jobId, kind, download = false) {
   const suffix = kind === 'json' ? 'session.json' : kind === 'html_designed' ? 'designed' : 'markdown';
   return `${_apiBase}/api/research/report/${jobId}/${suffix}${download ? '?download=1' : ''}`;
@@ -165,7 +224,8 @@ function _artifactUrl(jobId, kind, download = false) {
 function _openPreferredArtifact(job) {
   const formats = _jobArtifactFormats(job);
   if (formats.includes('html')) {
-    window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
+    const renderer = _jobHtmlRenderers(job)[0] || 'document';
+    window.open(_rendererArtifactUrl(job.id, renderer), '_blank');
   } else if (formats.includes('html_designed')) {
     window.open(_artifactUrl(job.id, 'html_designed'), '_blank');
   } else if (formats.includes('md_json')) {
@@ -526,13 +586,9 @@ function _buildPanelHTML() {
             <div class="research-output-header">
               <span class="research-setting-label">결과물</span>
               <div class="research-output-formats" id="research-output-formats">
-                <label class="research-output-choice" title="기존 시각화 HTML 리포트">
+                <label class="research-output-choice" title="선택한 HTML renderer 결과물">
                   <input id="research-output-html" type="checkbox" name="research-output-format" value="html" checked>
-                  <span>Legacy HTML</span>
-                </label>
-                <label class="research-output-choice" title="오프라인 standalone 편집 디자인 HTML">
-                  <input id="research-output-html-designed" type="checkbox" name="research-output-format" value="html_designed">
-                  <span>Design HTML</span>
+                  <span>HTML</span>
                 </label>
                 <label class="research-output-choice" title="Obsidian용 Markdown과 재현 가능한 세션 JSON">
                   <input id="research-output-md-json" type="checkbox" name="research-output-format" value="md_json">
@@ -540,16 +596,40 @@ function _buildPanelHTML() {
                 </label>
               </div>
             </div>
-            <span class="research-setting-hint">Legacy HTML 계약은 그대로 유지됩니다. Design HTML은 별도 standalone 결과물입니다.</span>
+            <span class="research-setting-hint">HTML과 MD+JSON 형식을 먼저 고른 뒤, HTML은 아래 renderer를 하나 이상 선택합니다.</span>
+          </div>
+          <div class="research-setting research-setting-wide research-output-setting" id="research-renderer-setting">
+            <div class="research-output-header">
+              <span class="research-setting-label">HTML 스타일</span>
+              <div class="research-output-formats" id="research-html-renderers">
+                <label class="research-output-choice" title="문맥에 맞는 renderer를 추천">
+                  <input id="research-renderer-auto" type="checkbox" name="research-html-renderer" value="auto">
+                  <span>자동 추천</span>
+                </label>
+                <label class="research-output-choice" title="전통 보고서와 경영분석 기본값">
+                  <input id="research-renderer-document" type="checkbox" name="research-html-renderer" value="document" checked>
+                  <span>문서형</span>
+                </label>
+                <label class="research-output-choice" title="타이포그래피와 생성 이미지를 결합한 편집형">
+                  <input id="research-renderer-editorial" type="checkbox" name="research-html-renderer" value="editorial">
+                  <span>에디토리얼</span>
+                </label>
+                <label class="research-output-choice" title="장면별 sticky copy와 route rail을 사용하는 스크롤 서사">
+                  <input id="research-renderer-scroll-story" type="checkbox" name="research-html-renderer" value="scroll_story">
+                  <span>스크롤 스토리</span>
+                </label>
+              </div>
+            </div>
+            <span class="research-setting-hint" id="renderer_recommendation">자동 추천은 보고서 장르와 독서 흐름을 분석하며, 사용자가 복수 선택으로 언제든 덮어쓸 수 있습니다.</span>
           </div>
           <label class="research-setting research-setting-wide research-design-image-setting" id="research-design-image-setting" style="display:none;">
-            <span class="research-setting-label">Design HTML 생성 이미지</span>
+            <span class="research-setting-label">디자인 renderer 생성 이미지</span>
             <select id="research-design-image-mode">
               <option value="none" selected>없음 (기본)</option>
               <option value="cover">표지·배경만</option>
               <option value="editorial">표지 + 섹션 일러스트</option>
             </select>
-            <span class="research-setting-hint">비식별 art direction만 이미지 모델에 전달합니다. 실패하거나 지원되지 않으면 보고서는 텍스트 중심 Design HTML로 안전하게 완성됩니다.</span>
+            <span class="research-setting-hint">에디토리얼·스크롤 스토리에만 적용됩니다. 비식별 art direction만 이미지 모델에 전달하며, 실패하거나 지원되지 않으면 텍스트·CSS 중심 HTML로 안전하게 완성됩니다.</span>
           </label>
           <div class="research-setting research-setting-wide research-knowledge-setting" id="research-knowledge-setting" style="display:none;">
             <div class="research-knowledge-source-header">
@@ -653,6 +733,21 @@ function _wireEvents(pane) {
       _saveSettingsToStorage();
     });
   });
+  pane.querySelectorAll('input[name="research-html-renderer"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (el.checked && el.value === 'auto') {
+        pane.querySelectorAll('input[name="research-html-renderer"]').forEach((other) => {
+          if (other !== el) other.checked = false;
+        });
+      } else if (el.checked) {
+        const auto = document.getElementById('research-renderer-auto');
+        if (auto) auto.checked = false;
+      }
+      _ensureHtmlRendererSelection(el);
+      _syncDesignImageControls();
+      _saveSettingsToStorage();
+    });
+  });
 
   _renderJobs();
   _loadKnowledgeOptions().then(_syncResearchWorkflowControls);
@@ -676,11 +771,12 @@ function _readSettings() {
     reasoning_effort: document.getElementById('research-reasoning-effort')?.value || undefined,
     category: category || undefined,
     artifact_formats: _selectedArtifactFormats(),
+    html_renderers: _selectedHtmlRenderers(),
     design_image_mode: _normalizeDesignImageMode(
       document.getElementById('research-design-image-mode')?.value
     ),
   };
-  if (!settings.artifact_formats.includes('html_designed')) {
+  if (!settings.html_renderers.some(renderer => ['editorial', 'scroll_story'].includes(renderer))) {
     settings.design_image_mode = 'none';
   }
   const epSel = document.getElementById('research-endpoint');
@@ -752,6 +848,10 @@ function _editJob(job) {
   const effortEl = document.getElementById('research-reasoning-effort');
   if (effortEl) effortEl.value = s.reasoning_effort || '';
   if (s.artifact_formats) _applyArtifactFormats(s.artifact_formats);
+  _applyHtmlRenderers(
+    s.html_renderers || job.html_renderers,
+    s.artifact_formats || job.artifact_formats,
+  );
   const imageModeEl = document.getElementById('research-design-image-mode');
   if (imageModeEl) imageModeEl.value = _normalizeDesignImageMode(s.design_image_mode || job.design_image_mode);
   _syncResearchWorkflowControls();
@@ -858,6 +958,7 @@ function _restoreSavedSettings() {
   const effort = document.getElementById('research-reasoning-effort');
   if (effort && saved.reasoning_effort !== undefined) effort.value = saved.reasoning_effort || '';
   if (saved.artifact_formats) _applyArtifactFormats(saved.artifact_formats);
+  _applyHtmlRenderers(saved.html_renderers, saved.artifact_formats);
   const imageMode = document.getElementById('research-design-image-mode');
   if (imageMode) imageMode.value = _normalizeDesignImageMode(saved.design_image_mode);
   _syncResearchWorkflowControls();
@@ -1414,14 +1515,21 @@ function _buildJobCard(job) {
       ? `<img class="research-job-thumb" src="${_esc(thumbUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
       : '<span class="research-job-thumb research-job-thumb-empty" aria-hidden="true"></span>';
     const artifactFormats = _jobArtifactFormats(job);
+    const htmlRenderers = _jobHtmlRenderers(job);
+    const rendererLabels = {
+      document: 'Document HTML',
+      editorial: 'Editorial HTML',
+      scroll_story: 'Scroll Story HTML',
+    };
+    const rendererButtons = artifactFormats.includes('html')
+      ? htmlRenderers.flatMap(renderer => [
+          `<button class="research-job-action research-job-action-report" data-action="renderer-${renderer}" title="${rendererLabels[renderer] || renderer} 열기">${_externalIcon} ${rendererLabels[renderer] || renderer}</button>`,
+          `<button class="research-job-action research-job-action-dim" data-action="download-renderer-${renderer}" title="${rendererLabels[renderer] || renderer} 내려받기">↓</button>`,
+        ])
+      : [];
     const artifactButtons = [
       thumbnail,
-      artifactFormats.includes('html')
-        ? `<button class="research-job-action research-job-action-report" data-action="report" title="기존 HTML 보고서">${_externalIcon} Legacy HTML</button>`
-        : '',
-      artifactFormats.includes('html_designed')
-        ? `<button class="research-job-action research-job-action-report" data-action="report-designed" title="오프라인 디자인 HTML 보고서">${_externalIcon} Design HTML</button>`
-        : '',
+      ...rendererButtons,
       artifactFormats.includes('md_json')
         ? `<button class="research-job-action research-job-action-markdown" data-action="markdown" title="Markdown 내려받기">${_externalIcon} Markdown</button>`
         : '',
@@ -1457,13 +1565,15 @@ function _buildJobCard(job) {
       if (!job.result) await _ensureResult(job);
       _copyResult(job, btn);
     });
-    card.querySelector('[data-action="report"]')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.open(`${_apiBase}/api/research/report/${job.id}`, '_blank');
-    });
-    card.querySelector('[data-action="report-designed"]')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.open(_artifactUrl(job.id, 'html_designed'), '_blank');
+    htmlRenderers.forEach((renderer) => {
+      card.querySelector(`[data-action="renderer-${renderer}"]`)?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.open(_rendererArtifactUrl(job.id, renderer), '_blank');
+      });
+      card.querySelector(`[data-action="download-renderer-${renderer}"]`)?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        window.open(_rendererArtifactUrl(job.id, renderer, true), '_blank');
+      });
     });
     card.querySelector('[data-action="markdown"]')?.addEventListener('click', (e) => {
       e.stopPropagation();

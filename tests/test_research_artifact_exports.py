@@ -12,6 +12,8 @@ from src.research_handler import (
     normalize_design_image_mode,
     normalize_reasoning_effort,
 )
+from src.report_design import build_design_spec
+from src.report_ir import build_report_ir
 
 
 def _handler(tmp_path, monkeypatch):
@@ -94,6 +96,8 @@ def test_markdown_export_is_obsidian_friendly(tmp_path, monkeypatch):
     assert "- 세션 JSON: `/api/research/report/rp-export/session.json`" in markdown
     assert "- 추론 정도: `high`" in markdown
     assert 'reasoning_effort: "high"' in markdown
+    assert "html_renderers:\n  - document" in markdown
+    assert "- Document HTML: `/api/research/report/rp-export/renderer/document`" in markdown
     assert "## Research Summary" in markdown
     assert "1. [헌법 전문](vault://21_업무노트/헌법.md#chunk-0) `obsidian` `21_업무노트/헌법.md`" in markdown
     assert "## Raw Findings" in markdown
@@ -180,6 +184,7 @@ def test_designed_html_embeds_only_confined_local_generated_assets(tmp_path, mon
     data = _write_result(data_dir)
     data.update({
         "artifact_formats": ["html", "html_designed"],
+        "html_renderers": ["document", "editorial", "scroll_story"],
         "design_image_mode": "editorial",
         "design_assets_status": "ready",
         "designed_visual_assets": [
@@ -191,8 +196,10 @@ def test_designed_html_embeds_only_confined_local_generated_assets(tmp_path, mon
     (data_dir / "rp-export.json").write_text(json.dumps(data), encoding="utf-8")
 
     designed = handler.get_report_html("rp-export", report_style="designed")
+    scroll_story = handler.get_report_html("rp-export", renderer="scroll_story")
     legacy = handler.get_report_html("rp-export")
     soup = BeautifulSoup(designed, "html.parser")
+    scroll_soup = BeautifulSoup(scroll_story, "html.parser")
 
     assert soup.body["data-design-image-mode"] == "editorial"
     rendered_images = soup.select(
@@ -204,6 +211,9 @@ def test_designed_html_embeds_only_confined_local_generated_assets(tmp_path, mon
     assert "../escape.png" not in designed
     assert 'data-design-image-mode="none"' in legacy
     assert 'data-generated-image="true"' not in legacy
+    assert scroll_soup.select_one('.scroll-story-header > img[src^="data:image/png;base64,"]') is not None
+    assert scroll_soup.select_one('figure.scroll-story-scene-visual[data-generated-image="true"]') is not None
+    assert "사실 근거나 데이터 시각화가 아님" in scroll_story
 
 
 @pytest.mark.asyncio
@@ -226,6 +236,30 @@ async def test_design_image_generation_failure_keeps_text_report_available(tmp_p
 
     assert outcome["status"] == "fallback"
     assert outcome["assets"] == []
+    assert outcome["error_codes"] == ["image_model_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_scroll_story_only_selection_can_request_optional_images(tmp_path, monkeypatch):
+    handler, _ = _handler(tmp_path, monkeypatch)
+
+    async def _fail(*args, **kwargs):
+        return {"error": "No image model configured"}
+
+    monkeypatch.setattr("src.ai_interaction.do_generate_image", _fail)
+    outcome = await handler._generate_designed_visual_assets(
+        "rp-scroll-images",
+        {
+            "category": "timeline",
+            "artifact_formats": ["html"],
+            "html_renderers": ["scroll_story"],
+            "design_image_mode": "cover",
+            "owner": "alice",
+        },
+    )
+
+    assert outcome["status"] == "fallback"
+    assert outcome["mode"] == "cover"
     assert outcome["error_codes"] == ["image_model_unavailable"]
 
 
@@ -304,9 +338,28 @@ async def test_matching_design_assets_are_reused_without_generation_calls(tmp_pa
         lambda: {"image_model": "gpt-image-1.5", "image_quality": "medium"},
     )
 
+    cache_ir = build_report_ir(
+        question="",
+        report_markdown="",
+        sources=[],
+        category=None,
+    )
+    cache_spec = build_design_spec(
+        category=None,
+        headings=[
+            {
+                "level": section.level,
+                "slug": section.section_id,
+                "text": section.title,
+            }
+            for section in cache_ir.sections
+        ],
+        image_mode="editorial",
+        assets=[],
+    )
     cached_assets = []
     for index, spec in enumerate(
-        research_handler._design_image_prompt_specs(None, "editorial"),
+        research_handler._design_image_prompt_specs(None, "editorial", cache_spec),
         start=1,
     ):
         filename = f"{index:016x}.png"
