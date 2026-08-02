@@ -14,6 +14,7 @@ const API_BASE = window.location.origin;
 const _FOLDER_SVG = '<svg class="workspace-row-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 let _modal = null;
 let _curPath = '';
+let _curSelectable = false;
 let _pickerOptions = {};
 
 export function getWorkspace() {
@@ -99,6 +100,7 @@ async function _load(path) {
 
 function _render(data) {
   _curPath = data.path;
+  _curSelectable = data.selectable !== false;
   const body = _modal.querySelector('#workspace-body');
   const pathEl = _modal.querySelector('#workspace-cur-path');
   if (pathEl) {
@@ -134,8 +136,39 @@ function _render(data) {
 async function _navigate(path) {
   try {
     _render(await _load(path));
+    return true;
   } catch (e) {
     if (uiModule && uiModule.showError) uiModule.showError('Could not open folder');
+    return false;
+  }
+}
+
+async function _commitWorkspaceSelection() {
+  const pathInput = _modal.querySelector('#workspace-cur-path');
+  const useButton = _modal.querySelector('#workspace-use');
+  const typedPath = pathInput?.value.trim();
+  if (useButton?.dataset.busy === 'true') return;
+  if (useButton) {
+    useButton.dataset.busy = 'true';
+    useButton.disabled = true;
+  }
+  try {
+    if (typedPath && typedPath !== _curPath) {
+      const navigated = await _navigate(typedPath);
+      if (!navigated || !_curSelectable) return;
+    }
+    const selectedPath = _curPath;
+    const onSelect = _pickerOptions.onSelect;
+    setWorkspace(selectedPath);
+    if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(_curPath)}`);
+    closeWorkspaceBrowser();
+    document.dispatchEvent(new CustomEvent('workspace-selected', { detail: { path: selectedPath } }));
+    if (typeof onSelect === 'function') onSelect(selectedPath);
+  } finally {
+    if (useButton) {
+      delete useButton.dataset.busy;
+      if (_modal?.style.display !== 'none') useButton.disabled = !_curSelectable;
+    }
   }
 }
 
@@ -172,15 +205,7 @@ function _getModal() {
       if (v) _navigate(v);
     }
   });
-  _modal.querySelector('#workspace-use').addEventListener('click', () => {
-    const selectedPath = _curPath;
-    const onSelect = _pickerOptions.onSelect;
-    setWorkspace(selectedPath);
-    if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace set: ${_basename(_curPath)}`);
-    closeWorkspaceBrowser();
-    document.dispatchEvent(new CustomEvent('workspace-selected', { detail: { path: selectedPath } }));
-    if (typeof onSelect === 'function') onSelect(selectedPath);
-  });
+  _modal.querySelector('#workspace-use').addEventListener('click', _commitWorkspaceSelection);
   const content = _modal.querySelector('.modal-content');
   const header = _modal.querySelector('.modal-header');
   if (content && header) makeWindowDraggable(_modal, { content, header });

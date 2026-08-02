@@ -200,6 +200,15 @@ def test_vault_explorer_exposes_an_obvious_vault_picker_and_index_action():
     assert "선택 근거 고정" in explorer
 
 
+def test_workspace_picker_commits_a_typed_path_without_requiring_enter_first():
+    workspace = (ROOT / "static/js/workspace.js").read_text(encoding="utf-8")
+
+    assert "async function _commitWorkspaceSelection()" in workspace
+    assert "const typedPath = pathInput?.value.trim();" in workspace
+    assert "await _navigate(typedPath)" in workspace
+    assert "addEventListener('click', _commitWorkspaceSelection)" in workspace
+
+
 def test_vault_explorer_only_selects_vault_sources_and_does_not_open_the_mcp_modal():
     explorer = (ROOT / "static/js/contractReviewExplorer.js").read_text(encoding="utf-8")
     assert "contractReviewModule.openContractReview" not in explorer
