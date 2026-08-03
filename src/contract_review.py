@@ -77,6 +77,7 @@ _ABS_POSIX = re.compile(r"(?<![/:\w])/(?:[^/\s]+/)+[^/\s,;)}\]]+")
 _ABS_WINDOWS = re.compile(r"(?<!\w)[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])+[^\\/\s,;)}\]]+")
 _HOME_PATH = re.compile(r"(?<!\w)~/(?:[^/\s]+/)*[^/\s,;)}\]]+")
 _MAX_NOTE_SCOPE_RULES = 2000
+_MAX_SAVED_NOTE_CHARS = 200_000
 
 
 class ContractReviewError(Exception):
@@ -123,6 +124,22 @@ def _safe_relative_path(raw: Any, *, allow_dot: bool = False) -> str:
     if any(part.casefold() in _SENSITIVE_NAMES or part.startswith(".") for part in parts):
         raise ContractReviewError("sensitive_path", "Credential and hidden paths cannot be used as evidence.", 403)
     return "/".join(parts)
+
+
+def _safe_vault_note_title(raw: Any) -> str:
+    title = unicodedata.normalize("NFC", str(raw or "")).strip()
+    if title.lower().endswith(".md"):
+        title = title[:-3].rstrip()
+    if (
+        not title
+        or len(title) > 120
+        or title.startswith(".")
+        or title.casefold() in _SENSITIVE_NAMES
+        or any(char in title for char in ("/", "\\", "\x00"))
+        or any(ord(char) < 32 for char in title)
+    ):
+        raise ContractReviewError("invalid_note_title", "Choose a safe note title.", 422)
+    return title
 
 
 def _normalize_note_scope(raw: Any) -> dict[str, Any]:
@@ -692,6 +709,123 @@ class ContractReviewWorkspaceService:
             "content": self._read_note_body(owner, snapshot, record.path),
         }
 
+    def save_markdown_note(
+        self,
+        *,
+        owner: str,
+        snapshot_id: str,
+        vault_id: str,
+        folder: str,
+        title: str,
+        markdown: str,
+    ) -> dict[str, Any]:
+        """Explicitly create one Markdown note inside an existing Vault folder.
+
+        The caller supplies only opaque snapshot identity and a root-relative
+        folder.  Root identity and every directory component are revalidated at
+        write time; directory file descriptors plus O_NOFOLLOW prevent a
+        symlink swap from redirecting the write outside the pinned Vault.
+        """
+
+        snapshot = self._snapshot(owner, snapshot_id, vault_id)
+        relative_folder = _safe_relative_path(folder, allow_dot=True)
+        safe_title = _safe_vault_note_title(title)
+        body = str(markdown or "").strip()
+        if not body:
+            raise ContractReviewError("empty_note", "There is no result to save.", 422)
+        if len(body) > _MAX_SAVED_NOTE_CHARS:
+            raise ContractReviewError("note_too_large", "The result is too large to save as one note.", 413)
+
+        created_at = kst_now()
+        filename = f"{safe_title}.md"
+        relative_path = filename if relative_folder == "." else f"{relative_folder}/{filename}"
+        payload = (
+            "---\n"
+            f"title: {json.dumps(safe_title, ensure_ascii=False)}\n"
+            f"created: {created_at}\n"
+            "tags:\n"
+            "  - odysseus\n"
+            "source: odysseus\n"
+            "---\n\n"
+            f"{body.rstrip()}\n"
+        ).encode("utf-8")
+
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        directory_fds: list[int] = []
+        destination_fd: int | None = None
+        created = False
+        try:
+            root_fd = os.open(snapshot.vault_root, directory_flags)
+            directory_fds.append(root_fd)
+            root_stat = os.fstat(root_fd)
+            open_root_id = _digest(
+                os.path.normcase(os.path.realpath(snapshot.vault_root)),
+                int(getattr(root_stat, "st_dev", 0)),
+                int(getattr(root_stat, "st_ino", 0)),
+                length=32,
+            )
+            if open_root_id != snapshot.vault_id:
+                raise ContractReviewError("vault_changed", "The Vault identity has changed.", 409)
+
+            current_fd = root_fd
+            for part in (() if relative_folder == "." else relative_folder.split("/")):
+                next_fd = os.open(part, directory_flags, dir_fd=current_fd)
+                directory_fds.append(next_fd)
+                current_fd = next_fd
+
+            try:
+                destination_fd = os.open(filename, file_flags, 0o600, dir_fd=current_fd)
+            except FileExistsError as exc:
+                raise ContractReviewError("note_exists", "A note with that title already exists.", 409) from exc
+            created = True
+            with os.fdopen(destination_fd, "wb", closefd=True) as handle:
+                destination_fd = None
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            # A root swap after admission must not leave a success-looking file
+            # at an identity the browser no longer owns.
+            self._snapshot(owner, snapshot_id, vault_id)
+        except ContractReviewError:
+            if created and directory_fds:
+                try:
+                    os.unlink(filename, dir_fd=directory_fds[-1])
+                except OSError:
+                    pass
+            raise
+        except FileNotFoundError as exc:
+            raise ContractReviewError("folder_unavailable", "Choose an existing Vault folder.", 404) from exc
+        except NotADirectoryError as exc:
+            raise ContractReviewError("folder_unavailable", "Choose an existing Vault folder.", 404) from exc
+        except OSError as exc:
+            if created and directory_fds:
+                try:
+                    os.unlink(filename, dir_fd=directory_fds[-1])
+                except OSError:
+                    pass
+            raise _filesystem_error("saving an Obsidian note", exc, code="note_save_failed", status_code=409) from exc
+        finally:
+            if destination_fd is not None:
+                try:
+                    os.close(destination_fd)
+                except OSError:
+                    pass
+            for descriptor in reversed(directory_fds):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        return {
+            "state": "created",
+            "title": safe_title,
+            "path": relative_path,
+            "created_at": created_at,
+            "reindex_required": True,
+        }
+
     def prepare_session_scope(
         self,
         owner: str,
@@ -721,6 +855,7 @@ class ContractReviewWorkspaceService:
                 fingerprints.append((record.path, record.stat_fingerprint))
         normalized_additional = tuple(sorted((str(item[0]), str(item[1])) for item in additional_evidence))
         scope_vault_id = snapshot.vault_id if snapshot is not None else "source-only"
+        current_fingerprints = dict(fingerprints)
         fingerprint = _digest(scope_vault_id, normalized_scope, fingerprints, normalized_additional)
         key = (str(owner or ""), str(session_id or ""))
         previous = self._session_scopes.get(key)
@@ -735,17 +870,24 @@ class ContractReviewWorkspaceService:
         else:
             strategy = "delta"
             old_selected = set(previous.get("selected_paths") or ())
-            delta_paths = [path for path in selected if path not in old_selected]
+            old_fingerprints = dict(previous.get("fingerprints") or {})
+            delta_paths = [
+                path for path in selected
+                if path not in old_selected
+                or old_fingerprints.get(path) != current_fingerprints.get(path)
+            ]
             cached = {
                 path: content
                 for path, content in (previous.get("content_by_path") or {}).items()
                 if path in selected
+                and old_fingerprints.get(path) == current_fingerprints.get(path)
             }
         state = {
             "owner": str(owner or ""),
             "snapshot_id": snapshot.snapshot_id if snapshot is not None else "",
             "vault_id": snapshot.vault_id if snapshot is not None else "",
             "selected_paths": tuple(selected),
+            "fingerprints": current_fingerprints,
             "note_scope": normalized_scope,
             "fingerprint": fingerprint,
             "additional_evidence": normalized_additional,
@@ -1691,6 +1833,10 @@ def _bind_result_to_evidence_context(
                         422,
                     )
                 canonical[field] = source[field]
+            if block_name == "official_legal_evidence":
+                verified_text = str(source.get("content") or source.get("text") or "").strip()
+                if verified_text:
+                    canonical["text"] = verified_text[:6_000]
             rebound.append(canonical)
         blocks[block_name] = rebound
     allowed_ids = {

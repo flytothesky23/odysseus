@@ -222,6 +222,33 @@ async def test_route_owner_isolation_and_unauthenticated_rejection(contract_api)
 
 
 @pytest.mark.asyncio
+async def test_vault_markdown_route_writes_only_after_explicit_owner_scoped_request(contract_api):
+    app, workspace, _saved = contract_api
+    vault = workspace / "vault"
+    indexed = (await _request(app, "POST", "/api/contract-review/vault/index", json={
+        "workspace": str(workspace), "vault_path": "vault",
+    })).json()
+    target = vault / "archive" / "AI 검토 결과.md"
+    assert not target.exists()
+
+    crossed = await _request(app, "POST", "/api/contract-review/vault/notes", owner="bob", json={
+        "snapshot_id": indexed["snapshot_id"], "vault_id": indexed["vault_id"],
+        "folder": "archive", "title": "AI 검토 결과", "markdown": "cross-owner",
+    })
+    assert crossed.status_code == 404
+    assert not target.exists()
+
+    created = await _request(app, "POST", "/api/contract-review/vault/notes", json={
+        "snapshot_id": indexed["snapshot_id"], "vault_id": indexed["vault_id"],
+        "folder": "archive", "title": "AI 검토 결과", "markdown": "# 분석\n\n명시적 저장",
+    })
+    assert created.status_code == 201
+    assert created.json()["path"] == "archive/AI 검토 결과.md"
+    assert str(workspace) not in created.text
+    assert target.exists()
+
+
+@pytest.mark.asyncio
 async def test_context_route_rejects_job_ids_from_a_previous_mcp_runtime(contract_api):
     app, _workspace, _saved = contract_api
     response = await _request(app, "POST", "/api/contract-review/context/prepare", json={

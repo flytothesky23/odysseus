@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260802contractreviewv2';
+import chatRenderer from './chatRenderer.js?v=20260803responsesave1';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -4617,6 +4617,34 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
    * Initialize event listeners
    */
   export function initListeners() {
+    // A validated Contract Review card keeps its prominent report shortcut;
+    // the common footer save menu remains available for Memo and Obsidian MD.
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-contract-review-save]');
+      if (!btn || btn.disabled) return;
+      e.stopPropagation();
+      const message = btn.closest('.msg-ai');
+      const result = message?._contractReviewResult;
+      const status = btn.parentElement?.querySelector('[data-contract-review-save-status]');
+      const originalLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '저장 중…';
+      if (status) status.textContent = '';
+      try {
+        const saved = await contractReviewModule.saveContractReviewReport(result);
+        btn.textContent = 'Documents에 저장됨';
+        message.dataset.savedDocumentId = String(saved.id || 'saved');
+        if (status) status.textContent = saved.title || 'Contract Review';
+        uiModule.showToast(`Documents에 저장했습니다: ${saved.title || 'Contract Review'}`, 3000);
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        const reason = error?.message || '보고서를 저장하지 못했습니다.';
+        if (status) status.textContent = `저장 실패: ${reason}`;
+        uiModule.showToast(`저장 실패: ${reason}`, 5000);
+      }
+    });
+
     // Global event delegation for copy-code buttons
     document.addEventListener('click', (e) => {
       const btn = e.target.closest('.copy-code');

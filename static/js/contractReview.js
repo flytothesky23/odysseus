@@ -11,7 +11,7 @@ import {
   updateSelectedPathSelection,
 } from './contractReviewState.js';
 import { isPathIncludedByScope } from './contractReviewExplorerState.js';
-import { extractLegalLookup } from './contractReviewLegal.js';
+import { buildLegalLookupArguments, extractLegalLookup } from './contractReviewLegal.js';
 
 let API_BASE = '';
 let modal = null;
@@ -368,9 +368,7 @@ export async function prepareChatEvidence(message) {
     error.code = 'mcp_tool_unavailable';
     throw error;
   }
-  const argumentsPayload = lookup.tool === 'search_decisions'
-    ? { domain: 'precedent', query: lookup.query, display: 5 }
-    : { query: lookup.query, display: 5 };
+  const argumentsPayload = buildLegalLookupArguments(lookup);
   const started = await api('/law/jobs', {
     method: 'POST',
     body: JSON.stringify({ server_id: server.id, tool: lookup.tool, arguments: argumentsPayload }),
@@ -421,12 +419,15 @@ async function searchLaw() {
   if (!query) throw new Error('법령 검색어를 입력하세요.');
   if (!serverId) throw new Error('연결된 Korean Law MCP가 없습니다. Settings에서 먼저 연결하세요.');
   modal.querySelector('#contract-review-law-output').textContent = '';
+  const parsedLookup = tool === 'search_law' ? extractLegalLookup(query) : null;
+  const lawQuery = parsedLookup?.tool === 'search_law' ? parsedLookup.query : query;
+  const argumentsPayload = tool === 'search_decisions'
+    ? buildLegalLookupArguments({ tool, query })
+    : buildLegalLookupArguments({ tool, query: lawQuery, jo: parsedLookup?.jo });
   const started = await api('/law/jobs', { method: 'POST', body: JSON.stringify({
     server_id: serverId,
     tool,
-    arguments: tool === 'search_decisions'
-      ? { domain: 'precedent', query, display: 5 }
-      : { query, display: 5 },
+    arguments: argumentsPayload,
   }) });
   const completed = await pollJob(started);
   if (completed.state !== 'completed') return;
@@ -451,15 +452,22 @@ function latestResult() {
   return bubbles.map(bubble => bubble._contractReviewResult).find(Boolean) || null;
 }
 
+export async function saveContractReviewReport(result, title = 'Contract Review') {
+  const sessionId = sessionModule.getCurrentSessionId?.();
+  if (!result || result.schema_version !== 'contract-review.v2') {
+    throw new Error('저장할 검증된 Contract Review 결과가 없습니다.');
+  }
+  if (!sessionId) throw new Error('현재 채팅 세션이 없습니다.');
+  const safeTitle = String(title || '').trim() || 'Contract Review';
+  return api('/reports', {
+    method: 'POST', body: JSON.stringify({ session_id: sessionId, title: safeTitle, result }),
+  });
+}
+
 async function saveReport() {
   const result = latestResult();
-  const sessionId = sessionModule.getCurrentSessionId?.();
-  if (!result) throw new Error('저장할 검증된 Contract Review 결과가 없습니다.');
-  if (!sessionId) throw new Error('현재 채팅 세션이 없습니다.');
   const title = modal.querySelector('#contract-review-report-title').value.trim() || 'Contract Review';
-  const saved = await api('/reports', {
-    method: 'POST', body: JSON.stringify({ session_id: sessionId, title, result }),
-  });
+  const saved = await saveContractReviewReport(result, title);
   setStatus(`Odysseus Documents에 명시적으로 저장했습니다: ${saved.title}`, 'ok');
 }
 
@@ -553,6 +561,16 @@ export function getContractReviewChatContext() {
   return buildContractReviewChatContext(state);
 }
 
+export function getVaultSaveContext() {
+  const state = loadState();
+  if (!state.vault_active || !state.snapshot_id || !state.vault_id || !state.selected_paths.length) return null;
+  return {
+    snapshot_id: state.snapshot_id,
+    vault_id: state.vault_id,
+    selected_paths: [...state.selected_paths],
+  };
+}
+
 export async function openContractReview() {
   const view = getModal();
   view.querySelector('#contract-review-vault-path').value = loadState().vault_path || '.';
@@ -603,6 +621,8 @@ export default {
   openContractReview,
   closeContractReview,
   getContractReviewChatContext,
+  getVaultSaveContext,
   prepareChatEvidence,
   renderPinnedSources,
+  saveContractReviewReport,
 };

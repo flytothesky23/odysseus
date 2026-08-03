@@ -236,14 +236,27 @@ def test_chat_source_bar_and_natural_language_law_toggle_replace_the_monolithic_
     assert "if (hasLegalReviewContext)" in chat
 
 
+def test_mode_switch_keeps_web_toggle_visual_and_checkbox_state_in_sync():
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    start = app.index("function applyModeToToggles(mode)")
+    end = app.index("// ── Agent / Chat mode toggle", start)
+    sync_block = app[start:end]
+
+    assert "btn.setAttribute('aria-pressed', String(on));" in sync_block
+
+
 def test_legal_lookup_requires_an_exact_law_name_or_precedent_identity():
     workspace_url = (ROOT / "static/js/contractReviewLegal.js").as_uri()
     data = _node(f"""
-      import {{ extractLegalLookup }} from {json.dumps(workspace_url)};
+      import {{ buildLegalLookupArguments, extractLegalLookup }} from {json.dumps(workspace_url)};
+      const articleLookup = extractLegalLookup('대한민국헌법 제10조의 공식 조문을 확인해줘');
       console.log(JSON.stringify({{
         civil: extractLegalLookup('민법상 계약 해제 요건을 공식 근거로 검증해줘'),
         labor: extractLegalLookup('근로기준법의 임금 지급 원칙을 확인해줘'),
         state: extractLegalLookup('국가를 당사자로 하는 계약에 관한 법률상 지체상금을 검토해줘'),
+        constitutionArticle: extractLegalLookup('대한민국헌법 제10조의 공식 조문을 확인해줘'),
+        civilSubarticle: extractLegalLookup('민법 제750조의2를 확인해줘'),
+        articleArguments: buildLegalLookupArguments(articleLookup),
         decision: extractLegalLookup('대법원 2024다12345 판례를 찾아 계약 해제를 분석해줘'),
         missing: extractLegalLookup('이 계약이 위법한지 법적으로 검토해줘'),
       }}));
@@ -251,6 +264,15 @@ def test_legal_lookup_requires_an_exact_law_name_or_precedent_identity():
     assert data["civil"] == {"tool": "search_law", "query": "민법"}
     assert data["labor"] == {"tool": "search_law", "query": "근로기준법"}
     assert data["state"] == {"tool": "search_law", "query": "국가를 당사자로 하는 계약에 관한 법률"}
+    assert data["constitutionArticle"] == {
+        "tool": "search_law", "query": "대한민국헌법", "jo": "제10조",
+    }
+    assert data["civilSubarticle"] == {
+        "tool": "search_law", "query": "민법", "jo": "제750조의2",
+    }
+    assert data["articleArguments"] == {
+        "query": "대한민국헌법", "display": 5, "jo": "제10조",
+    }
     assert data["decision"]["tool"] == "search_decisions"
     assert "2024다12345" in data["decision"]["query"]
     assert data["missing"] is None
@@ -363,8 +385,16 @@ def test_browser_state_persists_only_safe_compact_scope_rules():
 
 
 def test_precedent_search_is_scoped_to_the_verified_precedent_domain():
-    source = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
-    assert "{ domain: 'precedent', query, display: 5 }" in source
+    legal_url = (ROOT / "static/js/contractReviewLegal.js").as_uri()
+    data = _node(f"""
+      import {{ buildLegalLookupArguments }} from {json.dumps(legal_url)};
+      console.log(JSON.stringify(buildLegalLookupArguments({{
+        tool: 'search_decisions', query: '대법원 2024다12345',
+      }})));
+    """)
+    assert data == {
+        "domain": "precedent", "query": "대법원 2024다12345", "display": 5,
+    }
 
 
 def test_renderer_requires_v2_schema_and_labels_estimated_usage():
@@ -388,6 +418,8 @@ def test_renderer_requires_v2_schema_and_labels_estimated_usage():
     assert "contract-review-result" in html
     assert "Estimated" in html
     assert "Official legal evidence" in html
+    assert 'data-contract-review-save' in html
+    assert "Documents에 보고서 저장" in html
 
 
 def test_renderer_handles_actual_codex_interpretation_and_follow_up_objects():
@@ -436,6 +468,58 @@ def test_chat_renderer_and_live_chat_reference_contract_renderer():
     assert "contract_review_result" in chat
     assert "contract_review_error" in renderer
     assert "contract-review-result-error" in chat
+
+
+def test_contract_review_result_save_is_explicit_and_reused_by_the_common_response_footer():
+    contract_review = (ROOT / "static/js/contractReview.js").read_text(encoding="utf-8")
+    actions = (ROOT / "static/js/messageSaveActions.js").read_text(encoding="utf-8")
+    chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
+
+    assert "export async function saveContractReviewReport" in contract_review
+    assert "session_id: sessionId, title: safeTitle, result" in contract_review
+    assert "api('/reports'" in contract_review
+    assert "contractReview.saveContractReviewReport" in actions
+    assert "Documents에 저장됨" in actions
+    assert "[data-contract-review-save]" in chat
+    assert "message.dataset.savedDocumentId" in chat
+
+
+def test_every_ai_response_exposes_compact_explicit_save_destinations():
+    save_actions = (ROOT / "static/js/messageSaveActions.js").read_text(encoding="utf-8")
+    renderer = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+
+    for label in ("Documents에 저장", "메모에 저장", "Obsidian MD로 저장"):
+        assert label in save_actions
+    assert "POST" in save_actions
+    assert "'/api/document'" in save_actions
+    assert "'/api/notes'" in save_actions
+    assert "'/api/contract-review/vault/notes'" in save_actions
+    assert "openMessageSaveMenu" in renderer
+    assert "id: 'save'" in renderer
+    assert "const defaults = ['copy', 'save']" in renderer
+    assert "const pinnedActions = availableActions.filter(action => action.id === 'save')" in renderer
+    assert "const visible = [...pinnedActions, ...rankedActions].slice(0, _MAX_VISIBLE)" in renderer
+
+
+def test_result_title_and_context_folder_recommendation_are_bounded_and_relative():
+    actions_url = (ROOT / "static/js/messageSaveActions.js").as_uri()
+    data = _node(f"""
+      import {{ recommendVaultFolder, suggestSavedResultTitle }} from {json.dumps(actions_url)};
+      console.log(JSON.stringify({{
+        sameFolder: recommendVaultFolder(['10_계약/A.md', '10_계약/B.md']),
+        commonParent: recommendVaultFolder(['10_계약/A.md', '10_계약/하위/B.md']),
+        mixed: recommendVaultFolder(['10_계약/A.md', '20_법률/B.md']),
+        escaped: recommendVaultFolder(['../outside.md', '/absolute.md']),
+        title: suggestSavedResultTitle('# 계약 검토 결과\\n\\n본문'),
+      }}));
+    """)
+    assert data == {
+        "sameFolder": "10_계약",
+        "commonParent": "10_계약",
+        "mixed": ".",
+        "escaped": ".",
+        "title": "계약 검토 결과",
+    }
 
 
 def test_contract_review_has_native_workspace_picker_in_chat_mode():

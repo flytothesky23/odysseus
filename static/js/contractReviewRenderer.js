@@ -49,6 +49,10 @@ export function renderContractReviewResult(result) {
     <header><div><strong>Contract Review</strong><span>${esc(result.generated_at || '')}</span></div>
       <span class="contract-review-usage" data-source="${esc(usage.source || 'unavailable')}">${esc(usageLabel + counts)}</span></header>
     ${BLOCKS.map(([key, label]) => `<section data-contract-block="${key}"><h3>${esc(label)}</h3>${renderValue(result.blocks[key])}</section>`).join('')}
+    <footer class="contract-review-result-actions">
+      <button type="button" class="confirm-btn contract-review-save-report" data-contract-review-save>Documents에 보고서 저장</button>
+      <span class="contract-review-save-status" data-contract-review-save-status role="status" aria-live="polite"></span>
+    </footer>
   </article>`;
 }
 

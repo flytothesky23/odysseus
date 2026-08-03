@@ -4001,6 +4001,17 @@ body.bg-pattern-sparkles {
       line-height:1;
     }
     .msg-action-btn:hover { color:var(--accent); }
+    .msg-save-btn {
+      width:auto;
+      font-size:0.72rem;
+      letter-spacing:-0.01em;
+      border:1px solid color-mix(in srgb, var(--border) 72%, transparent);
+      padding:3px 7px;
+    }
+    .msg-save-btn[aria-expanded="true"] {
+      color:var(--accent);
+      border-color:color-mix(in srgb, var(--accent) 55%, var(--border));
+    }
     .msg-action-btn[data-action="shorten"] { position:relative; top:1px; font-size:1.25rem; }
     .msg-delete-btn { position:relative; top:1px; }
     .msg-delete-btn:hover { color:var(--red); }
@@ -4038,6 +4049,94 @@ body.bg-pattern-sparkles {
     .msg-overflow-item:hover {
       background:color-mix(in srgb, var(--red) 8%, transparent);
     }
+    .msg-save-menu {
+      position:fixed;
+      z-index:140;
+      width:min(330px, calc(100vw - 16px));
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:9px;
+      padding:8px;
+      box-shadow:0 12px 32px rgba(0,0,0,0.42);
+      color:var(--fg);
+    }
+    .msg-save-heading {
+      padding:3px 5px 7px;
+      color:var(--color-muted-alt);
+      font-size:0.7rem;
+      font-weight:700;
+      letter-spacing:0.04em;
+      text-transform:uppercase;
+    }
+    .msg-save-destinations { display:grid; gap:3px; }
+    .msg-save-destination {
+      display:grid;
+      gap:2px;
+      width:100%;
+      padding:8px 9px;
+      border:0;
+      border-radius:6px;
+      background:transparent;
+      color:var(--fg);
+      text-align:left;
+      font-family:inherit;
+      cursor:pointer;
+    }
+    .msg-save-destination:hover:not(:disabled),
+    .msg-save-destination:focus-visible {
+      background:color-mix(in srgb, var(--accent) 10%, transparent);
+      outline:none;
+    }
+    .msg-save-destination:disabled { cursor:not-allowed; opacity:0.48; }
+    .msg-save-destination strong { font-size:0.82rem; font-weight:650; }
+    .msg-save-destination span { color:var(--color-muted-alt); font-size:0.69rem; line-height:1.35; }
+    .msg-save-status {
+      min-height:0;
+      padding:5px 5px 0;
+      color:var(--color-muted-alt);
+      font-size:0.68rem;
+      overflow-wrap:anywhere;
+    }
+    .msg-save-status:empty { display:none; }
+    .msg-save-status[data-kind="ok"] { color:var(--success, #48a868); }
+    .msg-save-status[data-kind="error"] { color:var(--red); }
+    .msg-save-vault-form { display:grid; gap:8px; padding:2px 3px 3px; }
+    .msg-save-vault-form label {
+      display:grid;
+      gap:4px;
+      color:var(--color-muted-alt);
+      font-size:0.69rem;
+    }
+    .msg-save-vault-form input {
+      width:100%;
+      min-width:0;
+      box-sizing:border-box;
+      border:1px solid var(--border);
+      border-radius:6px;
+      background:var(--bg);
+      color:var(--fg);
+      padding:7px 8px;
+      font:inherit;
+      font-size:0.78rem;
+    }
+    .msg-save-vault-form input:focus {
+      outline:none;
+      border-color:color-mix(in srgb, var(--accent) 64%, var(--border));
+    }
+    .msg-save-vault-form p { margin:0; color:var(--color-muted-alt); font-size:0.65rem; }
+    .msg-save-vault-controls { display:flex; justify-content:flex-end; gap:6px; }
+    .msg-save-vault-controls button {
+      min-height:30px;
+      border:1px solid var(--border);
+      border-radius:6px;
+      padding:5px 9px;
+      background:transparent;
+      color:var(--fg);
+      font:inherit;
+      font-size:0.72rem;
+      cursor:pointer;
+    }
+    .msg-save-vault-controls .confirm-btn { background:var(--accent); color:var(--bg); border-color:var(--accent); }
     .overflow-icon {
       width:16px;
       text-align:center;
@@ -41280,6 +41379,9 @@ body.theme-frosted .modal {
 .contract-review-result section p { white-space: pre-wrap; }
 .contract-review-proof { display: inline-block; margin-left: 7px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); font-size: 11px; }
 .contract-review-empty { color: var(--text-secondary); }
+.contract-review-result-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:4px; }
+.contract-review-save-report { min-height:36px; }
+.contract-review-save-status { color:var(--text-secondary); font-size:12px; }
 .contract-review-usage[data-source="estimated"] { color: #b7791f; }
 .contract-review-usage[data-source="actual"] { color: var(--success, #48a868); }
 @media (max-width: 720px) {

@@ -11,6 +11,7 @@ import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
 import { renderContractReviewResult } from './contractReviewRenderer.js';
+import { openMessageSaveMenu } from './messageSaveActions.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -1559,6 +1560,10 @@ export function createMsgFooter(msgElement) {
       btn.innerHTML = CHECK_ICON;
       setTimeout(() => { btn.innerHTML = COPY_ICON; }, 1500);
     }},
+    { id: 'save', icon: '저장', title: '저장', cls: 'msg-action-btn msg-save-btn', handler(e) {
+      e.stopPropagation();
+      openMessageSaveMenu(msgElement, e.currentTarget, copyMessageText(msgElement));
+    }},
     { id: 'edit', icon: '\u270E', title: 'Edit', cls: 'msg-action-btn', handler(e) {
       e.stopPropagation();
       if (window.chatModule?.editAIMessage) window.chatModule.editAIMessage(msgElement);
@@ -1590,17 +1595,19 @@ export function createMsgFooter(msgElement) {
 
   // Determine which 3 to show: use recent order, fallback to defaults
   const recent = _getRecentActions();
-  const defaults = ['copy', 'delete', 'fork'];
+  const defaults = ['copy', 'save'];
   const order = recent.length > 0 ? recent : defaults;
-  const sorted = [...availableActions].sort((a, b) => {
+  const pinnedActions = availableActions.filter(action => action.id === 'save');
+  const rankedActions = availableActions.filter(action => action.id !== 'save').sort((a, b) => {
     const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
     if (ai >= 0 && bi >= 0) return ai - bi;
     if (ai >= 0) return -1;
     if (bi >= 0) return 1;
     return 0;
   });
-  const visible = sorted.slice(0, _MAX_VISIBLE);
-  const overflow = sorted.slice(_MAX_VISIBLE);
+  const visible = [...pinnedActions, ...rankedActions].slice(0, _MAX_VISIBLE);
+  const visibleIds = new Set(visible.map(action => action.id));
+  const overflow = [...pinnedActions, ...rankedActions].filter(action => !visibleIds.has(action.id));
 
   // Render visible buttons
   function _addBtn(action, container) {

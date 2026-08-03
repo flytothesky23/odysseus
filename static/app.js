@@ -12,13 +12,13 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260802contractreviewv2';
+import chatModule from './js/chat.js?v=20260803responsesave1';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260802contractreviewv2';
+import chatRenderer from './js/chatRenderer.js?v=20260803responsesave1';
 import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
@@ -1808,6 +1808,7 @@ function initializeEventListeners() {
       if (btn.style.display === 'none') return;
       const on = loadToolPref(stateKey, mode);
       btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', String(on));
       if (checkboxId) { const chk = el(checkboxId); if (chk) chk.checked = on; }
     });
   }

@@ -411,6 +411,7 @@ def test_official_citation_identity_is_server_owned_when_model_omits_or_changes_
         "source": "law.go.kr",
         "citation_id": "law.go.kr · 대한민국헌법 · MST 61603",
         "verification_state": "verified",
+        "content": "제10조 모든 국민은 인간으로서의 존엄과 가치를 가지며, 행복을 추구할 권리를 가진다.",
     }
     payload = {
         "schema_version": "contract-review.v2",
@@ -418,7 +419,7 @@ def test_official_citation_identity_is_server_owned_when_model_omits_or_changes_
         "local_document_evidence": [],
         "vault_note_evidence": [],
         "official_legal_evidence": [{
-            key: value for key, value in canonical.items() if key != "citation_id"
+            key: value for key, value in canonical.items() if key not in {"citation_id", "content"}
         }],
         "model_interpretation": {"text": "Interpretation", "evidence_ids": [canonical["id"]]},
         "uncertainty_and_follow_up": ["Verify"],
@@ -438,6 +439,14 @@ def test_official_citation_identity_is_server_owned_when_model_omits_or_changes_
         **kwargs,
     )
     assert result["blocks"]["official_legal_evidence"][0]["citation_id"] == canonical["citation_id"]
+    assert result["blocks"]["official_legal_evidence"][0]["text"] == canonical["content"]
+
+    payload["official_legal_evidence"][0]["content"] = "모델이 만든 근거 본문"
+    result = extract_contract_review_result(
+        "```contract-review-result\n" + json.dumps(payload, ensure_ascii=False) + "\n```",
+        **kwargs,
+    )
+    assert result["blocks"]["official_legal_evidence"][0]["text"] == canonical["content"]
 
     payload["official_legal_evidence"][0]["citation_id"] = "law.go.kr · forged · MST 0"
     with pytest.raises(ContractReviewError) as exc:

@@ -245,6 +245,22 @@ def setup_contract_review_routes(
         except ContractReviewError as exc:
             return _error_response(exc)
 
+    @router.post("/vault/notes", status_code=201)
+    async def save_vault_note(request: Request):
+        try:
+            owner = owner_for(request)
+            payload = _require_mapping(await request.json())
+            return service.save_markdown_note(
+                owner=owner,
+                snapshot_id=str(payload.get("snapshot_id") or ""),
+                vault_id=str(payload.get("vault_id") or ""),
+                folder=str(payload.get("folder") or "."),
+                title=str(payload.get("title") or ""),
+                markdown=str(payload.get("markdown") or ""),
+            )
+        except ContractReviewError as exc:
+            return _error_response(exc)
+
     @router.post("/context/prepare")
     async def prepare_context(request: Request):
         try:

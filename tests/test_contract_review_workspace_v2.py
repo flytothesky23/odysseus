@@ -179,6 +179,117 @@ def test_bounded_body_search_and_delta_follow_up(contract_workspace, monkeypatch
     assert calls[-2:] == ["기본 계약.md", "amendments/Liability.md"]
 
 
+def test_reindexed_modified_note_invalidates_same_path_body_cache(contract_workspace, monkeypatch):
+    workspace, vault = contract_workspace
+    service = ContractReviewWorkspaceService(max_body_chars=4000)
+    first_index = _index(service, workspace)
+    calls = []
+    original = service._read_note_body
+
+    def spy(owner, snapshot, relative_path, *args, **kwargs):
+        calls.append(relative_path)
+        return original(owner, snapshot, relative_path, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_read_note_body", spy)
+    first = service.build_turn_context(
+        owner="alice", session_id="same-session",
+        snapshot_id=first_index["snapshot_id"], vault_id=first_index["vault_id"],
+        selected_paths=["기본 계약.md"], analysis_mode="general",
+    )
+    assert "재색인 변경 문장" not in first["evidence"][0]["content"]
+
+    note = vault / "기본 계약.md"
+    note.write_text(
+        note.read_text(encoding="utf-8") + "\n재색인 변경 문장\n",
+        encoding="utf-8",
+    )
+    second_index = _index(service, workspace)
+    refreshed = service.build_turn_context(
+        owner="alice", session_id="same-session",
+        snapshot_id=second_index["snapshot_id"], vault_id=second_index["vault_id"],
+        selected_paths=["기본 계약.md"], analysis_mode="general",
+    )
+
+    assert refreshed["strategy"] == "delta"
+    assert refreshed["delta_paths"] == ["기본 계약.md"]
+    assert "재색인 변경 문장" in refreshed["evidence"][0]["content"]
+    assert calls == ["기본 계약.md", "기본 계약.md"]
+
+
+def test_explicit_vault_markdown_save_uses_existing_folder_kst_frontmatter_and_no_overwrite(contract_workspace):
+    workspace, vault = contract_workspace
+    service = ContractReviewWorkspaceService()
+    indexed = _index(service, workspace)
+    target = vault / "amendments" / "계약 검토 결과.md"
+    assert not target.exists()
+
+    saved = service.save_markdown_note(
+        owner="alice",
+        snapshot_id=indexed["snapshot_id"],
+        vault_id=indexed["vault_id"],
+        folder="amendments",
+        title="계약 검토 결과",
+        markdown="# 결론\n\n명시적으로 저장한 비식별 분석 결과",
+    )
+
+    assert saved["path"] == "amendments/계약 검토 결과.md"
+    assert saved["created_at"].endswith("+09:00")
+    assert saved["reindex_required"] is True
+    content = target.read_text(encoding="utf-8")
+    assert content.startswith("---\ntitle: \"계약 검토 결과\"\n")
+    assert "created:" in content and "+09:00" in content
+    assert "source: odysseus\n" in content
+    assert content.endswith("# 결론\n\n명시적으로 저장한 비식별 분석 결과\n")
+
+    with pytest.raises(ContractReviewError) as exc:
+        service.save_markdown_note(
+            owner="alice", snapshot_id=indexed["snapshot_id"], vault_id=indexed["vault_id"],
+            folder="amendments", title="계약 검토 결과", markdown="overwrite",
+        )
+    assert exc.value.code == "note_exists"
+    assert "overwrite" not in target.read_text(encoding="utf-8")
+
+
+def test_vault_markdown_save_rejects_owner_escape_hidden_symlink_and_stale_root(contract_workspace, tmp_path):
+    workspace, vault = contract_workspace
+    service = ContractReviewWorkspaceService()
+    indexed = _index(service, workspace)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (vault / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink unavailable")
+
+    cases = [
+        ("bob", "amendments", "owner"),
+        ("alice", "../outside", "traversal"),
+        ("alice", str(outside), "absolute"),
+        ("alice", ".private", "hidden"),
+        ("alice", "escape", "symlink"),
+        ("alice", "missing", "missing"),
+    ]
+    for owner, folder, title in cases:
+        with pytest.raises(ContractReviewError):
+            service.save_markdown_note(
+                owner=owner, snapshot_id=indexed["snapshot_id"], vault_id=indexed["vault_id"],
+                folder=folder, title=title, markdown="must not be written",
+            )
+    assert not any(outside.iterdir())
+
+    moved = workspace / "old-vault"
+    vault.rename(moved)
+    vault.mkdir()
+    (vault / ".obsidian").mkdir()
+    with pytest.raises(ContractReviewError) as exc:
+        service.save_markdown_note(
+            owner="alice", snapshot_id=indexed["snapshot_id"], vault_id=indexed["vault_id"],
+            folder=".", title="stale", markdown="must not be written",
+        )
+    assert exc.value.code == "vault_changed"
+    assert not (vault / "stale.md").exists()
+
+
 def test_memo_only_context_reuses_and_deltas_without_requiring_a_vault_snapshot():
     service = ContractReviewWorkspaceService()
     memo_a = {
