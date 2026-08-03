@@ -64,6 +64,15 @@ let _librarySort = 'recent';
 let _librarySearch = '';
 let _librarySearchDebounce = null;
 
+function _hasHighlightGrammar(language) {
+  return Boolean(
+    window.hljs
+    && language
+    && typeof window.hljs.getLanguage === 'function'
+    && window.hljs.getLanguage(language)
+  );
+}
+
 // Highlight the active search terms inside a plain string. Escapes first,
 // then wraps each whitespace-separated term in <mark>. Multi-term, matching
 // the backend's per-term search, so every word that matched is marked.
@@ -779,7 +788,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     const pre = document.createElement('pre');
     const code = document.createElement('code');
     try {
-      if (doc.language && doc.language !== 'text' && window.hljs && !_librarySearch) {
+      if (doc.language !== 'text' && _hasHighlightGrammar(doc.language) && !_librarySearch) {
         code.innerHTML = window.hljs.highlight(doc.preview || '', { language: doc.language }).value;
       } else if (_librarySearch) {
         // While searching, highlight matched terms in the preview (plain
@@ -958,7 +967,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       // highlighting anyway, so skip it there.
       const HL_CAP = 20000;
       try {
-        if (lang && lang !== 'text' && lang !== 'markdown' && window.hljs && content.length <= HL_CAP) {
+        if (lang !== 'text' && lang !== 'markdown' && _hasHighlightGrammar(lang) && content.length <= HL_CAP) {
           code.innerHTML = window.hljs.highlight(content, { language: lang }).value;
         } else {
           code.textContent = content;

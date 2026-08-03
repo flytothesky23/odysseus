@@ -20,7 +20,7 @@
 Docker가 가장 간단한 시작 방법입니다.
 
 ```bash
-git clone --branch v0.1.11-ko --depth 1 https://github.com/flytothesky23/odysseus.git
+git clone --branch v0.1.12-ko --depth 1 https://github.com/flytothesky23/odysseus.git
 cd odysseus
 cp .env.example .env
 docker compose up -d --build
@@ -36,14 +36,14 @@ native 설치, GPU 설정, Windows/macOS 실행, HTTPS, 환경변수는 원본 [
 
 ## 현재 한국어 fork 릴리스
 
-최신 안정 태그는 [`v0.1.11-ko`](https://github.com/flytothesky23/odysseus/releases/tag/v0.1.11-ko)입니다.
+최신 안정 태그는 [`v0.1.12-ko`](https://github.com/flytothesky23/odysseus/releases/tag/v0.1.12-ko)입니다.
 
 - `v0.1.9-ko`의 upstream migration과 한국어 UI·Codex OAuth·Deep Research 기능을 모두 포함합니다.
 - Obsidian Vault Explorer, metadata-first 검색, 선택 범위·동일 근거 follow-up, Kordoc 문서 파싱, Korean Law 공식 근거 검증을 Odysseus 채팅에 통합했습니다.
 - Contract Review 결과는 문서 근거·Vault 근거·공식 법률 근거·모델 해석·불확실성을 구분하며, 사용자가 누른 경우에만 Documents·메모·Obsidian MD로 저장합니다.
-- 기억, 이메일, OAuth, 세션, 벡터 지식 같은 개인화 데이터는 Git에 포함되지 않으며 [설치·업데이트 및 데이터 보존 절차](docs/releases/v0.1.11-ko.md)에 따라 보존해야 합니다.
+- 기억, 이메일, OAuth, 세션, 벡터 지식 같은 개인화 데이터는 Git에 포함되지 않으며 [설치·업데이트 및 데이터 보존 절차](docs/releases/v0.1.12-ko.md)에 따라 보존해야 합니다.
 
-기존 `v0.1.10-ko` 이하에서 업데이트할 때는 코드만 새 태그로 전환하고 기존 `.env`와 `data/`를 삭제하지 마세요. `app.db`와 `data/.app_key`는 반드시 같은 snapshot의 한 쌍으로 보관해야 합니다.
+기존 `v0.1.11-ko` 이하에서 업데이트할 때는 코드만 새 태그로 전환하고 기존 `.env`와 `data/`를 삭제하지 마세요. `app.db`와 `data/.app_key`는 반드시 같은 snapshot의 한 쌍으로 보관해야 합니다.
 
 ## 무엇을 할 수 있나
 
