@@ -7589,8 +7589,17 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // hljs has no 'svg' grammar — highlight it as xml (the dropdown value stays
     // 'svg' so the preview/run routing still treats it as renderable markup).
     const _hlLang = lang === 'svg' ? 'xml' : lang;
-    codeEl.className = _hlLang ? `language-${_hlLang}` : '';
-    if (window.hljs && _hlLang) {
+    // Library-facing formats such as PDF and email are valid Odysseus document
+    // types, but are not highlight.js grammars. Asking highlight.js to process
+    // them logs a console error even though the editor otherwise renders fine.
+    const _canHighlight = Boolean(
+      window.hljs
+      && _hlLang
+      && typeof window.hljs.getLanguage === 'function'
+      && window.hljs.getLanguage(_hlLang)
+    );
+    codeEl.className = _canHighlight ? `language-${_hlLang}` : '';
+    if (_canHighlight) {
       codeEl.removeAttribute('data-highlighted');
       window.hljs.highlightElement(codeEl);
     }
