@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import src.agent_loop as al
 from src.tool_policy import WEB_TOOL_NAMES
@@ -181,6 +182,496 @@ def test_explicit_web_turn_falls_back_to_search_when_model_only_announces_need(m
     assert executed == [("web_search", query)]
     assert not any(event.get("type") == "web_completion_failed" for event in events)
     assert "필요합니다" not in "".join(event.get("delta", "") for event in events)
+
+
+def test_html_artifact_creation_does_not_enter_web_completion_gate(monkeypatch):
+    """A persistent web toggle must not hijack a self-contained artifact turn."""
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        schema_names = _schema_names(kwargs.get("tools"))
+        assert "web_search" not in schema_names
+        assert "web_fetch" not in schema_names
+        if rounds["value"] == 1:
+            assert "create_document" in schema_names
+            yield "data: " + json.dumps({
+                "type": "tool_calls",
+                "calls": [{
+                    "name": "create_document",
+                    "arguments": json.dumps({
+                        "title": "자기소개 HTML 샘플",
+                        "language": "html",
+                        "content": "<!doctype html><title>자기소개</title><main>편집 가능한 샘플</main>",
+                    }, ensure_ascii=False),
+                }],
+            }) + "\n\n"
+        else:
+            yield "data: " + json.dumps({"delta": "편집 가능한 HTML 샘플을 만들었습니다."}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        assert block.tool_type == "create_document"
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "artifact-context-test",
+                "title": "자기소개 HTML 샘플",
+                "language": "html",
+                "content": "<!doctype html><title>자기소개</title><main>편집 가능한 샘플</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex",
+        "gpt-5.6-luna",
+        [{
+            "role": "user",
+            "content": "멋진 자기소개서 샘플로 만들어줄 수 있니, 아티팩트로 HTML 형식으로",
+        }],
+        max_rounds=2,
+        relevant_tools={"create_document"},
+        disabled_tools=set(WEB_TOOL_NAMES),
+    )))
+
+    assert executed == ["create_document"]
+    assert any(event.get("type") == "doc_update" for event in events)
+    assert not any(event.get("type") == "web_sources" for event in events)
+    assert not any(event.get("type") == "web_completion_failed" for event in events)
+    visible = "".join(event.get("delta", "") for event in events)
+    assert "웹에서 읽은 근거" not in visible
+
+
+def test_subscription_artifact_promise_is_buffered_until_document_tool_runs(monkeypatch):
+    """Codex textual tool mode must not leak a plan and stop before creation."""
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        if rounds["value"] == 1:
+            delta = (
+                "개인정보는 넣지 않고 HTML 아티팩트로 만들겠습니다."
+                "We need tool call. We have create_document tool in commentary. Let's do."
+            )
+        elif rounds["value"] == 2:
+            joined = "\n".join(str(message.get("content") or "") for message in messages)
+            assert "DO IT NOW" in joined
+            delta = (
+                "```create_document\n"
+                "자기소개서 HTML 샘플\n"
+                "html\n"
+                "<!doctype html><title>[이름] 자기소개서</title><main>[경험]</main>\n"
+                "```"
+            )
+        else:
+            delta = "편집 가능한 HTML 자기소개서 아티팩트를 만들었습니다."
+        yield "data: " + json.dumps({"delta": delta}, ensure_ascii=False) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        assert block.tool_type == "create_document"
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "subscription-artifact-test",
+                "title": "자기소개서 HTML 샘플",
+                "language": "html",
+                "content": "<!doctype html><title>[이름] 자기소개서</title><main>[경험]</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex/responses",
+        "gpt-5.6-luna",
+        [{
+            "role": "user",
+            "content": "멋진 자기소개서 샘플을 아티팩트로 HTML 형식으로 만들어줘",
+        }],
+        max_rounds=3,
+        relevant_tools={"create_document"},
+        disabled_tools=set(WEB_TOOL_NAMES),
+    )))
+
+    visible = "".join(event.get("delta", "") for event in events)
+    assert executed == ["create_document"]
+    assert any(event.get("type") == "doc_update" for event in events)
+    assert "We need tool call" not in visible
+    assert "HTML 자기소개서 아티팩트를 만들었습니다" in visible
+
+
+def test_truncated_subscription_html_tool_stream_retries_without_leaking_error(monkeypatch):
+    """A degenerate partial HTML fence is retried instead of becoming the answer."""
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        if rounds["value"] == 1:
+            delta = (
+                "```create_document\n자기소개서 HTML 샘플\nhtml\n"
+                "<!doctype html><main><ul><li><strong>경험"
+            )
+            yield "data: " + json.dumps({"delta": delta}, ensure_ascii=False) + "\n\n"
+            yield (
+                'event: error\ndata: {"status": 502, "text": '
+                '"Stopped generation: repeated phrase"}\n\n'
+            )
+            return
+        if rounds["value"] == 2:
+            joined = "\n".join(str(message.get("content") or "") for message in messages)
+            assert "concise" in joined.lower()
+            yield "data: " + json.dumps({
+                "delta": (
+                    "```create_document\n자기소개서 HTML 샘플\nhtml\n"
+                    "<!doctype html><title>[이름] 자기소개서</title><main>[경험]</main>\n```"
+                )
+            }, ensure_ascii=False) + "\n\n"
+        else:
+            yield "data: " + json.dumps({
+                "delta": "편집 가능한 HTML 자기소개서 아티팩트를 만들었습니다."
+            }, ensure_ascii=False) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "recovered-subscription-artifact",
+                "title": "자기소개서 HTML 샘플",
+                "language": "html",
+                "content": "<!doctype html><title>[이름] 자기소개서</title><main>[경험]</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex/responses",
+        "gpt-5.6-luna",
+        [{"role": "user", "content": "자기소개서 HTML 아티팩트를 만들어줘"}],
+        max_rounds=3,
+        relevant_tools={"create_document"},
+        disabled_tools=set(WEB_TOOL_NAMES),
+    )))
+
+    visible = "".join(event.get("delta", "") for event in events)
+    assert executed == ["create_document"]
+    assert not any(event.get("error") or event.get("status") == 502 for event in events)
+    assert "Stopped generation" not in visible
+    assert any(event.get("type") == "doc_update" for event in events)
+
+
+def test_strict_web_artifact_exposes_document_tool_only_after_usable_evidence(monkeypatch):
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        names = _schema_names(kwargs.get("tools"))
+        if rounds["value"] == 1:
+            assert {"web_search", "web_fetch"}.issubset(names)
+            assert "create_document" not in names
+            call = {
+                "name": "web_search",
+                "arguments": json.dumps({"query": "최신 포트폴리오 HTML 디자인"}, ensure_ascii=False),
+            }
+        else:
+            assert "create_document" in names
+            joined = "\n".join(str(message.get("content") or "") for message in messages)
+            assert "PORTFOLIO_EVIDENCE_BODY" in joined
+            call = {
+                "name": "create_document",
+                "arguments": json.dumps({
+                    "title": "근거 기반 포트폴리오",
+                    "language": "html",
+                    "content": "<!doctype html><main>근거 기반 HTML 샘플 [1]</main>",
+                }, ensure_ascii=False),
+            }
+        yield "data: " + json.dumps({"type": "tool_calls", "calls": [call]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        if block.tool_type == "web_search":
+            source = {
+                "url": "https://example.test/portfolio",
+                "title": "Portfolio patterns",
+                "evidence_status": "fetched",
+                "fetched": True,
+                "usable": True,
+            }
+            return (
+                "web_search",
+                {
+                    "output": "PORTFOLIO_EVIDENCE_BODY\n\n<!-- SOURCES:"
+                    + json.dumps([source])
+                    + " -->",
+                    "exit_code": 0,
+                },
+            )
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "web-artifact-test",
+                "title": "근거 기반 포트폴리오",
+                "language": "html",
+                "content": "<!doctype html><main>근거 기반 HTML 샘플 [1]</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex",
+        "gpt-5.6-luna",
+        [{
+            "role": "user",
+            "content": "최신 포트폴리오 디자인을 웹검색해서 HTML 아티팩트로 만들어줘",
+        }],
+        max_rounds=3,
+        max_tool_calls=4,
+        relevant_tools={"web_search", "web_fetch", "create_document"},
+        forced_tools=set(WEB_TOOL_NAMES),
+    )))
+
+    assert executed == ["web_search", "create_document"]
+    assert any(event.get("type") == "web_sources" for event in events)
+    assert any(event.get("type") == "doc_update" for event in events)
+    assert not any(event.get("type") == "web_completion_failed" for event in events)
+    visible = "".join(
+        event.get("delta", "") for event in events
+    )
+    assert "아티팩트를 만들었습니다" in visible
+    assert "[출처 1](https://example.test/portfolio)" in visible
+
+
+def test_citation_force_answer_still_allows_pending_artifact_creation(monkeypatch):
+    """Citation repair must not discard the one required document mutation."""
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        if rounds["value"] == 1:
+            delta = '```web_search\n{"query":"official portfolio design principles"}\n```'
+        elif rounds["value"] == 2:
+            delta = "웹 근거를 반영한 새 HTML 아티팩트를 생성했습니다 [1]."
+        elif rounds["value"] == 3:
+            delta = "We need tool call but must cite the fetched evidence."
+        elif rounds["value"] == 4:
+            delta = "접근성·반응형 원칙을 반영했습니다 [1]."
+        elif rounds["value"] == 5:
+            delta = (
+                "```create_document\n근거 기반 포트폴리오\nhtml\n"
+                "<!doctype html><main>접근성·반응형 포트폴리오</main>\n```"
+            )
+        else:
+            delta = "근거를 반영한 HTML 아티팩트를 만들었습니다 [1]."
+        yield "data: " + json.dumps({"delta": delta}, ensure_ascii=False) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        if block.tool_type == "web_search":
+            source = {
+                "url": "https://official.test/portfolio-design",
+                "title": "Official portfolio design principles",
+                "evidence_status": "fetched",
+                "fetched": True,
+                "usable": True,
+            }
+            return (
+                "web_search",
+                {
+                    "output": (
+                        "OFFICIAL_PORTFOLIO_BODY\n\n"
+                        "<!-- SOURCES:" + json.dumps([source]) + " -->"
+                    ),
+                    "exit_code": 0,
+                },
+            )
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "citation-repaired-artifact",
+                "title": "근거 기반 포트폴리오",
+                "language": "html",
+                "content": "<!doctype html><main>접근성·반응형 포트폴리오</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex/responses",
+        "gpt-5.6-luna",
+        [{"role": "user", "content": "최신 포트폴리오 원칙을 웹검색해 새 HTML 아티팩트로 만들어줘"}],
+        max_rounds=6,
+        max_tool_calls=5,
+        relevant_tools={"web_search", "web_fetch", "create_document"},
+        forced_tools=set(WEB_TOOL_NAMES),
+    )))
+
+    assert executed == ["web_search", "create_document"]
+    assert any(event.get("type") == "doc_update" for event in events)
+    assert any(event.get("type") == "web_sources" for event in events)
+    assert not any(event.get("type") == "web_completion_failed" for event in events)
+    assert "[출처 1](https://official.test/portfolio-design)" in "".join(
+        event.get("delta", "") for event in events
+    )
+
+
+def test_strict_web_new_artifact_does_not_overwrite_unrelated_active_document(monkeypatch):
+    """An open editor must not turn an explicit new artifact into an edit."""
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "estimate_tokens", lambda *args, **kwargs: 10, raising=False)
+
+    rounds = {"value": 0}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        rounds["value"] += 1
+        names = _schema_names(kwargs.get("tools"))
+        if rounds["value"] == 1:
+            assert "create_document" not in names
+            call = {
+                "name": "web_search",
+                "arguments": json.dumps({"query": "최신 포트폴리오 HTML 디자인"}, ensure_ascii=False),
+            }
+        else:
+            assert "create_document" in names
+            assert not {"edit_document", "update_document", "suggest_document"} & names
+            call = {
+                "name": "create_document",
+                "arguments": json.dumps({
+                    "title": "새 포트폴리오",
+                    "language": "html",
+                    "content": "<!doctype html><main>새 아티팩트 [1]</main>",
+                }, ensure_ascii=False),
+            }
+        yield "data: " + json.dumps({"type": "tool_calls", "calls": [call]}) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    executed = []
+
+    async def fake_execute(block, *args, **kwargs):
+        executed.append(block.tool_type)
+        if block.tool_type == "web_search":
+            source = {
+                "url": "https://example.test/portfolio",
+                "title": "Portfolio patterns",
+                "evidence_status": "fetched",
+                "fetched": True,
+                "usable": True,
+            }
+            return (
+                "web_search",
+                {
+                    "output": "PORTFOLIO_EVIDENCE_BODY\n\n<!-- SOURCES:"
+                    + json.dumps([source])
+                    + " -->",
+                    "exit_code": 0,
+                },
+            )
+        return (
+            "create_document",
+            {
+                "action": "create",
+                "doc_id": "new-web-artifact-test",
+                "title": "새 포트폴리오",
+                "language": "html",
+                "content": "<!doctype html><main>새 아티팩트 [1]</main>",
+                "version": 1,
+                "exit_code": 0,
+            },
+        )
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", fake_execute, raising=False)
+
+    active_document = SimpleNamespace(
+        id="unrelated-active-document",
+        title="계약서 검토 기준",
+        language="markdown",
+        current_content="# 기존 문서\n\n이 문서는 수정되면 안 됩니다.",
+        version=3,
+    )
+    events = _events(_collect(al.stream_agent_loop(
+        "https://chatgpt.com/backend-api/codex",
+        "gpt-5.6-luna",
+        [{
+            "role": "user",
+            "content": "최신 포트폴리오 디자인을 웹검색해서 새 HTML 아티팩트로 만들어줘",
+        }],
+        max_rounds=3,
+        max_tool_calls=4,
+        relevant_tools={"web_search", "web_fetch", "create_document"},
+        forced_tools=set(WEB_TOOL_NAMES),
+        active_document=active_document,
+    )))
+
+    assert executed == ["web_search", "create_document"]
+    assert any(event.get("type") == "doc_update" for event in events)
+    assert not any(event.get("type") == "web_completion_failed" for event in events)
 
 
 def test_named_source_retrieval_contract_is_injected_before_first_model_call(monkeypatch):
@@ -1090,6 +1581,39 @@ def test_malformed_nested_web_citations_are_canonical_clickable_links():
         "[출처 1](https://openai.test/app) "
         "[출처 2](https://github.test/repo)"
     )
+
+
+def test_reference_style_web_citations_become_clickable_and_drop_definitions():
+    ledger = [
+        {
+            "url": "https://openai.test/codex",
+            "title": "Introducing Codex",
+            "evidence_status": "fetched",
+            "fetched": True,
+            "usable": True,
+        },
+        {
+            "url": "https://github.test/openai/codex/readme",
+            "title": "openai/codex README",
+            "evidence_status": "fetched",
+            "fetched": True,
+            "usable": True,
+        },
+    ]
+    answer = (
+        "공통 기능입니다. ([OpenAI 공식 소개][1] · "
+        "[GitHub README][2](https://github.test/openai/codex/readme))\n\n"
+        "두 근거를 함께 확인했습니다 [1][2].\n\n"
+        "[1]: https://openai.test/codex"
+    )
+
+    normalized = al._canonicalize_web_citations(answer, ledger, ledger)
+
+    assert normalized.count("[출처 1](https://openai.test/codex)") == 2
+    assert normalized.count("[출처 2](https://github.test/openai/codex/readme)") == 2
+    assert "[OpenAI 공식 소개][1]" not in normalized
+    assert "[GitHub README]" not in normalized
+    assert "[1]:" not in normalized
 
 
 def test_numeric_marker_nested_inside_markdown_link_label_is_canonicalized():

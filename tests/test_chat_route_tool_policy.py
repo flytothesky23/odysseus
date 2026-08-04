@@ -18,6 +18,7 @@ from src.tool_policy import (
     WEB_TOOL_NAMES,
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
+    web_search_required_for_turn,
 )
 
 _CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
@@ -146,6 +147,39 @@ def test_korean_legal_intent_auto_escalates_plain_chat():
     intent = classify_tool_intent("대한민국헌법 제10조 공식 원문을 확인해줘")
     assert intent.needs_tools
     assert intent.category == "legal"
+
+
+def test_korean_html_artifact_request_routes_to_documents_without_web():
+    intent = classify_tool_intent(
+        "멋진 자기소개서 샘플로 만들어줄 수 있니, 아티팩트로 HTML 형식으로"
+    )
+
+    assert intent.needs_tools is True
+    assert intent.category == "documents"
+
+
+def test_web_toggle_is_capability_not_a_strict_requirement_for_document_creation():
+    assert web_search_required_for_turn(
+        search_enabled=True,
+        explicit_web_intent=False,
+        action_category="documents",
+    ) is False
+
+
+def test_explicit_web_backed_artifact_keeps_strict_web_requirement():
+    assert web_search_required_for_turn(
+        search_enabled=True,
+        explicit_web_intent=True,
+        action_category="documents",
+    ) is True
+
+
+def test_web_toggle_still_requires_grounding_for_an_ordinary_information_question():
+    assert web_search_required_for_turn(
+        search_enabled=True,
+        explicit_web_intent=False,
+        action_category="",
+    ) is True
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

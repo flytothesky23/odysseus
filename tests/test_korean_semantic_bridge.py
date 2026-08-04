@@ -58,6 +58,7 @@ def test_complete_new_korean_topic_does_not_inherit_old_web_task(text):
         "제가 지금 웹에서 검색해 보겠습니다.",
         "관련 자료를 실제로 확인해볼게요.",
         "잠시만요, 최신 결과를 찾아보겠습니다.",
+        "편집 가능한 HTML 아티팩트로 만들겠습니다.",
     ],
 )
 def test_korean_future_tense_tool_promises_are_detected(text):

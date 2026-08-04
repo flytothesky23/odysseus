@@ -82,6 +82,11 @@ def test_strict_web_turn_gets_a_finite_default_tool_budget():
     assert _web_tool_call_limit(0, web_completion_required=True) == 4
     assert _web_tool_call_limit(3, web_completion_required=True) == 3
     assert _web_tool_call_limit(0, web_completion_required=False) == 0
+    assert _web_tool_call_limit(
+        0,
+        web_completion_required=True,
+        reserved_post_evidence_calls=1,
+    ) == 5
 
 
 def test_strict_textual_web_calls_keep_bounded_search_then_fetch_pipeline():

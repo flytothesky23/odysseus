@@ -77,7 +77,7 @@ _CONTEXTUAL_QUESTION_RE = re.compile(
 )
 
 _PROMISE_RE = re.compile(
-    r"(?:검색|확인|검증|조회|찾아보|살펴보|조사|실행|열어보|저장)"
+    r"(?:검색|확인|검증|조회|찾아보|살펴보|조사|실행|열어보|저장|만들|생성|작성|구현|렌더)"
     r"[^.\n]{0,50}(?:하겠습니다|겠습니다|해\s*보겠습니다|해보겠습니다|해볼게요|해\s*볼게요|"
     r"보겠습니다|볼게요)"
 )
@@ -299,7 +299,20 @@ def detect_korean_domains(text: str) -> Set[str]:
         domains.add("email")
     if re.search(r"(?:일정|캘린더|달력|회의|약속|리마인더|할\s*일|체크리스트|메모|노트)", value):
         domains.add("notes_calendar_tasks")
-    if re.search(r"(?:Documents|보고서|문서|초안|개요|편집|교정|작성)", value):
+    _document_target = re.search(
+        r"(?:Documents|보고서|문서|초안|개요|편집|교정|작성|자기소개서|"
+        r"아티팩트|artifact|HTML|웹\s*페이지)",
+        value,
+        re.I,
+    )
+    _document_action = re.search(
+        r"(?:만들|생성|작성|써\s*줘|작성해|구현|렌더|미리보기|샘플)",
+        value,
+    )
+    if _document_target and (
+        re.search(r"(?:Documents|보고서|문서|초안|개요|편집|교정|작성)", value)
+        or _document_action
+    ):
         domains.add("documents")
     if re.search(r"(?:레포|리포지토리|코드|소스|테스트|디버그|파일|폴더|터미널|셸|깃|브랜치|커밋)", value):
         domains.add("files")

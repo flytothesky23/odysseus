@@ -20,7 +20,7 @@
 Docker가 가장 간단한 시작 방법입니다.
 
 ```bash
-git clone --branch v0.1.14-ko --depth 1 https://github.com/flytothesky23/odysseus.git
+git clone --branch v0.1.15-ko --depth 1 https://github.com/flytothesky23/odysseus.git
 cd odysseus
 cp .env.example .env
 docker compose up -d --build
@@ -36,19 +36,22 @@ native 설치, GPU 설정, Windows/macOS 실행, HTTPS, 환경변수는 원본 [
 
 ## 현재 한국어 fork 릴리스
 
-최신 안정 태그는 [`v0.1.14-ko`](https://github.com/flytothesky23/odysseus/releases/tag/v0.1.14-ko)입니다.
+최신 안정 태그는 [`v0.1.15-ko`](https://github.com/flytothesky23/odysseus/releases/tag/v0.1.15-ko)입니다.
 
 - `v0.1.9-ko`의 upstream migration과 한국어 UI·Codex OAuth·Deep Research 기능을 모두 포함합니다.
+- 웹검색 토글은 검색을 강제하지 않습니다. 현재 대화·기억·선택 자료로 충분한 한국어 요청은 그 맥락을 유지하고, 최신·외부 사실을 명시적으로 요구할 때만 웹을 조회합니다.
+- 자기소개서 같은 개인 HTML 아티팩트는 알려진 정보만 사용하고 부족한 항목은 편집 가능한 자리표시자로 남기며, 실제 `Run / Preview`가 가능한 Documents로 생성합니다.
 - 일반 채팅의 웹검색은 후보 URL 수집과 실제 본문 조회를 구분하고, 읽은 근거만 다음 Codex 호출에 전달해 한국어 합성 답변과 클릭 가능한 인라인 출처를 만듭니다.
 - 같은 근거 후속질문은 기존 출처를 재사용하고 필요한 경우에만 delta retrieval을 수행하며, 검색·본문 조회·합성·인용 검증 상태를 분리합니다.
 - 출처 링크가 포함된 Markdown 표도 실제 HTML 표로 렌더링합니다.
 - 검증된 복수 출처 웹분석은 채팅과 연결된 하나의 진화형 Documents 아티팩트로 생성되며, 후속질문은 새 문서를 난립시키지 않고 같은 문서의 버전으로 누적됩니다.
+- 모델이 문서 생성을 말로 약속해도 실제 도구 성공 전에는 사용자에게 노출하지 않으며, 검색·인용·HTML이 필요한 혼합 요청은 검증 근거를 먼저 확정한 뒤 문서를 생성합니다.
 - Documents의 Markdown은 표·링크·Mermaid 미리보기를, HTML/SVG/XML은 격리된 실제 렌더링 미리보기를 제공합니다.
 - Obsidian Vault Explorer, metadata-first 검색, 선택 범위·동일 근거 follow-up, Kordoc 문서 파싱, Korean Law 공식 근거 검증을 Odysseus 채팅에 통합했습니다.
 - Contract Review 결과는 문서 근거·Vault 근거·공식 법률 근거·모델 해석·불확실성을 구분하며, 사용자가 누른 경우에만 Documents·메모·Obsidian MD로 저장합니다.
-- 기억, 이메일, OAuth, 세션, 벡터 지식 같은 개인화 데이터는 Git에 포함되지 않으며 [설치·업데이트 및 데이터 보존 절차](docs/releases/v0.1.14-ko.md)에 따라 보존해야 합니다.
+- 기억, 이메일, OAuth, 세션, 벡터 지식 같은 개인화 데이터는 Git에 포함되지 않으며 [설치·업데이트 및 데이터 보존 절차](docs/releases/v0.1.15-ko.md)에 따라 보존해야 합니다.
 
-기존 `v0.1.13-ko` 이하에서 업데이트할 때는 코드만 새 태그로 전환하고 기존 `.env`와 `data/`를 삭제하지 마세요. `app.db`와 `data/.app_key`는 반드시 같은 snapshot의 한 쌍으로 보관해야 합니다.
+기존 `v0.1.14-ko` 이하에서 업데이트할 때는 코드만 새 태그로 전환하고 기존 `.env`와 `data/`를 삭제하지 마세요. `app.db`와 `data/.app_key`는 반드시 같은 snapshot의 한 쌍으로 보관해야 합니다.
 
 ## 무엇을 할 수 있나
 

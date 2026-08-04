@@ -50,6 +50,30 @@ def web_search_enabled_for_turn(allow_web_search: object, use_web: object = None
     return tool_toggle_enabled(allow_web_search) or tool_toggle_enabled(use_web)
 
 
+def web_search_required_for_turn(
+    *,
+    search_enabled: bool,
+    explicit_web_intent: bool,
+    action_category: str = "",
+) -> bool:
+    """Separate web capability from a strict evidence requirement.
+
+    The UI search toggle makes web tools available, but it must not convert a
+    self-contained document, note, email, workspace, or UI action into a web
+    research turn.  An explicit lookup request still wins, including mixed
+    requests such as "search the latest examples and make an HTML artifact".
+    With no other actionable domain, the enabled search toggle remains an
+    intentional request for grounded web synthesis.
+    """
+
+    if not search_enabled:
+        return False
+    if explicit_web_intent:
+        return True
+    category = str(action_category or "").strip().lower()
+    return category in {"", "web"}
+
+
 _COMMON_TOOL_NAMES = {
     "api_call",
     "app_api",

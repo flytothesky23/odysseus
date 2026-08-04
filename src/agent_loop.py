@@ -615,6 +615,27 @@ def _canonicalize_web_citations(
         flags=re.IGNORECASE,
     )
 
+    # Resolve reference-style citations before the generic Markdown-link pass
+    # can leave a dangling label in hybrids such as ``[label][2](url)``.
+    value = re.sub(
+        r"\[(?!\d+\])[^\]\n]+\]\[(\d+)\]\((https?://[^)\s]+)\)",
+        _replace_nested,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    def _replace_reference_number(match: re.Match) -> str:
+        source = global_by_index.get(int(match.group(1)))
+        if source is None:
+            return match.group(0)
+        return _link_for_url(str(source.get("url") or "")) or match.group(0)
+
+    value = re.sub(
+        r"\[(?!\d+\])[^\]\n]+\]\[(\d+)\]",
+        _replace_reference_number,
+        value,
+    )
+
     def _replace_markdown_link(match: re.Match) -> str:
         return _link_for_url(match.group(2)) or match.group(0)
 
@@ -631,6 +652,19 @@ def _canonicalize_web_citations(
             return match.group(0)
         return _link_for_url(str(source.get("url") or "")) or match.group(0)
 
+    def _drop_verified_reference_definition(match: re.Match) -> str:
+        source = global_by_index.get(int(match.group(1)))
+        if source is None:
+            return match.group(0)
+        if _web_source_identity_key(source.get("url")) != _web_source_identity_key(match.group(2)):
+            return match.group(0)
+        return ""
+
+    value = re.sub(
+        r"(?m)^\s*\[(\d+)\]:\s*(https?://\S+)\s*$",
+        _drop_verified_reference_definition,
+        value,
+    )
     value = re.sub(r"(?<!\[)\[(\d+)\](?!\])", _replace_number, value)
     # A model can emit both an explicit URL citation and a numeric citation for
     # the same sentence.  Both normalize to the same trusted link; collapse
@@ -770,19 +804,29 @@ def _web_synthesis_continuation_request(
     }
 
 
-def _web_tool_call_limit(requested_limit: int, *, web_completion_required: bool) -> int:
+def _web_tool_call_limit(
+    requested_limit: int,
+    *,
+    web_completion_required: bool,
+    reserved_post_evidence_calls: int = 0,
+) -> int:
     """Return a finite tool budget for strict web turns.
 
     Historically ``0`` meant unlimited tool calls.  That is unsafe for an
     evidence-gated web turn: a provider/runtime failure can make the model try
     many distinct searches that evade the identical-call loop breaker.  Keep an
     explicit caller limit, and otherwise cap strict inline web work at four
-    calls.  Longer multi-source investigations belong in Deep Research.
+    retrieval calls. Mixed evidence-backed artifact turns reserve one later
+    mutation call so a successful fetch cannot exhaust the entire budget before
+    ``create_document`` becomes available. Longer multi-source investigations
+    belong in Deep Research.
     """
 
     if requested_limit > 0:
         return requested_limit
-    return 4 if web_completion_required else requested_limit
+    if not web_completion_required:
+        return requested_limit
+    return 4 + max(0, int(reserved_post_evidence_calls or 0))
 
 
 def _web_fallback_query(
@@ -898,6 +942,8 @@ def _limit_strict_web_tool_blocks(
     used_native: bool,
     web_completion_required: bool,
     web_delta_required: bool = False,
+    web_evidence_ready: bool = False,
+    post_evidence_tools: Optional[Set[str]] = None,
 ) -> List[ToolBlock]:
     """Run at most four distinct textual web calls in one bounded batch.
 
@@ -916,15 +962,20 @@ def _limit_strict_web_tool_blocks(
     if not web_completion_required or used_native:
         return blocks
     selected: List[ToolBlock] = []
+    allowed_after_evidence = set(post_evidence_tools or set())
     seen = set()
     selected_searches = 0
     for block in blocks:
-        if block.tool_type not in WEB_TOOL_NAMES:
+        if block.tool_type in WEB_TOOL_NAMES:
+            if block.tool_type == "web_search":
+                if web_delta_required and selected_searches >= 1:
+                    continue
+                selected_searches += 1
+        elif not (
+            web_evidence_ready
+            and block.tool_type in allowed_after_evidence
+        ):
             continue
-        if block.tool_type == "web_search":
-            if web_delta_required and selected_searches >= 1:
-                continue
-            selected_searches += 1
         raw = str(block.content or "").strip()
         canonical = raw
         if raw.startswith("{"):
@@ -1218,6 +1269,7 @@ _AGENT_RULES = """\
 - Multiple tool blocks per response OK. 60s timeout per tool, 10K char output limit.
 - Code/content >15 lines → ```create_document (NOT in chat). Short snippets OK in chat.
 - Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Use create_document instead of dumping the full content in chat.
+- For personal/profile artifacts, use the current conversation, saved memory, and explicitly selected document/workspace evidence before external lookup. Never web-search for facts about the user. If essential identity details are missing, ask one focused question or create a clearly editable sample with placeholders; do not invent personal facts.
 - Editing an existing document: ALWAYS use ```edit_document with FIND/REPLACE blocks. Do NOT rewrite the whole document with ```update_document unless genuinely changing more than half of it.
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
@@ -1266,6 +1318,7 @@ _API_AGENT_RULES = """\
 - Keep answers concise unless the user asks for depth.
 - For long code or content, use document tools instead of pasting large blocks into chat.
 - Long-form or structured writing is a document by default when the user asks to write/create/make/generate it and the answer would be more than a short paragraph. Call create_document instead of dumping the full content in chat.
+- For personal/profile artifacts, use the current conversation, saved memory, and explicitly selected document/workspace evidence before external lookup. Never web-search for facts about the user. If essential identity details are missing, ask one focused question or create a clearly editable sample with placeholders; do not invent personal facts.
 - Editing an existing document: ALWAYS use `edit_document` with find/replace. Only use `update_document` for genuine full rewrites (>50% changed) — do NOT echo the entire file back for small edits.
 - If the active editor document is an email draft/compose window, treat that open email as the target for "write this", "write the email", "reply with...", "make it say...", "draft this", and similar requests. Do NOT create another document, search/list/manage documents, or open a different reply unless the user explicitly asks. Edit the open email draft with `edit_document` or `update_document`; preserve To/Cc/Bcc/Subject/In-Reply-To/References/X-* header lines unless the user asks to change them.
 - "Give suggestions / feedback / review / how can I improve this / what would make it better" about the OPEN document → call `suggest_document`, do NOT write a prose list of ideas in chat. It creates inline accept/reject bubbles on the doc. Give concrete `find`/`replace`/`reason` items. To suggest an ADDITION (e.g. "add a bow to the SVG", a new section), set `find` to a short existing anchor snippet and `replace` to that same snippet PLUS the new content. Only answer in prose when no document is open, or the request is purely conceptual with no concrete change to propose.
@@ -2318,6 +2371,40 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     }
 
 
+def _turn_requests_new_document(last_user: str) -> bool:
+    """Return whether the user explicitly asks for a separate new artifact.
+
+    A document may remain open while the user asks to create a different HTML
+    artifact, report, or sample.  Treat explicit references to the visible
+    document as edits, but do not let an unrelated open editor silently turn a
+    creation request into an overwrite.
+    """
+    text = str(last_user or "").strip().lower()
+    if not text:
+        return False
+    if re.search(
+        r"(?:이|그|현재|기존|열린|열려\s*있는|방금)\s*(?:문서|아티팩트|artifact|초안|파일)|"
+        r"(?:문서|아티팩트|artifact|초안|파일)(?:을|를|에)\s*(?:수정|고쳐|바꿔|추가|반영)|"
+        r"\b(?:this|that|current|existing|open)\s+(?:document|artifact|draft|file)\b|"
+        r"\b(?:edit|update|revise|fix|change)\s+(?:this|that|the current|the open)\b",
+        text,
+    ):
+        return False
+    return bool(re.search(
+        r"(?:새(?:로운|로)?\s*)?(?:html\s*)?(?:아티팩트|artifact|웹\s*페이지|html|"
+        r"자기소개서|포트폴리오|보고서|샘플|초안|문서).{0,80}(?:만들|생성|작성|구현|렌더)|"
+        r"(?:새(?:로운|로)?\s*)?(?:html\s*)?(?:아티팩트|artifact|웹\s*페이지|html|"
+        r"자기소개서|포트폴리오|보고서|샘플|초안|문서)(?:로|를|을|\s)*(?:만들|생성|작성|구현|렌더)|"
+        r"(?:만들|생성|작성|구현|렌더).{0,48}(?:새(?:로운)?\s*)?(?:html|아티팩트|artifact|"
+        r"웹\s*페이지|자기소개서|포트폴리오|보고서|샘플|초안|문서)|"
+        r"\b(?:create|make|generate|build|render|write)\b.{0,64}\b(?:new\s+)?(?:html|artifact|"
+        r"web\s*page|profile|portfolio|report|sample|draft|document)\b|"
+        r"\b(?:new\s+)?(?:html|artifact|web\s*page|profile|portfolio|report|sample|draft|document)\b"
+        r".{0,64}\b(?:create|make|generate|build|render|write)\b",
+        text,
+    ))
+
+
 def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
     """Return whether an open document should affect this turn.
 
@@ -2336,7 +2423,10 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
         or title_l in {"new email", "new mail", "new message"}
         or ("To:" in raw_doc[:400] and "Subject:" in raw_doc[:400] and "\n---\n" in raw_doc)
     )
-    if "documents" in (intent.get("domains") or set()):
+    if (
+        "documents" in (intent.get("domains") or set())
+        and not _turn_requests_new_document(last_user)
+    ):
         return True
     text = str(last_user or "").strip().lower()
     if not text:
@@ -4545,6 +4635,17 @@ async def stream_agent_loop(
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
+    _intent_domains = set(_intent.get("domains") or set())
+    _strict_post_web_tools: Set[str] = set()
+    _document_creation_required = bool(
+        not guide_only
+        and "documents" in _intent_domains
+        and _turn_requests_new_document(_last_user)
+        and "create_document" not in disabled_tools
+        and not (tool_policy and tool_policy.blocks("create_document"))
+    )
+    _document_creation_completed = False
+
     # Route-forced web and Korean legal turns are capability boundaries, not
     # merely retrieval hints. Re-clamp after skill expansion so unrelated
     # built-ins or arbitrary MCP tools cannot ride along and replace the
@@ -4554,6 +4655,13 @@ async def stream_agent_loop(
         _bounded_tools = {"ask_user", "update_plan"}
         if _strict_web_tool_scope:
             _bounded_tools.update(_forced_set)
+            if "documents" in _intent_domains:
+                _strict_post_web_tools = (
+                    {"edit_document", "update_document", "suggest_document"}
+                    if _active_document_relevant
+                    else {"create_document"}
+                )
+                _bounded_tools.update(_strict_post_web_tools)
         if _strict_legal_tool_scope:
             _bounded_tools.add("korean_law_lookup")
             if "web" in set(_intent.get("domains") or set()):
@@ -4564,7 +4672,6 @@ async def stream_agent_loop(
             sorted(_relevant_tools),
         )
 
-    _intent_domains = set(_intent.get("domains") or set())
     _ody_doc_finetune_mode = (
         _ody_qwen_finetune_model
         and (
@@ -4912,6 +5019,7 @@ async def stream_agent_loop(
     max_tool_calls = _web_tool_call_limit(
         max_tool_calls,
         web_completion_required=_web_completion_required,
+        reserved_post_evidence_calls=1 if _strict_post_web_tools else 0,
     )
     _web_attempted_calls = 0
     _web_successful_calls = 0
@@ -4966,6 +5074,8 @@ async def stream_agent_loop(
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
         _legal_tool_ran_this_round = False
+        _web_document_artifact_completed = False
+        _web_document_content = ""
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -4993,6 +5103,15 @@ async def stream_agent_loop(
                 # tools it cannot call and substitutes the nearest schema
                 # it does have (e.g. manage_memory for manage_skills).
                 _schema_names = set(_relevant_tools)
+                if (
+                    _web_completion_required
+                    and _strict_post_web_tools
+                    and _web_usable_sources == 0
+                ):
+                    # Mixed web+artifact turns are staged. Retrieval must
+                    # produce readable evidence before a document mutation
+                    # schema becomes callable on a later round.
+                    _schema_names.difference_update(_strict_post_web_tools)
                 if _needs_admin:
                     _schema_names |= _ADMIN_TOOLS
                 base_schemas = [
@@ -5044,6 +5163,7 @@ async def stream_agent_loop(
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
+        _round_stream_error = ""
         logger.info(
             "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
             round_num,
@@ -5085,13 +5205,18 @@ async def stream_agent_loop(
                 break
             # Forward error events from stream_llm to the frontend
             if chunk.startswith("event: error"):
+                _round_stream_error = chunk
                 logger.warning(
                     "[agent-timing] stream_error round=%s elapsed=%.3fs chunk=%r",
                     round_num,
                     time.time() - _round_start,
                     chunk[:500],
                 )
-                yield chunk
+                if not (
+                    _document_creation_required
+                    and not _document_creation_completed
+                ):
+                    yield chunk
                 continue
             if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                 try:
@@ -5200,7 +5325,14 @@ async def stream_agent_loop(
                         if (
                             not _ody_qwen_finetune_model or data.get("thinking")
                         ) and (
-                            data.get("thinking") or not _evidence_completion_required
+                            data.get("thinking")
+                            or not (
+                                _evidence_completion_required
+                                or (
+                                    _document_creation_required
+                                    and not _document_creation_completed
+                                )
+                            )
                         ):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
@@ -5295,8 +5427,20 @@ async def stream_agent_loop(
             native_tool_calls,
             round_num,
             is_api_model=(_is_api_model and not guide_only),
-            allow_fenced_for_api=_ody_doc_finetune_mode,
+            allow_fenced_for_api=(
+                _ody_doc_finetune_mode
+                or (_document_creation_required and round_num > 1)
+            ),
         )
+        if _document_creation_required and round_num > 1 and not used_native:
+            # Codex subscription endpoints normally have a structured tool
+            # channel, but can answer a supervisor nudge with the textual
+            # ```create_document fallback instead.  Accept only that exact
+            # effect here; never widen the retry into arbitrary fenced tools.
+            tool_blocks = [
+                block for block in tool_blocks
+                if block.tool_type == "create_document"
+            ][:1]
         _pre_evidence_limit_count = len(tool_blocks)
         if _web_completion_required and _legal_completion_required and not used_native:
             tool_blocks = next(
@@ -5314,6 +5458,8 @@ async def stream_agent_loop(
                 used_native=used_native,
                 web_completion_required=_web_completion_required,
                 web_delta_required=_web_delta_required,
+                web_evidence_ready=_web_usable_sources > 0,
+                post_evidence_tools=_strict_post_web_tools,
             )
             tool_blocks = _limit_strict_legal_tool_blocks(
                 tool_blocks,
@@ -5501,10 +5647,43 @@ async def stream_agent_loop(
         # call anyway, discard it — don't execute, don't re-loop. Keep
         # only the prose; if there's none, emit a graceful fallback.
         if _force_answer:
-            if tool_blocks:
-                logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
-            tool_blocks = []
-            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip():
+            _pending_document_index = (
+                next(
+                    (
+                        idx for idx, block in enumerate(tool_blocks)
+                        if block.tool_type == "create_document"
+                    ),
+                    None,
+                )
+                if _document_creation_required and not _document_creation_completed
+                else None
+            )
+            if _pending_document_index is not None:
+                # Citation repair may put the web synthesis lane into a
+                # tool-free force-answer state before the separately required
+                # artifact mutation has happened. Preserve exactly one audited
+                # create_document call so the model cannot claim an artifact
+                # exists while the UI only holds an abandoned stream preview.
+                tool_blocks = [tool_blocks[_pending_document_index]]
+                if used_native:
+                    converted_calls = (
+                        [converted_calls[_pending_document_index]]
+                        if _pending_document_index < len(converted_calls)
+                        else []
+                    )
+                    native_tool_calls = converted_calls
+                logger.info(
+                    "[agent] force-answer round %s: allowing pending create_document",
+                    round_num,
+                )
+            else:
+                if tool_blocks:
+                    logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
+                tool_blocks = []
+            if (
+                not tool_blocks
+                and not _strip_think_blocks(strip_tool_blocks(round_response)).strip()
+            ):
                 # The model burned its budget gathering data but never wrote a
                 # final answer (common with weaker models on multi-source
                 # briefings). Salvage it: one blunt non-streaming synthesis call
@@ -5590,6 +5769,15 @@ async def stream_agent_loop(
 
         if not tool_blocks:
             _intent_text = _strip_think_blocks(cleaned_round).strip()
+            _missing_required_document_action = bool(
+                _document_creation_required and not _document_creation_completed
+            )
+            if _missing_required_document_action:
+                # Explicit new-artifact turns are effectful. Provider prose such
+                # as "만들겠습니다" or leaked "We need tool call" planning is
+                # provisional until create_document actually succeeds.
+                full_response = full_response[:_round_full_start]
+                round_texts[-1] = ""
 
             # Explicit web turns are buffered until they prove completion. This
             # prevents a visible "검색해 보겠습니다" bubble from being accepted
@@ -5885,9 +6073,19 @@ async def stream_agent_loop(
             # happen to contain "let me know" are not stalls.
             _looks_like_promise = (
                 not guide_only
-                and (_intent_match is not None or _korean_promise)
-                and len(_intent_text) < 400
-                and "```" not in _intent_text
+                and (
+                    _intent_match is not None
+                    or _korean_promise
+                    or _missing_required_document_action
+                )
+                and (
+                    len(_intent_text) < 400
+                    or _missing_required_document_action
+                )
+                and (
+                    "```" not in _intent_text
+                    or _missing_required_document_action
+                )
             )
             if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
                 _intent_nudge_count += 1
@@ -5914,8 +6112,16 @@ async def stream_agent_loop(
                         "see you announced the action but didn't run it, which "
                         "is the most frustrating thing you can do. "
                         "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
-                        "If you decided not to do it after all, say so plainly in "
+                        + (
+                            "Call `create_document` now and provide its title, "
+                            "language, and complete content; do not narrate the call. "
+                            "Keep the HTML concise (under 4,000 characters), valid, "
+                            "standalone, and free of repetitive placeholder markup. "
+                            if _missing_required_document_action
+                            else ""
+                        )
+                        + f"{_cookbook_log_hint}"
+                        + "If you decided not to do it after all, say so plainly in "
                         "one sentence instead of restating the plan."
                     ),
                 })
@@ -6013,7 +6219,10 @@ async def stream_agent_loop(
                 yield f'data: {json.dumps({"delta": _intent_text})}\n\n'
             break  # no tools — done
 
-        if _evidence_completion_required:
+        if (
+            _evidence_completion_required
+            or (_document_creation_required and not _document_creation_completed)
+        ):
             # Text accompanying an evidence tool call is provisional. Keep the
             # tool/progress events, but do not persist or show methodology,
             # contradictory failure prose, or leaked textual call markup.
@@ -6326,6 +6535,17 @@ async def stream_agent_loop(
                 )
                 _web_usable_sources = len(_web_source_ledger)
 
+            if (
+                _web_completion_required
+                and _web_usable_sources > 0
+                and block.tool_type in {
+                    "create_document", "update_document", "edit_document",
+                }
+                and not result.get("error")
+            ):
+                _web_document_artifact_completed = True
+                _web_document_content = str(result.get("content") or block.content or "")
+
             # Emit doc-specific event for document tools — the frontend
             # document panel handles this; no need to show content in chat.
             if is_doc_tool and "action" in result:
@@ -6579,6 +6799,8 @@ async def stream_agent_loop(
                         "version": result.get("version", 1),
                     }) + '\n\n'
                 )
+                if block.tool_type == "create_document" and not result.get("error"):
+                    _document_creation_completed = True
 
             # Inline research: emit the open-link as part of the assistant's
             # actual response text — a `#research-<id>` anchor that chatRenderer
@@ -6676,6 +6898,31 @@ async def stream_agent_loop(
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
             logger.info("[agent] odysseus doc tool completed after one textual tool block")
+            break
+
+        if _web_document_artifact_completed:
+            _artifact_sources = _select_answer_web_sources(
+                _web_document_content,
+                _web_source_ledger,
+            ) or list(_web_source_ledger)
+            _artifact_citations = " · ".join(
+                f"[출처 {index}]({source.get('url')})"
+                for index, source in enumerate(_artifact_sources[:2], 1)
+                if str(source.get("url") or "").startswith(("http://", "https://"))
+            )
+            _confirmation = (
+                f"웹에서 확인한 근거 {_artifact_citations}를 반영한 "
+                "아티팩트를 만들었습니다."
+                if _artifact_citations
+                else "웹에서 확인한 근거를 반영한 아티팩트를 만들었습니다."
+            )
+            if _artifact_sources:
+                yield f'data: {json.dumps({"type": "web_sources", "data": _artifact_sources})}\n\n'
+            _clean_current = strip_tool_blocks(full_response).strip()
+            _prefix = "\n\n" if _clean_current else ""
+            full_response = (_clean_current + _prefix + _confirmation).strip()
+            yield f'data: {json.dumps({"delta": _prefix + _confirmation})}\n\n'
+            logger.info("[agent-web] completed staged web-backed document artifact")
             break
 
         if (_ody_notes_finetune_mode or _ody_qwen_finetune_model) and _ody_notes_tool_completed:

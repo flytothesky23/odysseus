@@ -43,7 +43,11 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
-from src.korean_semantics import is_korean_contextual_followup, is_korean_web_intent
+from src.korean_semantics import (
+    detect_korean_domains,
+    is_korean_contextual_followup,
+    is_korean_web_intent,
+)
 from src.image_model_ids import looks_like_image_generation_model
 from src.chatgpt_subscription import normalize_reasoning_effort
 from src.tool_policy import (
@@ -51,6 +55,7 @@ from src.tool_policy import (
     build_effective_tool_policy,
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
+    web_search_required_for_turn,
 )
 from src.contract_review import (
     ContractReviewError,
@@ -975,6 +980,19 @@ def setup_chat_routes(
         auto_escalated = False
         _auto_web_agent = False
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
+        _message_domains = detect_korean_domains(message) if isinstance(message, str) else set()
+        _document_action_intent = bool(
+            (_tool_intent and _tool_intent.category == "documents")
+            or "documents" in _message_domains
+        )
+        _explicit_web_intent = _explicit_web_intent or bool(
+            _tool_intent and _tool_intent.category == "web"
+        )
+        _strict_web_required = web_search_required_for_turn(
+            search_enabled=_search_enabled,
+            explicit_web_intent=_explicit_web_intent,
+            action_category=_tool_intent.category if _tool_intent else "",
+        )
         _workspace_agent_intent = False
         if (
             chat_mode == "chat"
@@ -1335,14 +1353,17 @@ def setup_chat_routes(
         # explicitly enable it.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
-        _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
-        if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
+        if (
+            is_web_search_explicitly_denied(allow_web_search)
+            or not _search_enabled
+            or not _strict_web_required
+        ):
             disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
             # A direct lookup/search request should not drift into personal
             # tools or shell fallbacks. It can only use web_search/web_fetch
             # when the request's explicit web setting enabled them.
-            disabled_tools.update({
+            _strict_web_disabled = {
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",
                 "read_file", "write_file", "edit_file",
@@ -1350,12 +1371,18 @@ def setup_chat_routes(
                 "send_email", "reply_to_email",
                 "manage_notes", "manage_calendar", "manage_tasks",
                 "api_call",
-            })
+            }
+            if _document_action_intent:
+                _strict_web_disabled.difference_update({
+                    "create_document", "edit_document", "update_document",
+                    "suggest_document",
+                })
+            disabled_tools.update(_strict_web_disabled)
             if _search_enabled:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
             else:
                 disabled_tools.update(WEB_TOOL_NAMES)
-        elif _search_enabled:
+        elif _strict_web_required:
             disabled_tools.difference_update(WEB_TOOL_NAMES)
 
         # Nobody/incognito mode: deny tools that would expose the user's
@@ -1972,7 +1999,7 @@ def setup_chat_routes(
                     _max_rounds = max(1, min(_max_rounds, 200))
 
                     _forced_tools = None
-                    if _search_enabled:
+                    if _strict_web_required:
                         _forced_tools = set(WEB_TOOL_NAMES)
                         if _explicit_browser_intent:
                             _forced_tools |= set(_BROWSER_MCP_TOOLS)
