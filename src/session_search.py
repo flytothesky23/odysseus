@@ -13,6 +13,7 @@ from sqlalchemy import text
 from core.database import ChatMessage as DBChatMessage
 from core.database import Session as DBSession
 from core.database import SessionLocal
+from src.korean_semantics import contains_hangul, semantic_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,15 @@ def _sanitize_fts_query(query: str) -> str | None:
 
         token = match.group(0).strip("._-")
         if not token:
+            continue
+        normalized = semantic_tokens(token)
+        if normalized:
+            token = normalized[0]
+        if contains_hangul(token) and len(token) >= 2:
+            # SQLite FTS5's unicode61 tokenizer keeps Korean particles inside
+            # the token. Prefix matching lets 계약서* match 계약서를/계약서의,
+            # while the local semantic normalizer removes the query particle.
+            parts.append(token + "*")
             continue
         if any(ch in token for ch in "._-"):
             parts.append('"' + token.replace('"', '""') + '"')

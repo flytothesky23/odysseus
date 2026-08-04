@@ -10,9 +10,11 @@ from urllib.parse import urlparse
 from .analytics import (
     NetworkError,
     ParseError,
+    ProviderError,
     RateLimitError,
     error_logger,
     _record_query,
+    query_fingerprint,
 )
 from .cache import (
     SEARCH_CACHE_DIR,
@@ -42,6 +44,10 @@ from .content import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _query_trace(query: str) -> str:
+    return f"{query_fingerprint(query)} len={len(str(query or ''))}"
 
 # ========= CONFIG =========
 SEARCH_CONFIG: Dict[str, Any] = {
@@ -96,18 +102,23 @@ def update_search_config(api_key: str = None, **kwargs):
 def _call_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
     """Call a search provider by name. Returns list of results or empty list."""
     if provider_name == "searxng":
-        return searxng_search_api(query, count, time_filter=time_filter)
+        results = searxng_search_api(query, count, time_filter=time_filter)
     elif provider_name == "brave":
-        return brave_search(query, count, time_filter)
+        results = brave_search(query, count, time_filter)
     elif provider_name == "duckduckgo":
-        return duckduckgo_search(query, count, time_filter)
+        results = duckduckgo_search(query, count, time_filter)
     elif provider_name == "google_pse":
-        return google_pse_search(query, count, time_filter)
+        results = google_pse_search(query, count, time_filter)
     elif provider_name == "tavily":
-        return tavily_search(query, count, time_filter)
+        results = tavily_search(query, count, time_filter)
     elif provider_name == "serper":
-        return serper_search(query, count, time_filter)
-    return []
+        results = serper_search(query, count, time_filter)
+    else:
+        results = []
+    provider_error = getattr(results, "provider_error", None)
+    if provider_error is not None:
+        raise provider_error
+    return results
 
 
 # If the self-hosted SearXNG instance is up but all enabled engines return
@@ -153,7 +164,7 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
             expiry_raw = cached_data.get("expiry")
             expiry = datetime.fromisoformat(expiry_raw) if expiry_raw else None
             if expiry and datetime.now() < expiry:
-                logger.debug(f"Search cache hit for query: {query}")
+                logger.debug("Search cache hit query=%s", _query_trace(query))
                 results = cached_data["data"]
                 _record_query(query, bool(results), cache_hit=True)
                 return results
@@ -161,11 +172,15 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
                 cache_file.unlink(missing_ok=True)
                 search_cache_index.pop(cache_key, None)
         except Exception as e:
-            logger.warning(f"Failed to read search cache for {query}: {e}")
+            logger.warning(
+                "Failed to read search cache query=%s error=%s",
+                _query_trace(query),
+                type(e).__name__,
+            )
             cache_file.unlink(missing_ok=True)
             search_cache_index.pop(cache_key, None)
 
-    logger.debug(f"Search cache miss for query: {query}")
+    logger.debug("Search cache miss query=%s", _query_trace(query))
 
     if search_provider == "disabled":
         logger.info("Search is disabled via admin settings")
@@ -183,9 +198,19 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
                     logger.info(f"{provider_name} search succeeded with {len(results)} results")
                     break
             except (NetworkError, ParseError, RateLimitError) as e:
-                error_logger.error(f"{provider_name} search error (attempt {attempt + 1}): {e}")
+                error_logger.error(
+                    "%s search error attempt=%s type=%s",
+                    provider_name,
+                    attempt + 1,
+                    type(e).__name__,
+                )
             except Exception as e:
-                error_logger.error(f"Unexpected error during {provider_name} search (attempt {attempt + 1}): {e}")
+                error_logger.error(
+                    "Unexpected %s search error attempt=%s type=%s",
+                    provider_name,
+                    attempt + 1,
+                    type(e).__name__,
+                )
         if results:
             break
 
@@ -206,10 +231,14 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
             search_cache_index[cache_key] = datetime.now()
             cleanup_cache(SEARCH_CACHE_DIR, search_cache_index, timedelta(hours=1))
         except Exception as e:
-            logger.warning(f"Failed to write search cache for {query}: {e}")
+            logger.warning(
+                "Failed to write search cache query=%s error=%s",
+                _query_trace(query),
+                type(e).__name__,
+            )
 
     if not success:
-        logger.error(f"All search providers failed for query: {query}")
+        logger.error("All search providers failed query=%s", _query_trace(query))
 
     return results
 
@@ -237,11 +266,15 @@ def invalidate_search_cache(query: Optional[str] = None) -> None:
             try:
                 cache_file.unlink(missing_ok=True)
                 search_cache_index.pop(cache_key, None)
-                logger.info(f"Cache entry for query '{query}' has been invalidated.")
+                logger.info("Search cache entry invalidated query=%s", _query_trace(query))
             except Exception as e:
-                error_logger.warning(f"Failed to delete cache file for query '{query}': {e}")
+                error_logger.warning(
+                    "Failed to delete search cache query=%s error=%s",
+                    _query_trace(query),
+                    type(e).__name__,
+                )
         else:
-            logger.info(f"No cache entry found for query '{query}'.")
+            logger.info("No search cache entry query=%s", _query_trace(query))
 
 
 # ----------------------------------------------------------------------
@@ -260,7 +293,7 @@ def comprehensive_web_search(
     return_sources: bool = False,
 ):
     """Perform comprehensive web search with content fetching and advanced filtering."""
-    logger.info(f"Starting comprehensive search for: {query}")
+    logger.info("Starting comprehensive search query=%s", _query_trace(query))
     if time_filter:
         logger.info(f"Applying time filter: {time_filter}")
 
@@ -282,6 +315,7 @@ def comprehensive_web_search(
     provider_attempts = {}
     for provider_name in provider_chain:
         last_err = None
+        rate_limited = False
         empty = False
         for attempt in range(2):
             try:
@@ -291,21 +325,54 @@ def comprehensive_web_search(
                     logger.info(f"Comprehensive search: {provider_name} returned {len(search_results)} results")
                     break
                 empty = True
+            except RateLimitError as e:
+                last_err = e
+                rate_limited = True
+                logger.warning(
+                    "Comprehensive search provider=%s attempt=%s rate_limited",
+                    provider_name,
+                    attempt + 1,
+                )
             except Exception as e:
                 last_err = e
-                logger.warning(f"Comprehensive search: {provider_name} attempt {attempt + 1} failed: {e}")
+                logger.warning(
+                    "Comprehensive search provider=%s attempt=%s failed type=%s",
+                    provider_name,
+                    attempt + 1,
+                    type(e).__name__,
+                )
         if search_results:
             break
-        if last_err is not None:
-            provider_attempts[provider_name] = f"error: {last_err}"
+        if rate_limited:
+            provider_attempts[provider_name] = "rate_limited"
+        elif isinstance(last_err, NetworkError):
+            provider_attempts[provider_name] = "network_error"
+        elif isinstance(last_err, ParseError):
+            provider_attempts[provider_name] = "parse_error"
+        elif isinstance(last_err, ProviderError):
+            provider_attempts[provider_name] = "provider_error"
+        elif last_err is not None:
+            provider_attempts[provider_name] = f"error:{type(last_err).__name__}"
         elif empty:
             provider_attempts[provider_name] = "empty"
 
     if not search_results:
         tally = ", ".join(f"{p}:{r}" for p, r in provider_attempts.items()) or "no providers configured"
-        any_errors = any(r.startswith("error") for r in provider_attempts.values())
-        if any_errors:
-            msg = f"Web search failed — all providers errored or returned empty. Tried: {tally}"
+        any_rate_limited = any(r == "rate_limited" for r in provider_attempts.values())
+        any_network_errors = any(r == "network_error" for r in provider_attempts.values())
+        any_parse_errors = any(r == "parse_error" for r in provider_attempts.values())
+        any_provider_errors = any(
+            r == "provider_error" or r.startswith("error")
+            for r in provider_attempts.values()
+        )
+        if any_rate_limited:
+            msg = f"Web search rate limited (HTTP 429). Tried: {tally}"
+        elif any_network_errors:
+            msg = f"Web search network error. Tried: {tally}"
+        elif any_parse_errors:
+            msg = f"Web search provider response could not be parsed. Tried: {tally}"
+        elif any_provider_errors:
+            msg = f"Web search failed — provider/runtime error. Tried: {tally}"
         else:
             msg = (
                 f"No search results found. Tried: {tally}. "
@@ -320,7 +387,10 @@ def comprehensive_web_search(
     # URL filter helper
     def url_passes_filters(url: str) -> bool:
         try:
-            netloc = urlparse(url).netloc.lower()
+            parsed = urlparse(url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                return False
+            netloc = parsed.netloc.lower()
         except Exception:
             return False
         if domain_whitelist is not None and netloc not in domain_whitelist:
@@ -344,22 +414,27 @@ def comprehensive_web_search(
                 return False
         return True
 
-    filtered_urls = [r["url"] for r in search_results[:max_pages] if url_passes_filters(r["url"])]
+    # Apply safety/quality filters before the page budget. Otherwise invalid
+    # provider redirects in the first N slots consume every fetch slot and
+    # hide valid primary URLs ranked just below them.
+    filtered_urls = [
+        result["url"]
+        for result in search_results
+        if url_passes_filters(result.get("url", ""))
+    ][:max_pages]
     if not filtered_urls:
         logger.warning("All URLs filtered out by advanced criteria")
         msg = "No suitable results after applying filters."
         return (msg, []) if return_sources else msg
 
-    # Build sources list for the frontend (before content fetching)
-    _source_list = [
-        {"url": r.get("url", ""), "title": r.get("title", "")}
-        for r in search_results if r.get("url")
-    ]
-
-    # Map each URL to its [i] number in the sources list so fetched content
-    # blocks can be labeled with the SAME index the model cites.
+    # Map each requested URL to its search position.  This is an internal
+    # ordering key only: the public/citable source list is built *after*
+    # successful fetches so an unread result is never presented as evidence.
     _url_index = {
         r["url"]: i for i, r in enumerate(search_results, 1) if r.get("url")
+    }
+    _result_by_url = {
+        r["url"]: r for r in search_results if r.get("url")
     }
 
     # Fetch content in parallel
@@ -377,23 +452,53 @@ def comprehensive_web_search(
                     # Remember which source this fetch belongs to: redirects
                     # can change result["url"] and completion order is
                     # arbitrary, so the block label cannot be recomputed later.
-                    result["source_index"] = _url_index.get(url)
+                    result["search_index"] = _url_index.get(url)
+                    result["requested_url"] = url
                     fetched_content.append(result)
             except Exception as e:
-                logger.error(f"Exception while fetching {url}: {str(e)}")
+                logger.error(
+                    "Web fetch failed domain=%s error=%s",
+                    urlparse(url).netloc.lower(),
+                    type(e).__name__,
+                )
 
     logger.info(f"Successfully fetched content from {len(fetched_content)} pages")
+
+    if not fetched_content:
+        msg = (
+            "Web search found candidate results but could not fetch any readable pages. "
+            "No candidate was accepted as citable evidence."
+        )
+        logger.warning(msg)
+        return (msg, []) if return_sources else msg
+
+    # Stable, citable numbering follows search rank, never thread completion
+    # order.  Redirects keep the fetched final URL while their title falls back
+    # to the discovered result when the page parser returned none.
+    fetched_content.sort(
+        key=lambda c: c.get("search_index") or len(search_results) + 1
+    )
+    _source_list = []
+    for display_index, content in enumerate(fetched_content, 1):
+        requested_url = content.get("requested_url") or content.get("url") or ""
+        discovered = _result_by_url.get(requested_url, {})
+        content["source_index"] = display_index
+        _source_list.append({
+            "url": content.get("url") or requested_url,
+            "title": content.get("title") or discovered.get("title") or "",
+            "evidence_status": "fetched",
+            "fetched": True,
+            "usable": True,
+        })
 
     # Format results
     output_parts = []
 
-    if search_results:
+    if _source_list:
         output_parts.append("```sources")
-        for i, result in enumerate(search_results, 1):
+        for i, result in enumerate(_source_list, 1):
             output_parts.append(f"[{i}] {result['title']}")
             output_parts.append(f"    {result['url']}")
-            if result.get("age"):
-                output_parts.append(f"    {result['age']}")
         output_parts.append("```")
         output_parts.append("")
 
@@ -404,10 +509,10 @@ def comprehensive_web_search(
     output_parts.append("=" * 70)
     output_parts.append("")
 
-    output_parts.append("SEARCH RESULTS SUMMARY:")
+    output_parts.append("DISCOVERED CANDIDATES (not citable unless also fetched below):")
     output_parts.append("-" * 50)
     for i, result in enumerate(search_results, 1):
-        output_parts.append(f"\n[{i}] {result['title']}")
+        output_parts.append(f"\n[CANDIDATE {i}] {result['title']}")
         output_parts.append(f"    URL: {result['url']}")
         output_parts.append(f"    Snippet: {result['snippet'][:200]}...")
         if result.get("age"):
@@ -418,11 +523,8 @@ def comprehensive_web_search(
         output_parts.append("FETCHED PAGE CONTENT:")
         output_parts.append("-" * 50)
 
-        # Emit blocks in source order, numbered with the same [i] as the
-        # sources list, so [CONTENT 2] really is content from source [2].
-        # Before this, blocks were numbered 1..N in fetch COMPLETION order,
-        # which matched neither the sources list nor each other run to run.
-        fetched_content.sort(key=lambda c: c.get("source_index") or len(search_results) + 1)
+        # Emit blocks in the same stable order and numbering as the verified
+        # source list above.
         for content in fetched_content:
             _idx = content.get("source_index")
             _label = f"[CONTENT {_idx}]" if _idx else "[CONTENT]"
@@ -470,7 +572,8 @@ def comprehensive_web_search(
         "2. Prioritize information from the FETCHED PAGE CONTENT section as it contains actual page data\n"
         "3. Cross-reference multiple sources when possible\n"
         "4. If the information is time-sensitive, pay attention to the age of the results\n"
-        "5. Be explicit if the search results don't contain sufficient information to fully answer the question"
+        "5. Cite only numbered fetched sources, never a CANDIDATE entry\n"
+        "6. Be explicit if the fetched evidence doesn't contain sufficient information to fully answer the question"
     )
     output_parts.append(instructions)
 

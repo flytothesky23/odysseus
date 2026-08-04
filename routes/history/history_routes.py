@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request, HTTPException
 
 from core.models import ChatMessage
 from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
+from core.session_manager import _message_timestamp_iso
 from src.auth_helpers import effective_user
 from src.topic_analyzer import analyze_topics
 from src.upload_handler import reserve_message_upload_references
@@ -132,7 +133,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             except (json.JSONDecodeError, ValueError):
                 meta = {}
         if m.timestamp and "timestamp" not in meta:
-            meta["timestamp"] = m.timestamp.isoformat() + "Z"
+            meta["timestamp"] = _message_timestamp_iso(m.timestamp)
         if meta:
             entry["metadata"] = meta
         return entry
@@ -145,7 +146,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             except (json.JSONDecodeError, ValueError):
                 meta = {}
         if m.timestamp and "timestamp" not in meta:
-            meta["timestamp"] = m.timestamp.isoformat() + "Z"
+            meta["timestamp"] = _message_timestamp_iso(m.timestamp)
         return meta
 
     def _hydrate_session_history_from_db(session_id: str, rows: list[DbChatMessage]) -> None:

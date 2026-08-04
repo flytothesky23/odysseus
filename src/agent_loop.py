@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import hashlib
 import json
 import re
 import time
@@ -26,6 +27,12 @@ from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
+from src.korean_semantics import (
+    detect_korean_domains,
+    is_korean_casual_low_signal,
+    is_korean_explicit_continuation,
+    looks_like_korean_action_promise,
+)
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -41,6 +48,535 @@ from src.agent_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _private_text_trace(text: str) -> str:
+    value = str(text or "")
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest} len={len(value)}"
+
+
+_WEB_ANSWER_CITATION_RE = re.compile(
+    r"(?:\[(?:\d+)\]|https?://|\[[^\]]+\]\(https?://)",
+    re.IGNORECASE,
+)
+_WEB_FAILURE_DISCLOSURE_RE = re.compile(
+    r"(?:"
+    r"검색|조회|접속|요청|도구|provider|search|fetch"
+    r").{0,90}(?:"
+    r"실패|오류|제한|불가|못했|확인하지 못|사용할 수 없|"
+    r"failed|error|rate.?limit|timed?\s*out|unavailable|no usable|could not"
+    r")|(?:429|timeout|rate.?limit)",
+    re.IGNORECASE | re.DOTALL,
+)
+_ENGLISH_WEB_PROMISE_RE = re.compile(
+    r"(?:^|\n)\s*(?:this time\s+)?(?:i(?:'ll| will)|we(?:'ll| will)|let me|"
+    r"i am going to|i'm going to)\s+(?:search|look up|check|verify|compare|"
+    r"cross-check|analy[sz]e|review|investigate|gather|find)\b",
+    re.IGNORECASE,
+)
+_KOREAN_WEB_METHOD_PROMISE_RE = re.compile(
+    r"(?:검색|확인|검증|조회|찾아보|살펴보|조사|대조|비교|추리|정리|분석)"
+    r"[^.\n]{0,100}(?:하겠습니다|겠습니다|해\s*보겠습니다|해보겠습니다|보겠습니다)"
+)
+
+
+def _strip_web_methodology_prefix(text: str) -> str:
+    """Drop a leading search/verification promise from a grounded answer.
+
+    The evidence loop buffers intermediate prose, but providers can still
+    prepend one future-tense methodology sentence to an otherwise complete
+    cited answer.  Keep the substantive answer and its citations while
+    removing only that leading sentence.  Never rewrite uncited output or a
+    sentence that does not match the existing action-promise detectors.
+    """
+
+    value = str(text or "")
+    if not _WEB_ANSWER_CITATION_RE.search(value):
+        return value
+    match = re.match(r"^(.{1,360}?\.)(\s*)(.+)$", value, re.DOTALL)
+    if match is None:
+        return value
+    prefix, _spacing, remainder = match.groups()
+    if not _WEB_ANSWER_CITATION_RE.search(remainder):
+        return value
+    if not (
+        looks_like_korean_action_promise(prefix)
+        or _KOREAN_WEB_METHOD_PROMISE_RE.search(prefix)
+        or _ENGLISH_WEB_PROMISE_RE.search(prefix)
+    ):
+        return value
+    return remainder.lstrip()
+
+_LEGAL_ANSWER_CITATION_RE = re.compile(
+    r"(?:law\.go\.kr|MST\s*[:#]?\s*\d+|(?:판례|결정)\s*ID\s*[:#]?\s*\d+)",
+    re.IGNORECASE,
+)
+_LEGAL_FAILURE_DISCLOSURE_RE = re.compile(
+    r"(?:"
+    r"법령|판례|법률|공식\s*근거|원문|도구|MCP|law\.go\.kr"
+    r").{0,100}(?:"
+    r"실패|오류|제한|불가|못했|확인하지 못|사용할 수 없|"
+    r"failed|error|rate.?limit|timed?\s*out|unavailable|could not"
+    r")|(?:429|timeout|rate.?limit)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _web_completion_problem(
+    text: str,
+    *,
+    attempted_calls: int,
+    successful_calls: int,
+    usable_sources: int,
+    reused_sources: int = 0,
+) -> str:
+    """Return why a web-enabled turn is not yet a grounded final answer.
+
+    An explicit web turn must actually execute a web tool.  Once evidence is
+    available, the same turn must synthesize it and cite a fetched source;
+    merely announcing a future search is never accepted as completion.
+    """
+
+    answer = _strip_think_blocks(str(text or "")).strip()
+    if attempted_calls <= 0 and reused_sources <= 0:
+        return "no_web_tool_attempt"
+    if attempted_calls > 0 and successful_calls <= 0:
+        return "" if _WEB_FAILURE_DISCLOSURE_RE.search(answer) else "web_tool_failed_without_disclosure"
+    if usable_sources <= 0:
+        return "" if _WEB_FAILURE_DISCLOSURE_RE.search(answer) else "no_usable_web_evidence"
+
+    has_citation = bool(_WEB_ANSWER_CITATION_RE.search(answer))
+    plan_only = bool(
+        looks_like_korean_action_promise(answer)
+        or _ENGLISH_WEB_PROMISE_RE.search(answer)
+    )
+    if plan_only and not has_citation:
+        return "plan_without_answer"
+    if not has_citation:
+        return "missing_citation"
+    return ""
+
+
+def _invalid_web_citation_numbers(text: str, usable_sources: int) -> List[int]:
+    """Return stable citation ids that do not exist in the fetched ledger.
+
+    A bracket-looking token is not proof by itself.  Accepting ``[99]`` with
+    two fetched pages made the completion gate pass while the frontend fell
+    back to exposing the whole ledger.  Validate every numeric citation before
+    selecting sources so an answer can cite only bodies actually supplied to
+    the synthesis round.
+    """
+
+    invalid: List[int] = []
+    for raw in re.findall(r"\[(\d+)\]", str(text or "")):
+        index = int(raw)
+        if not 1 <= index <= usable_sources and index not in invalid:
+            invalid.append(index)
+    return invalid
+
+
+def _legal_completion_problem(
+    text: str,
+    *,
+    attempted_calls: int,
+    successful_calls: int,
+    verified_evidence: int,
+) -> str:
+    """Return why an official-law turn is not a defensible final answer.
+
+    Legal search candidates are not evidence.  The bounded bridge must finish
+    its search -> official-text verification pair and the user-facing answer
+    must identify that official result.  Runtime failures are accepted only
+    when the answer discloses them plainly instead of inventing a fallback.
+    """
+
+    answer = _strip_think_blocks(str(text or "")).strip()
+    if attempted_calls <= 0:
+        return "no_legal_tool_attempt"
+    if successful_calls <= 0:
+        return "" if _LEGAL_FAILURE_DISCLOSURE_RE.search(answer) else "legal_tool_failed_without_disclosure"
+    if verified_evidence <= 0:
+        return "" if _LEGAL_FAILURE_DISCLOSURE_RE.search(answer) else "no_verified_legal_evidence"
+    if not _LEGAL_ANSWER_CITATION_RE.search(answer):
+        return "missing_legal_citation"
+    return ""
+
+
+_PRIOR_WEB_REUSE_RE = re.compile(
+    r"(?:"
+    r"(?:방금|앞서|이전|위|같은|동일한|기존).{0,32}(?:근거|출처|자료|링크)|"
+    r"(?:근거|출처|자료|링크).{0,32}(?:재사용|그대로|같은|동일한)|"
+    r"(?:same|previous|prior|above|just\s+(?:checked|cited|verified)).{0,32}"
+    r"(?:evidence|source|citation|link)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _wants_prior_web_evidence_reuse(text: str) -> bool:
+    """Return whether the user explicitly asks to reuse the prior web evidence."""
+
+    return bool(_PRIOR_WEB_REUSE_RE.search(str(text or "")))
+
+
+def _normalise_web_source_url(url: str) -> str:
+    """Canonical comparison key for fetched source URLs.
+
+    Fragments and cosmetic trailing slashes do not identify different evidence;
+    query strings remain because they can select a different official document.
+    """
+
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    host = parsed.netloc.casefold()
+    path = parsed.path or ""
+    if path != "/":
+        path = path.rstrip("/")
+    return f"{parsed.scheme.lower()}://{host}{path}" + (
+        f"?{parsed.query}" if parsed.query else ""
+    )
+
+
+def _verified_web_source(source: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(source, dict):
+        return None
+    url = str(source.get("url") or "").strip()
+    if not _normalise_web_source_url(url):
+        return None
+    if source.get("fetched") is not True or source.get("usable") is not True:
+        return None
+    if str(source.get("evidence_status") or "fetched") != "fetched":
+        return None
+    clean = dict(source)
+    clean["url"] = url
+    clean["title"] = str(source.get("title") or "").strip()
+    clean["evidence_status"] = "fetched"
+    clean["fetched"] = True
+    clean["usable"] = True
+    return clean
+
+
+def _prior_verified_web_sources(messages: List[Dict]) -> List[Dict[str, Any]]:
+    """Read the latest persisted, fetched-only evidence manifest.
+
+    Assistant prose and URLs are not trusted for reuse.  Only the structured
+    metadata produced after a successful fetch is eligible, which prevents a
+    hallucinated link in chat history from becoming evidence on the next turn.
+    """
+
+    for message in reversed(list(messages or [])):
+        if str(message.get("role") or "") != "assistant":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        sources = metadata.get("web_sources")
+        if not isinstance(sources, list):
+            continue
+        verified = [
+            checked
+            for checked in (_verified_web_source(item) for item in sources)
+            if checked is not None
+        ]
+        if verified:
+            return verified
+    return []
+
+
+def _merge_web_source_ledger(
+    existing: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Dict[int, int]]:
+    """Merge fetched evidence and map local source numbers to global ones."""
+
+    ledger = [
+        checked
+        for checked in (_verified_web_source(item) for item in (existing or []))
+        if checked is not None
+    ]
+    index_by_url = {
+        _normalise_web_source_url(source["url"]): index
+        for index, source in enumerate(ledger, 1)
+    }
+    local_to_global: Dict[int, int] = {}
+    for local_index, item in enumerate(incoming or [], 1):
+        checked = _verified_web_source(item)
+        if checked is None:
+            continue
+        key = _normalise_web_source_url(checked["url"])
+        global_index = index_by_url.get(key)
+        if global_index is None:
+            ledger.append(checked)
+            global_index = len(ledger)
+            index_by_url[key] = global_index
+        local_to_global[local_index] = global_index
+    return ledger, local_to_global
+
+
+def _reindex_web_search_output(
+    text: str,
+    local_to_global: Dict[int, int],
+    ledger: List[Dict[str, Any]],
+) -> str:
+    """Give every fetched page a stable number across multiple searches."""
+
+    value = str(text or "")
+    source_lines = ["```sources"]
+    for index, source in enumerate(ledger, 1):
+        source_lines.extend([
+            f"[{index}] {source.get('title') or source.get('url') or ''}",
+            f"    {source.get('url') or ''}",
+        ])
+    source_lines.append("```")
+    replacement = "\n".join(source_lines)
+    value = re.sub(r"```sources\s*\n.*?```", replacement, value, count=1, flags=re.DOTALL)
+
+    def _content_number(match: re.Match) -> str:
+        local_index = int(match.group(1))
+        return f"[CONTENT {local_to_global.get(local_index, local_index)}]"
+
+    return re.sub(r"\[CONTENT\s+(\d+)\]", _content_number, value)
+
+
+def _answer_web_urls(text: str) -> List[str]:
+    urls: List[str] = []
+    seen = set()
+    for raw in re.findall(r"https?://[^\s\])}>]+", str(text or ""), re.IGNORECASE):
+        url = raw.rstrip(".,;:!?\"'")
+        key = _normalise_web_source_url(url)
+        if key and key not in seen:
+            seen.add(key)
+            urls.append(url)
+    return urls
+
+
+def _select_answer_web_sources(
+    text: str,
+    ledger: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return the fetched sources the final answer actually cites.
+
+    Direct links are authoritative and ordered by appearance.  When the model
+    uses only numeric citations, resolve them against the stable global ledger.
+    """
+
+    by_url = {
+        _normalise_web_source_url(source.get("url")): source
+        for source in ledger or []
+        if _normalise_web_source_url(source.get("url"))
+    }
+    direct = []
+    for url in _answer_web_urls(text):
+        source = by_url.get(_normalise_web_source_url(url))
+        if source is not None and source not in direct:
+            direct.append(source)
+    if direct:
+        return direct
+
+    numbered = []
+    for raw in re.findall(r"\[(\d+)\]", str(text or "")):
+        index = int(raw)
+        if 1 <= index <= len(ledger):
+            source = ledger[index - 1]
+            if source not in numbered:
+                numbered.append(source)
+    return numbered or list(ledger or [])
+
+
+def _canonicalize_web_citations(
+    text: str,
+    ledger: List[Dict[str, Any]],
+    selected_sources: List[Dict[str, Any]],
+) -> str:
+    """Render verified citations as stable, clickable final-source links.
+
+    Models sometimes combine a label, a numeric marker, and a URL into invalid
+    nested markdown such as ``[OpenAI [[5]](url)]``.  They also cite global
+    ledger ids while the final source card intentionally shows only the cited
+    subset from 1..N.  Normalize both forms at the trusted boundary so the
+    inline link target and the source-card number always agree.
+    """
+
+    value = str(text or "")
+    selected_by_url = {
+        _normalise_web_source_url(source.get("url")): (display_index, source)
+        for display_index, source in enumerate(selected_sources or [], 1)
+        if _normalise_web_source_url(source.get("url"))
+    }
+    global_by_index = {
+        index: source for index, source in enumerate(ledger or [], 1)
+    }
+
+    def _link_for_url(url: str) -> Optional[str]:
+        entry = selected_by_url.get(_normalise_web_source_url(url))
+        if entry is None:
+            return None
+        display_index, source = entry
+        return f"[출처 {display_index}]({source.get('url')})"
+
+    def _replace_nested(match: re.Match) -> str:
+        return _link_for_url(match.group(2)) or match.group(0)
+
+    value = re.sub(
+        r"\[[^\]\n]*\[\[(\d+)\]\]\((https?://[^)\s]+)\)\]",
+        _replace_nested,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    def _replace_markdown_link(match: re.Match) -> str:
+        return _link_for_url(match.group(2)) or match.group(0)
+
+    value = re.sub(
+        r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
+        _replace_markdown_link,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    def _replace_number(match: re.Match) -> str:
+        source = global_by_index.get(int(match.group(1)))
+        if source is None:
+            return match.group(0)
+        return _link_for_url(str(source.get("url") or "")) or match.group(0)
+
+    return re.sub(r"(?<!\[)\[(\d+)\](?!\])", _replace_number, value)
+
+
+def _web_evidence_manifest(ledger: List[Dict[str, Any]]) -> str:
+    """Build the stable fetched-only source map for the synthesis round."""
+
+    lines = [
+        "VERIFIED WEB EVIDENCE MANIFEST (fetched bodies are in the preceding tool results):"
+    ]
+    for index, source in enumerate(ledger or [], 1):
+        lines.extend([
+            f"[{index}] {source.get('title') or source.get('url') or ''}",
+            f"    {source.get('url') or ''}",
+        ])
+    lines.append(
+        "Use only evidence whose body was successfully fetched. Cite factual claims with "
+        "the stable [n] IDs above. Do not cite discovered candidates, invent a URL, or "
+        "announce another search when the requested evidence is already present."
+    )
+    return "\n".join(lines)
+
+
+def _strict_web_retrieval_contract() -> str:
+    """Prompt contract for named-source retrieval before synthesis.
+
+    Search providers can answer a broad combined query with a related but
+    different page.  The model therefore needs an explicit state machine for
+    source-specific planning, not merely a generic instruction to search.
+    """
+
+    return (
+        "STRICT WEB RETRIEVAL CONTRACT:\n"
+        "1. Plan the requested evidence before answering. If the user names multiple "
+        "documents, pages, repositories, publishers, or domains, run one focused search "
+        "for each named source; never combine distinct named sources into one vague query.\n"
+        "2. Preserve distinctive title words and repository slugs. For a named page, use "
+        "a quoted title/topic plus an official site/domain constraint when useful.\n"
+        "3. Keep candidates discovered, readable bodies fetched, and sources actually cited "
+        "as separate states. A candidate title or snippet is not evidence.\n"
+        "4. Before synthesis, confirm that every requested named source has a readable fetched "
+        "body. If a result is merely related or an older/different page, refine the exact-source "
+        "query or call web_fetch on the selected primary URL.\n"
+        "5. Only after the required bodies are present, compare/synthesize in the user's language "
+        "and attach stable [n] citations to each factual claim. Tool completion is not answer completion."
+    )
+
+
+def _web_tool_call_limit(requested_limit: int, *, web_completion_required: bool) -> int:
+    """Return a finite tool budget for strict web turns.
+
+    Historically ``0`` meant unlimited tool calls.  That is unsafe for an
+    evidence-gated web turn: a provider/runtime failure can make the model try
+    many distinct searches that evade the identical-call loop breaker.  Keep an
+    explicit caller limit, and otherwise cap strict inline web work at four
+    calls.  Longer multi-source investigations belong in Deep Research.
+    """
+
+    if requested_limit > 0:
+        return requested_limit
+    return 4 if web_completion_required else requested_limit
+
+
+def _limit_strict_web_tool_blocks(
+    tool_blocks: List[ToolBlock],
+    *,
+    used_native: bool,
+    web_completion_required: bool,
+) -> List[ToolBlock]:
+    """Run at most four distinct textual web calls in one bounded batch.
+
+    Codex subscription models commonly emit one lookup per explicitly named
+    source (for example an official product page plus a GitHub README).  The
+    A useful comparison commonly needs a discovery lookup for each named
+    source followed by direct fetches of the selected primary pages.  Clamping
+    the batch to the first two searches silently discarded those fetches and
+    broke retrieval-to-synthesis.  Keep the same finite four-call budget used
+    by strict web turns, de-duplicate identical calls, and preserve order.
+    Native function-call batches cannot be truncated because every call id
+    requires a result, so those remain intact.
+    """
+
+    blocks = list(tool_blocks or [])
+    if not web_completion_required or used_native:
+        return blocks
+    selected: List[ToolBlock] = []
+    seen = set()
+    for block in blocks:
+        if block.tool_type not in WEB_TOOL_NAMES:
+            continue
+        raw = str(block.content or "").strip()
+        canonical = raw
+        if raw.startswith("{"):
+            try:
+                canonical = json.dumps(
+                    json.loads(raw),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        signature = (block.tool_type, canonical)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        selected.append(block)
+        if len(selected) >= 4:
+            break
+    return selected
+
+
+def _limit_strict_legal_tool_blocks(
+    tool_blocks: List[ToolBlock],
+    *,
+    used_native: bool,
+    legal_completion_required: bool,
+) -> List[ToolBlock]:
+    """Run one textual Korean Law bridge call per evidence round.
+
+    Some providers leak several textual/DSML calls in one response.  Running
+    all of them produces duplicate tool cards and creates a fail-after-success
+    UI state.  Native call batches remain intact because each native call id
+    must receive a result.
+    """
+
+    blocks = list(tool_blocks or [])
+    if not legal_completion_required or used_native:
+        return blocks
+    return next(
+        ([block] for block in blocks if block.tool_type == "korean_law_lookup"),
+        [],
+    )
 
 _BROWSER_MCP_PREFIX = "mcp__builtin_browser__"
 
@@ -401,6 +937,7 @@ To use a tool, write a fenced code block with the tool name as the language tag.
 _AGENT_RULES = """\
 ## Base rules
 - Only use tools when needed. For casual messages like "test", "yo", "thanks", answer normally.
+- Answer in the language of the latest user turn. For Korean, use natural Korean sentence structure and preserve Korean names, legal terms, product names, dates, and quoted search phrases; do not translate them merely to make a tool call.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
@@ -413,6 +950,7 @@ _API_AGENT_RULES = """\
 ## Base rules
 - Prefer native tool/function calling when tools are needed.
 - Only call tools when they materially help answer the request. For casual messages like "test", "yo", "thanks", answer normally.
+- Answer in the language of the latest user turn. For Korean, use natural Korean sentence structure and preserve Korean names, legal terms, product names, dates, and quoted search phrases; do not translate them merely to make a tool call.
 - You MUST use tools to take action; do not claim you did something without a tool result.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
@@ -441,7 +979,9 @@ _DOMAIN_RULES = {
 ## Web rules
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
 - Do not use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
-- "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
+- Preserve the user's Korean entities and date expressions in the search query. Resolve terse follow-ups from recent context instead of searching the continuation phrase itself.
+- Search, read fetched evidence, and give the concrete cited answer in the same turn; do not stop at methodology or a future promise.
+- Use `trigger_research` only when the user explicitly asks to start a saved long-form Deep Research report.""",
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
@@ -495,6 +1035,11 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "legal": """\
+## Korean official-law rules
+- 한국어 법령·조문·판례·법적 해석 요청에는 `korean_law_lookup`만 사용해 공식 law.go.kr 근거를 조회한다. 임의 `mcp__...` 도구나 일반 웹검색으로 우회하지 않는다.
+- 법령은 정확한 법령명을 query로, 판례는 구체적인 쟁점·사건 검색어를 query로 전달한다. 특정 조문이 있으면 article에 원문의 한국어 조문 표기를 보존한다.
+- 도구가 반환한 공식 원문과 citation_id를 같은 답변에서 인용하고, 공식 근거·모델 해석·불확실성을 구분한다. 오류/미설치/429/timeout을 정상 근거처럼 꾸미지 않는다.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -509,6 +1054,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "legal": {"korean_law_lookup"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -560,7 +1106,8 @@ Or with JSON for fresh news:
 ```web_search
 {"query": "<your query>", "time_filter": "day"}
 ```
-Search the web for a SINGLE quick fact/lookup mid-task. For news / "today" / "latest" queries, pass `time_filter` ("day", "week", "month", or "year"). NOT for "research X" / "do research on X" / "look into X" requests — those mean a multi-source DEEP RESEARCH job: use `trigger_research` instead (it runs in the Deep Research sidebar and produces a full report). web_search = one quick query; trigger_research = a researched report.
+Search the web and read multiple fetched pages for an inline answer in the same turn. Resolve Korean and other-language follow-ups from recent conversation context; do not search a vague continuation phrase by itself. For news / "today" / "latest" queries, pass `time_filter` ("day", "week", "month", or "year"). Use one focused query first; refine it only when the fetched evidence is insufficient. Cite fetched evidence as [n]. Never stop at methodology, a search plan, or "I will check" after the user asked for an answer.
+Only use `trigger_research` when the user explicitly asks to start a saved, long-form Deep Research report. An ordinary request to search, compare, verify, or summarize current information stays inline with `web_search`.
 If this `web_search` tool section is visible, search is available. Do NOT tell the user web/search tools are unavailable.
 Use this instead of `bash`, `curl`, `python`, `requests`, or scraping code for web lookup/search/latest/current requests.""",
 
@@ -662,6 +1209,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
+    "korean_law_lookup": "- ```korean_law_lookup``` — Korean Law MCP의 공식 law.go.kr 읽기 전용 브리지. JSON: {\"query\":\"정확한 법령명 또는 판례 쟁점\",\"source_type\":\"law|precedent\",\"article\":\"제10조(선택)\"}. 법령/판례 후보를 공식 원문으로 재검증한 결과만 사용하고, 오류를 정상 근거로 취급하지 않는다.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -1206,12 +1754,15 @@ _COOKBOOK_CONTEXT_RE = re.compile(
 )
 def _is_explicit_continuation(text: str) -> bool:
     """Only these terse replies may inherit older user turns for tool retrieval."""
-    return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
+    value = str(text or "").strip()
+    return bool(_EXPLICIT_CONTINUATION_RE.match(value)) or is_korean_explicit_continuation(value)
 
 
 def _is_casual_low_signal(text: str) -> bool:
     """True for short greetings/slang that should not inherit stale context."""
     s = str(text or "").strip()
+    if is_korean_casual_low_signal(s):
+        return True
     m = _CASUAL_OPENING_RE.match(s)
     if not m:
         return False
@@ -1298,6 +1849,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
 
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
+
+    domains.update(detect_korean_domains(retrieval_query))
 
     if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b"):
         domains.add("cookbook")
@@ -3145,6 +3698,36 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    _web_reuse_requested = bool(
+        forced_tools
+        and (set(forced_tools) & WEB_TOOL_NAMES)
+        and _wants_prior_web_evidence_reuse(_last_user)
+    )
+    _reused_web_sources = (
+        _prior_verified_web_sources(messages)
+        if _web_reuse_requested
+        else []
+    )
+    if _reused_web_sources:
+        _reuse_lines = [
+            "VERIFIED PRIOR WEB EVIDENCE (explicit same-evidence reuse requested):"
+        ]
+        for _source_index, _source in enumerate(_reused_web_sources, 1):
+            _reuse_lines.append(
+                f"[{_source_index}] {_source.get('title') or _source.get('url')}\n"
+                f"    {_source.get('url')}"
+            )
+        _reuse_lines.append(
+            "Answer from this bounded manifest without a new web call unless the "
+            "user asks for fresh/delta evidence or the manifest is insufficient. "
+            "Cite it as [n] and do not treat assistant prose outside this manifest "
+            "as verified evidence."
+        )
+        messages = _insert_before_latest_user(messages, {
+            "role": "system",
+            "content": "\n".join(_reuse_lines),
+            "_protected": True,
+        })
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     if _ody_qwen_finetune_model:
         try:
@@ -3201,22 +3784,22 @@ async def stream_agent_loop(
         yield "data: [DONE]\n\n"
         return
     logger.info(
-        "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s active_doc_relevant=%s retrieval_query=%r",
-        _last_user[:120],
+        "[agent-intent] latest=%s continuation=%s low_signal=%s domains=%s active_doc_relevant=%s retrieval_query=%s",
+        _private_text_trace(_last_user),
         bool(_intent.get("continuation")),
         _low_signal_turn,
         sorted(_intent.get("domains") or []),
         _active_document_relevant,
-        _retrieval_query[:200],
+        _private_text_trace(_retrieval_query),
     )
     if _low_signal_turn and _existing_conversation:
         logger.info(
-            "[agent] keeping contextual path for low-signal turn in existing conversation latest=%r",
-            _last_user[:80],
+            "[agent] keeping contextual path for low-signal turn in existing conversation latest=%s",
+            _private_text_trace(_last_user),
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     if _direct_low_signal:
-        logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
+        logger.info("[agent] direct low-signal reply path latest=%s", _private_text_trace(_last_user))
         direct_messages = (
             _minimal_odysseus_general_messages(
                 messages,
@@ -3467,12 +4050,16 @@ async def stream_agent_loop(
     # Per-request forced tools are stronger than retrieval. Explicit search
     # settings make web tools visible even when tool RAG misses them;
     # route-level disabled_tools decides what remains allowed.
+    _strict_web_tool_scope = False
+    _strict_legal_tool_scope = "legal" in set(_intent.get("domains") or set())
+    _forced_set: Set[str] = set()
     if not guide_only and forced_tools:
-        forced_set = {t for t in forced_tools if t not in disabled_tools}
+        _forced_set = {t for t in forced_tools if t not in disabled_tools}
+        _strict_web_tool_scope = bool(_forced_set & WEB_TOOL_NAMES)
         if _relevant_tools is None:
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
-        _relevant_tools.update(forced_set)
+        _relevant_tools.update(_forced_set)
 
     if not guide_only and _relevant_tools is not None:
         _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
@@ -3514,6 +4101,25 @@ async def stream_agent_loop(
                         )
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
+
+    # Route-forced web and Korean legal turns are capability boundaries, not
+    # merely retrieval hints. Re-clamp after skill expansion so unrelated
+    # built-ins or arbitrary MCP tools cannot ride along and replace the
+    # audited evidence path. A turn that explicitly asks for both web and
+    # official-law verification may use both bounded families.
+    if _strict_web_tool_scope or _strict_legal_tool_scope:
+        _bounded_tools = {"ask_user", "update_plan"}
+        if _strict_web_tool_scope:
+            _bounded_tools.update(_forced_set)
+        if _strict_legal_tool_scope:
+            _bounded_tools.add("korean_law_lookup")
+            if "web" in set(_intent.get("domains") or set()):
+                _bounded_tools.update(WEB_TOOL_NAMES - disabled_tools)
+        _relevant_tools = _bounded_tools - disabled_tools
+        logger.info(
+            "[agent-intent] strict evidence tool scope=%s",
+            sorted(_relevant_tools),
+        )
 
     _intent_domains = set(_intent.get("domains") or set())
     _ody_doc_finetune_mode = (
@@ -3741,6 +4347,12 @@ async def stream_agent_loop(
             messages[0]["content"] = GUIDE_ONLY_DIRECTIVE + "\n\n" + (messages[0].get("content") or "")
         else:
             messages.insert(0, {"role": "system", "content": GUIDE_ONLY_DIRECTIVE})
+    if forced_tools and (set(forced_tools) & WEB_TOOL_NAMES):
+        messages = _insert_before_latest_user(messages, {
+            "role": "system",
+            "content": _strict_web_retrieval_contract(),
+            "_protected": True,
+        })
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
@@ -3847,6 +4459,31 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    _web_completion_required = bool(
+        forced_tools and (set(forced_tools) & WEB_TOOL_NAMES)
+    )
+    _legal_completion_required = bool(_strict_legal_tool_scope)
+    _evidence_completion_required = bool(
+        _web_completion_required or _legal_completion_required
+    )
+    max_tool_calls = _web_tool_call_limit(
+        max_tool_calls,
+        web_completion_required=_web_completion_required,
+    )
+    _web_attempted_calls = 0
+    _web_successful_calls = 0
+    _web_source_ledger = list(_reused_web_sources)
+    _web_reused_sources = len(_reused_web_sources)
+    _web_usable_sources = len(_web_source_ledger)
+    _web_failure_codes: list[str] = []
+    _web_completion_nudges = 0
+    _MAX_WEB_COMPLETION_NUDGES = 2
+    _legal_attempted_calls = 0
+    _legal_successful_calls = 0
+    _legal_verified_evidence = 0
+    _legal_failure_codes: list[str] = []
+    _legal_completion_nudges = 0
+    _MAX_LEGAL_COMPLETION_NUDGES = 2
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -3880,9 +4517,11 @@ async def stream_agent_loop(
     _exhausted_rounds = False
 
     for round_num in range(1, max_rounds + 1):
+        _round_full_start = len(full_response)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         native_tool_calls = []  # populated if model uses function calling
+        _legal_tool_ran_this_round = False
         # Reset doc streaming state per round
         _doc_acc = ""
         _doc_opened = False
@@ -4114,7 +4753,11 @@ async def stream_agent_loop(
                             round_response += _delta_text
                             full_response += _delta_text
                             data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                        if (
+                            not _ody_qwen_finetune_model or data.get("thinking")
+                        ) and (
+                            data.get("thinking") or not _evidence_completion_required
+                        ):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4210,6 +4853,62 @@ async def stream_agent_loop(
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
         )
+        _pre_evidence_limit_count = len(tool_blocks)
+        if _web_completion_required and _legal_completion_required and not used_native:
+            tool_blocks = next(
+                (
+                    [block]
+                    for block in tool_blocks
+                    if block.tool_type in WEB_TOOL_NAMES
+                    or block.tool_type == "korean_law_lookup"
+                ),
+                [],
+            )
+        else:
+            tool_blocks = _limit_strict_web_tool_blocks(
+                tool_blocks,
+                used_native=used_native,
+                web_completion_required=_web_completion_required,
+            )
+            tool_blocks = _limit_strict_legal_tool_blocks(
+                tool_blocks,
+                used_native=used_native,
+                legal_completion_required=_legal_completion_required,
+            )
+        if len(tool_blocks) < _pre_evidence_limit_count:
+            logger.info(
+                "[agent-evidence] executing bounded textual evidence batch kept=%s dropped=%s",
+                len(tool_blocks),
+                _pre_evidence_limit_count - len(tool_blocks),
+            )
+        if (
+            _web_completion_required
+            and not used_native
+            and not tool_blocks
+            and _web_attempted_calls == 0
+            and _web_reused_sources == 0
+            and not _force_answer
+        ):
+            # Subscription/Codex endpoints sometimes acknowledge that search
+            # is needed but omit the textual tool fence entirely. An explicit
+            # web turn must not depend on that formatting lottery: execute one
+            # focused search from the already context-resolved retrieval query,
+            # then feed its fetched bodies back through the normal tool-result
+            # and citation-manifest path.
+            _fallback_query = str(_retrieval_query or _last_user or "").strip()
+            if _fallback_query:
+                tool_blocks = [ToolBlock(
+                    "web_search",
+                    json.dumps(
+                        {"query": _fallback_query[:2000]},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )]
+                logger.info(
+                    "[agent-web] inserted deterministic search fallback query=%s",
+                    _private_text_trace(_fallback_query),
+                )
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -4376,6 +5075,236 @@ async def stream_agent_loop(
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            _intent_text = _strip_think_blocks(cleaned_round).strip()
+
+            # Explicit web turns are buffered until they prove completion. This
+            # prevents a visible "검색해 보겠습니다" bubble from being accepted
+            # before an actual tool call and grounded, cited synthesis.
+            if _web_completion_required:
+                _web_problem = _web_completion_problem(
+                    _intent_text,
+                    attempted_calls=_web_attempted_calls,
+                    successful_calls=_web_successful_calls,
+                    usable_sources=_web_usable_sources,
+                    reused_sources=_web_reused_sources,
+                )
+                if not _web_problem:
+                    if _invalid_web_citation_numbers(
+                        _intent_text,
+                        _web_usable_sources,
+                    ):
+                        _web_problem = "unverified_citation"
+                    _verified_urls = {
+                        _normalise_web_source_url(source.get("url"))
+                        for source in _web_source_ledger
+                    }
+                    _unverified_answer_urls = [
+                        url for url in _answer_web_urls(_intent_text)
+                        if _normalise_web_source_url(url) not in _verified_urls
+                    ]
+                    if _unverified_answer_urls:
+                        _web_problem = "unverified_citation"
+                if _web_problem:
+                    full_response = full_response[:_round_full_start]
+                    round_texts[-1] = ""
+                    if _web_completion_nudges < _MAX_WEB_COMPLETION_NUDGES and not _force_answer:
+                        _web_completion_nudges += 1
+                        if _web_problem == "no_web_tool_attempt":
+                            _web_instruction = (
+                                "Call web_search or web_fetch now. Resolve the user's Korean or "
+                                "contextual follow-up into a concrete search query; do not announce "
+                                "a plan and stop."
+                            )
+                        elif _web_problem in {
+                            "web_tool_failed_without_disclosure",
+                            "no_usable_web_evidence",
+                        }:
+                            _failures = ", ".join(_web_failure_codes[-3:]) or "no_usable_evidence"
+                            _web_instruction = (
+                                "The web attempt did not produce usable evidence "
+                                f"(diagnostics: {_failures}). Refine the query once if useful; "
+                                "otherwise state the exact failure plainly. Never present a "
+                                "planned search as a completed answer."
+                            )
+                        elif _web_problem == "unverified_citation":
+                            _has_fetch_budget = (
+                                max_tool_calls <= 0
+                                or total_tool_calls < max_tool_calls
+                            )
+                            if _unverified_answer_urls and _has_fetch_budget:
+                                # The draft named a concrete primary URL that
+                                # was discovered or known but never read.  Keep
+                                # the tool path open for one bounded direct
+                                # fetch instead of forcing a citation-only
+                                # rewrite that can never make the URL evidence.
+                                _targets = "\n".join(
+                                    f"- {url}" for url in _unverified_answer_urls[:2]
+                                )
+                                _web_instruction = (
+                                    "The draft cited primary URL(s) whose bodies were not fetched. "
+                                    "Call web_fetch for the URL(s) below now, then synthesize from "
+                                    "the returned body and the stable evidence manifest. Do not "
+                                    "cite these URLs before the fetch succeeds.\n" + _targets
+                                )
+                            else:
+                                _force_answer = True
+                                _web_instruction = (
+                                    "Remove every URL and claim that is absent from the verified "
+                                    "evidence manifest. Answer only from the fetched numbered "
+                                    "evidence and cite it as [n]."
+                                )
+                        elif _web_problem == "missing_citation":
+                            # The evidence is already present.  Remove tool
+                            # schemas on the retry so the model must synthesize
+                            # instead of issuing another search batch.
+                            _force_answer = True
+                            _web_instruction = (
+                                "Revise the answer now and cite only the numbered fetched evidence "
+                                "as [n]. Every direct URL must appear in that verified evidence "
+                                "manifest. Do not add methodology or promise another search."
+                            )
+                        else:
+                            _web_instruction = (
+                                "Stop describing what you will do. Using the fetched web evidence "
+                                "already in context, provide the concrete answer in the user's "
+                                "language now and cite sources as [n]."
+                            )
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "WEB SEARCH COMPLETION GATE: " + _web_instruction
+                            ),
+                        })
+                        logger.info(
+                            "[agent-web] completion nudge=%s problem=%s round=%s attempts=%s successes=%s sources=%s",
+                            _web_completion_nudges,
+                            _web_problem,
+                            round_num,
+                            _web_attempted_calls,
+                            _web_successful_calls,
+                            _web_usable_sources,
+                        )
+                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        continue
+
+                    _guard_message = (
+                        "웹에서 읽은 근거를 최종 답변의 인용과 연결하지 못했습니다. "
+                        "확인되지 않은 내용은 답변으로 제공하지 않았습니다. 다시 시도해 주세요."
+                    )
+                    logger.warning(
+                        "[agent-web] completion failed problem=%s diagnostics=%s attempts=%s successes=%s sources=%s",
+                        _web_problem,
+                        ", ".join(_web_failure_codes[-3:]) or "none",
+                        _web_attempted_calls,
+                        _web_successful_calls,
+                        _web_usable_sources,
+                    )
+                    full_response += _guard_message
+                    round_texts[-1] = _guard_message
+                    yield f'data: {json.dumps({"delta": _guard_message})}\n\n'
+                    yield (
+                        "data: "
+                        + json.dumps({
+                            "type": "web_completion_failed",
+                            "reason": _web_problem,
+                            "message": _guard_message,
+                            "round": round_num,
+                            "attempts": _web_attempted_calls,
+                            "successful_calls": _web_successful_calls,
+                            "usable_sources": _web_usable_sources,
+                        })
+                        + "\n\n"
+                    )
+                    break
+
+            # Official-law turns use the same buffered completion contract as
+            # web search.  Do not expose provisional prose, leaked tool JSON,
+            # or a success answer that cannot identify the verified law.go.kr
+            # body returned by the bounded Korean Law bridge.
+            if _legal_completion_required:
+                _legal_problem = _legal_completion_problem(
+                    _intent_text,
+                    attempted_calls=_legal_attempted_calls,
+                    successful_calls=_legal_successful_calls,
+                    verified_evidence=_legal_verified_evidence,
+                )
+                if _legal_problem:
+                    full_response = full_response[:_round_full_start]
+                    round_texts[-1] = ""
+                    if (
+                        _legal_completion_nudges < _MAX_LEGAL_COMPLETION_NUDGES
+                        and (
+                            not _force_answer
+                            or _legal_problem == "missing_legal_citation"
+                        )
+                    ):
+                        _legal_completion_nudges += 1
+                        if _legal_problem == "no_legal_tool_attempt":
+                            _legal_instruction = (
+                                "Call korean_law_lookup now with the exact Korean law or issue. "
+                                "Do not claim that official evidence is unavailable before the "
+                                "tool actually returns an error."
+                            )
+                        elif _legal_problem in {
+                            "legal_tool_failed_without_disclosure",
+                            "no_verified_legal_evidence",
+                        }:
+                            _force_answer = True
+                            _failures = ", ".join(_legal_failure_codes[-3:]) or "no_verified_evidence"
+                            _legal_instruction = (
+                                "The bounded Korean Law lookup did not produce verified official "
+                                f"evidence (diagnostics: {_failures}). Do not call another tool. "
+                                "State that exact failure plainly in Korean and do not provide an "
+                                "invented legal conclusion."
+                            )
+                        else:
+                            _force_answer = True
+                            _legal_instruction = (
+                                "Using only the verified official legal evidence already returned, "
+                                "write the final Korean answer now. Identify law.go.kr and its MST "
+                                "or decision ID, quote only the relevant article/body, and separate "
+                                "official evidence, model interpretation, and uncertainty. Do not "
+                                "call another tool."
+                            )
+                        messages.append({
+                            "role": "system",
+                            "content": "KOREAN LAW COMPLETION GATE: " + _legal_instruction,
+                        })
+                        logger.info(
+                            "[agent-law] completion nudge=%s problem=%s round=%s attempts=%s successes=%s verified=%s",
+                            _legal_completion_nudges,
+                            _legal_problem,
+                            round_num,
+                            _legal_attempted_calls,
+                            _legal_successful_calls,
+                            _legal_verified_evidence,
+                        )
+                        yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                        continue
+
+                    _diagnostic = ", ".join(_legal_failure_codes[-3:]) or _legal_problem
+                    _guard_message = (
+                        "공식 법률 근거 확인 조건을 충족하지 못했습니다. "
+                        f"진단: {_diagnostic}. 확인되지 않은 법령·판례를 정상 근거처럼 답하지 않았습니다."
+                    )
+                    full_response += _guard_message
+                    round_texts[-1] = _guard_message
+                    yield f'data: {json.dumps({"delta": _guard_message})}\n\n'
+                    yield (
+                        "data: "
+                        + json.dumps({
+                            "type": "legal_completion_failed",
+                            "reason": _legal_problem,
+                            "message": _guard_message,
+                            "round": round_num,
+                            "attempts": _legal_attempted_calls,
+                            "successful_calls": _legal_successful_calls,
+                            "verified_evidence": _legal_verified_evidence,
+                        })
+                        + "\n\n"
+                    )
+                    break
+
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -4427,21 +5356,27 @@ async def stream_agent_loop(
             # actual tool now") and loop again. Capped at
             # _MAX_INTENT_NUDGES so a model that genuinely cannot use the
             # tool doesn't pin us in a forever loop.
-            _intent_text = _strip_think_blocks(cleaned_round).strip()
             _intent_match = _INTENT_RE.search(_intent_text) if _intent_text else None
+            _korean_promise = bool(
+                _intent_text and looks_like_korean_action_promise(_intent_text)
+            )
             # Only nudge when the round REALLY looks like an unfinished
             # promise: short response (<400 chars), no fenced code/answer,
             # and an action-intent phrase was matched. Long answers that
             # happen to contain "let me know" are not stalls.
             _looks_like_promise = (
                 not guide_only
-                and _intent_match is not None
+                and (_intent_match is not None or _korean_promise)
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
             )
             if _looks_like_promise and _intent_nudge_count < _MAX_INTENT_NUDGES:
                 _intent_nudge_count += 1
-                _matched_phrase = _intent_match.group(0).strip()
+                _matched_phrase = (
+                    _intent_match.group(0).strip()
+                    if _intent_match is not None
+                    else _intent_text[:160]
+                )
                 logger.info(f"[agent] intent-without-action nudge #{_intent_nudge_count} on round {round_num}: {_matched_phrase!r}")
                 _lower_phrase = _matched_phrase.lower()
                 _cookbook_log_hint = ""
@@ -4469,7 +5404,11 @@ async def stream_agent_loop(
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
             if _looks_like_promise:
-                _matched_phrase = _intent_match.group(0).strip()
+                _matched_phrase = (
+                    _intent_match.group(0).strip()
+                    if _intent_match is not None
+                    else _intent_text[:160]
+                )
                 _guard_message = (
                     "The agent stopped because it repeatedly announced a tool "
                     "action without making the tool call."
@@ -4493,7 +5432,34 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            if _evidence_completion_required and _intent_text:
+                # Evidence answer deltas were deliberately buffered above.
+                # Release one clean final chunk only after every applicable
+                # web/legal completion gate has accepted it.
+                if _web_completion_required:
+                    _final_web_sources = _select_answer_web_sources(
+                        _intent_text,
+                        _web_source_ledger,
+                    )
+                    if _final_web_sources:
+                        _intent_text = _canonicalize_web_citations(
+                            _intent_text,
+                            _web_source_ledger,
+                            _final_web_sources,
+                        )
+                        _intent_text = _strip_web_methodology_prefix(_intent_text)
+                        round_texts[-1] = _intent_text
+                        full_response = full_response[:_round_full_start] + _intent_text
+                        yield f'data: {json.dumps({"type": "web_sources", "data": _final_web_sources})}\n\n'
+                yield f'data: {json.dumps({"delta": _intent_text})}\n\n'
             break  # no tools — done
+
+        if _evidence_completion_required:
+            # Text accompanying an evidence tool call is provisional. Keep the
+            # tool/progress events, but do not persist or show methodology,
+            # contradictory failure prose, or leaked textual call markup.
+            full_response = full_response[:_round_full_start]
+            round_texts[-1] = ""
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
         # Stall detector for repeated no-progress tool loops.
@@ -4692,6 +5658,31 @@ async def stream_agent_loop(
                         except (asyncio.CancelledError, Exception):
                             pass
 
+            if block.tool_type in WEB_TOOL_NAMES:
+                _web_attempted_calls += 1
+                if result.get("exit_code") == 0 and not result.get("error"):
+                    _web_successful_calls += 1
+                else:
+                    _web_failure_codes.append(
+                        str(result.get("error_code") or "tool_error")
+                    )
+
+            if block.tool_type == "korean_law_lookup":
+                _legal_tool_ran_this_round = True
+                _legal_attempted_calls += 1
+                if result.get("exit_code") == 0 and not result.get("error"):
+                    _legal_successful_calls += 1
+                    if (
+                        result.get("evidence_type") == "official_legal"
+                        and result.get("source") == "law.go.kr"
+                        and result.get("citation_id")
+                    ):
+                        _legal_verified_evidence += 1
+                else:
+                    _legal_failure_codes.append(
+                        str(result.get("error_code") or "tool_error")
+                    )
+
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
             # frontmatter). Union them into the selection so the NEXT round's
@@ -4745,17 +5736,36 @@ async def stream_agent_loop(
                     if _src_end >= 0:
                         try:
                             _extracted_sources = json.loads(_src_text[_src_idx + len(_src_marker):_src_end])
-                            yield f'data: {json.dumps({"type": "web_sources", "data": _extracted_sources})}\n\n'
-                            # Strip the marker from the result so it doesn't show in chat
-                            _clean = _src_text[:_src_idx].rstrip()
-                            if "output" in result:
-                                result["output"] = _clean
-                            elif "results" in result:
-                                result["results"] = _clean
-                            elif "stdout" in result:
-                                result["stdout"] = _clean
+                            _local_source_map: Dict[int, int] = {}
+                            if isinstance(_extracted_sources, list):
+                                _web_source_ledger, _local_source_map = _merge_web_source_ledger(
+                                    _web_source_ledger,
+                                    _extracted_sources,
+                                )
+                                _web_usable_sources = len(_web_source_ledger)
+                                # Strip and reindex only a valid structured
+                                # marker; malformed/non-list metadata must not
+                                # be treated as verified evidence.
+                                _clean = _reindex_web_search_output(
+                                    _src_text[:_src_idx].rstrip(),
+                                    _local_source_map,
+                                    _web_source_ledger,
+                                )
+                                if "output" in result:
+                                    result["output"] = _clean
+                                elif "results" in result:
+                                    result["results"] = _clean
+                                elif "stdout" in result:
+                                    result["stdout"] = _clean
                         except (json.JSONDecodeError, Exception):
                             pass
+
+            if block.tool_type == "web_fetch" and result.get("web_source"):
+                _web_source_ledger, _ = _merge_web_source_ledger(
+                    _web_source_ledger,
+                    [result["web_source"]],
+                )
+                _web_usable_sources = len(_web_source_ledger)
 
             # Emit doc-specific event for document tools — the frontend
             # document panel handles this; no need to show content in chat.
@@ -5122,6 +6132,92 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning)
+
+        if (
+            _web_completion_required
+            and _web_source_ledger
+            and any(block.tool_type in WEB_TOOL_NAMES for block in tool_blocks)
+        ):
+            # Tool outputs contain the bounded fetched bodies.  This separate
+            # manifest makes their global citation IDs explicit after every
+            # multi-call batch, including web_fetch results that previously
+            # had no stable number in the next synthesis request.
+            messages.append({
+                "role": "system",
+                "content": _web_evidence_manifest(_web_source_ledger),
+                "_protected": True,
+            })
+
+        if (
+            _web_completion_required
+            and max_tool_calls > 0
+            and total_tool_calls >= max_tool_calls
+        ):
+            # Reaching the retrieval budget is a state transition, not a turn
+            # terminator.  The next round must have no tool schemas and must
+            # synthesize the bodies already fetched (or disclose that none
+            # were usable).  Otherwise a fifth attempted search hits the hard
+            # budget guard and leaves the user with tool cards but no answer.
+            _force_answer = True
+            if _web_source_ledger:
+                _budget_instruction = (
+                    "WEB TOOL BUDGET COMPLETE: Do not call another tool. Write the final "
+                    "answer now in the user's language using only the fetched bodies and "
+                    "stable source IDs in the verified evidence manifest. Put a citation "
+                    "after every factual claim. Start with the answer; omit search plans "
+                    "and methodology prose."
+                )
+            else:
+                _failures = ", ".join(_web_failure_codes[-3:]) or "no_usable_evidence"
+                _budget_instruction = (
+                    "WEB TOOL BUDGET COMPLETE: Do not call another tool. No usable fetched "
+                    f"body is available (diagnostics: {_failures}). State that retrieval "
+                    "failed in the user's language and do not invent an answer or citation."
+                )
+            messages.append({
+                "role": "system",
+                "content": _budget_instruction,
+                "_protected": True,
+            })
+
+        if _legal_completion_required and _legal_tool_ran_this_round:
+            _legal_ready_to_answer = bool(
+                not _web_completion_required
+                or _web_usable_sources > 0
+                or _web_reused_sources > 0
+            )
+            if _legal_ready_to_answer:
+                # One bounded bridge call already performs candidate search and
+                # official-body verification. Remove schemas on the next round
+                # so a model cannot produce duplicate success/failure cards.
+                _force_answer = True
+                if _legal_verified_evidence > 0:
+                    _law_next_instruction = (
+                        "The Korean Law bridge has returned verified law.go.kr evidence. "
+                        "Do not call any tool again. Write the final answer in Korean using "
+                        "only that result: identify law.go.kr plus the MST or decision ID, "
+                        "include the relevant official body, and clearly separate official "
+                        "evidence, model interpretation, and uncertainty."
+                    )
+                else:
+                    _failures = ", ".join(_legal_failure_codes[-3:]) or "no_verified_evidence"
+                    _law_next_instruction = (
+                        "The Korean Law bridge did not return verified official evidence "
+                        f"(diagnostics: {_failures}). Do not call any tool again. State the "
+                        "failure plainly in Korean and do not invent a legal conclusion."
+                    )
+                messages.append({
+                    "role": "system",
+                    "content": "KOREAN LAW EVIDENCE READY: " + _law_next_instruction,
+                })
+            else:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "The Korean Law lookup is already complete. Do not call "
+                        "korean_law_lookup again. Gather the still-required web evidence next."
+                    ),
+                })
 
         # Emit agent_step event
         yield (

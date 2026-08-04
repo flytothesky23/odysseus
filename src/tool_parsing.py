@@ -263,6 +263,8 @@ _TOOL_NAME_MAP = {
     "search_chats": "search_chats",
     "search_conversations": "search_chats",
     "find_chat": "search_chats",
+    "korean_law_lookup": "korean_law_lookup",
+    "official_korean_law": "korean_law_lookup",
     "chat_with_model": "chat_with_model",
     "ask_model": "chat_with_model",
     "chat_model": "chat_with_model",

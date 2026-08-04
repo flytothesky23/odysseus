@@ -10,10 +10,50 @@ import httpx
 from bs4 import BeautifulSoup
 
 from src.constants import SEARXNG_INSTANCE, REQUEST_TIMEOUT, WEB_FETCH_USER_AGENT
-from .analytics import RateLimitError, error_logger
+from .analytics import (
+    NetworkError,
+    ParseError,
+    ProviderError,
+    RateLimitError,
+    SearchEngineError,
+    error_logger,
+    query_fingerprint,
+)
 from .query import build_enhanced_query
 
 logger = logging.getLogger(__name__)
+
+
+class ProviderFailureResults(list):
+    """Backward-compatible empty result that preserves a typed provider failure.
+
+    Provider functions historically returned ``[]`` on every failure.  Direct
+    callers keep that harmless list behavior, while the orchestrator can now
+    distinguish rate limits, network failures, invalid responses, and genuine
+    zero-result searches without relying on log text.
+    """
+
+    def __init__(self, error: SearchEngineError):
+        super().__init__()
+        self.provider_error = error
+
+
+def _provider_failure(error: SearchEngineError) -> ProviderFailureResults:
+    return ProviderFailureResults(error)
+
+
+def _typed_provider_error(provider: str, error: Exception) -> SearchEngineError:
+    """Classify a provider failure without retaining query text or credentials."""
+
+    if isinstance(error, SearchEngineError):
+        return error
+    if isinstance(error, httpx.RequestError):
+        return NetworkError(f"{provider} network request failed")
+    if isinstance(error, (json.JSONDecodeError, ValueError)):
+        return ParseError(f"{provider} returned an invalid response")
+    if isinstance(error, httpx.HTTPStatusError):
+        return ProviderError(f"{provider} provider response failed")
+    return ProviderError(f"{provider} runtime failure")
 
 # Provider registry — maps setting value to (label, needs_key, needs_url)
 PROVIDER_INFO = {
@@ -190,6 +230,8 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
                 headers=headers or None,
                 timeout=15,
             )
+            if getattr(response, "status_code", None) == 429:
+                raise RateLimitError("SearXNG rate limit hit")
             response.raise_for_status()
             data = response.json()
             return _parse_results(data.get("results", [])), data
@@ -210,8 +252,8 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             if _GENERAL_ENGINES:
                 fallback["engines"] = _GENERAL_ENGINES
             logger.info(
-                "SearXNG news search returned 0 results for %r; retrying general engines",
-                query,
+                "SearXNG news search returned 0 results query=%s; retrying general engines",
+                query_fingerprint(query),
             )
             active_params = fallback
             parsed, data = _run(active_params)
@@ -219,8 +261,8 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             fallback = dict(active_params)
             fallback.pop("language", None)
             logger.info(
-                "SearXNG language-pinned search returned 0 results for %r; retrying without language",
-                query,
+                "SearXNG language-pinned search returned 0 results query=%s; retrying without language",
+                query_fingerprint(query),
             )
             active_params = fallback
             parsed, data = _run(active_params)
@@ -228,22 +270,36 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             fallback = dict(active_params)
             fallback.pop("engines", None)
             logger.info(
-                "SearXNG pinned engines returned 0 results for %r; retrying default engines",
-                query,
+                "SearXNG pinned engines returned 0 results query=%s; retrying default engines",
+                query_fingerprint(query),
             )
             parsed, data = _run(fallback)
-        logger.info(f"SearXNG JSON API returned {len(parsed)} results for: {query}")
+        logger.info(
+            "SearXNG JSON API returned %s results query=%s",
+            len(parsed),
+            query_fingerprint(query),
+        )
         if not parsed:
             unresponsive = data.get("unresponsive_engines") if isinstance(data, dict) else None
             if unresponsive:
-                logger.info(f"SearXNG unresponsive engines for {query!r}: {unresponsive}")
+                logger.info(
+                    "SearXNG unresponsive engines query=%s count=%s",
+                    query_fingerprint(query),
+                    len(unresponsive) if isinstance(unresponsive, list) else 1,
+                )
         return parsed
     except Exception as e:
-        logger.warning(f"SearXNG JSON API search failed: {e}")
+        logger.warning("SearXNG JSON API search failed type=%s", type(e).__name__)
+        json_failure = _typed_provider_error("SearXNG", e)
         html_results = searxng_search(query, max_results=count)
         if html_results:
-            logger.info(f"SearXNG HTML fallback returned {len(html_results)} results for: {query}")
-        return html_results
+            logger.info(
+                "SearXNG HTML fallback returned %s results query=%s",
+                len(html_results),
+                query_fingerprint(query),
+            )
+            return html_results
+        return html_results if getattr(html_results, "provider_error", None) else _provider_failure(json_failure)
 
 
 def searxng_search(query, max_results=10):
@@ -260,6 +316,9 @@ def searxng_search(query, max_results=10):
             headers=req_headers,
             timeout=10,
         )
+        if getattr(response, "status_code", None) == 429:
+            raise RateLimitError("SearXNG rate limit hit")
+        response.raise_for_status()
         if response.is_success:
             soup = BeautifulSoup(response.text, "html.parser")
             results = []
@@ -275,7 +334,8 @@ def searxng_search(query, max_results=10):
             logger.info(f"SearXNG search (HTML) returned {len(results)} results")
             return results
     except Exception as e:
-        logger.error(f"SearXNG search failed: {e}")
+        logger.error("SearXNG HTML search failed type=%s", type(e).__name__)
+        return _provider_failure(_typed_provider_error("SearXNG", e))
     return []
 
 
@@ -312,7 +372,7 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
         if time_filter in time_map:
             params["freshness"] = time_map[time_filter]
 
-    logger.info(f"Executing Brave search with query: {enhanced_query}")
+    logger.info("Executing Brave search query=%s", query_fingerprint(query))
     try:
         response = httpx.get(
             "https://api.search.brave.com/res/v1/web/search",
@@ -324,17 +384,20 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
             raise RateLimitError("Brave rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"NetworkError during Brave search: {e}")
-        return []
+        error_logger.error("NetworkError during Brave search type=%s", type(e).__name__)
+        return _provider_failure(NetworkError("Brave network request failed"))
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        return _provider_failure(e)
+    except httpx.HTTPStatusError as e:
+        error_logger.error("Brave provider returned HTTP %s", e.response.status_code)
+        return _provider_failure(ProviderError("Brave provider response failed"))
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Brave API response: {e}")
-        return []
+        logger.error("Failed to parse Brave API response type=%s", type(e).__name__)
+        return _provider_failure(ParseError("Brave provider returned invalid JSON"))
 
     results = []
     if "web" in data and "results" in data["web"]:
@@ -392,6 +455,8 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                 headers={"User-Agent": WEB_FETCH_USER_AGENT},
                 timeout=REQUEST_TIMEOUT,
             )
+            if getattr(response, "status_code", None) == 429:
+                raise RateLimitError("DuckDuckGo rate limit hit")
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
             parsed = []
@@ -411,8 +476,8 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
             logger.info(f"DuckDuckGo HTML search returned {len(parsed)} results")
             return parsed
         except Exception as e:
-            logger.warning(f"DuckDuckGo HTML search failed: {e}")
-            return []
+            logger.warning("DuckDuckGo HTML search failed type=%s", type(e).__name__)
+            return _provider_failure(_typed_provider_error("DuckDuckGo", e))
 
     try:
         from ddgs import DDGS
@@ -494,17 +559,20 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
             raise RateLimitError("Google PSE rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Google PSE search failed: {e}")
-        return []
+        error_logger.error("Google PSE network failure type=%s", type(e).__name__)
+        return _provider_failure(NetworkError("Google PSE network request failed"))
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        return _provider_failure(e)
+    except httpx.HTTPStatusError as e:
+        error_logger.error("Google PSE returned HTTP %s", e.response.status_code)
+        return _provider_failure(ProviderError("Google PSE provider response failed"))
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Google PSE returned invalid JSON: {e}")
-        return []
+        error_logger.error("Google PSE returned invalid JSON type=%s", type(e).__name__)
+        return _provider_failure(ParseError("Google PSE returned invalid JSON"))
 
     results = []
     for item in data.get("items", [])[:count]:
@@ -552,22 +620,34 @@ def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional
             raise RateLimitError("Tavily rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Tavily search failed: {e}")
-        return []
+        error_logger.error("Tavily network failure type=%s", type(e).__name__)
+        return _provider_failure(NetworkError("Tavily network request failed"))
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        return _provider_failure(e)
+    except httpx.HTTPStatusError as e:
+        error_logger.error("Tavily returned HTTP %s", e.response.status_code)
+        return _provider_failure(ProviderError("Tavily provider response failed"))
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Tavily returned invalid JSON: {e}")
-        return []
+        error_logger.error("Tavily returned invalid JSON type=%s", type(e).__name__)
+        return _provider_failure(ParseError("Tavily returned invalid JSON"))
 
     results = []
     for item in data.get("results", [])[:count]:
         url = item.get("url", "")
         if not url:
+            continue
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            # Tavily can occasionally surface a provider-internal relative
+            # ``/goto?url=...`` redirect. Treating it as a successful result
+            # prevents the configured fallback provider from running and all
+            # subsequent fetches fail. It is neither a public candidate nor
+            # citable evidence, so discard it at the provider boundary.
+            logger.warning("Tavily dropped non-public result URL")
             continue
         results.append({
             "title": item.get("title", ""),
@@ -613,17 +693,20 @@ def serper_search(query: str, count: Optional[int] = None, time_filter: Optional
             raise RateLimitError("Serper rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Serper search failed: {e}")
-        return []
+        error_logger.error("Serper network failure type=%s", type(e).__name__)
+        return _provider_failure(NetworkError("Serper network request failed"))
     except RateLimitError as e:
         error_logger.error(str(e))
-        return []
+        return _provider_failure(e)
+    except httpx.HTTPStatusError as e:
+        error_logger.error("Serper returned HTTP %s", e.response.status_code)
+        return _provider_failure(ProviderError("Serper provider response failed"))
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Serper returned invalid JSON: {e}")
-        return []
+        error_logger.error("Serper returned invalid JSON type=%s", type(e).__name__)
+        return _provider_failure(ParseError("Serper returned invalid JSON"))
 
     results = []
     for item in data.get("organic", [])[:count]:

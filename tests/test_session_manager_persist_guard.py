@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from datetime import datetime, timezone
 
 from core.models import ChatMessage
 from core.session_manager import SessionManager
@@ -49,4 +50,10 @@ def test_persist_message_still_writes_when_parent_session_exists(monkeypatch):
     assert parent.last_accessed is not None
     assert parent.last_message_at is not None
     assert message.metadata["_db_id"]
-    assert message.metadata["timestamp"].endswith("Z")
+    assert message.metadata["timestamp"].endswith("+09:00")
+
+
+def test_message_timestamp_metadata_is_kst_iso_8601():
+    value = SM._message_timestamp_iso(datetime(2026, 8, 3, 7, 15, tzinfo=timezone.utc))
+
+    assert value == "2026-08-03T16:15:00+09:00"

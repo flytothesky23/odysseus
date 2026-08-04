@@ -13,6 +13,7 @@ import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
@@ -23,15 +24,16 @@ from src.upload_handler import reserve_message_upload_references
 from .models import set_session_manager_instance, get_session_manager_instance
 
 logger = logging.getLogger(__name__)
+KST = ZoneInfo("Asia/Seoul")
 
 
 def _message_timestamp_iso(value: Optional[datetime]) -> Optional[str]:
-    """Return a stable ISO timestamp for chat message metadata."""
+    """Return a stable KST ISO timestamp for user-visible message metadata."""
     if not value:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat().replace("+00:00", "Z")
+    return value.astimezone(KST).isoformat()
 
 
 def _parse_msg_content(raw):

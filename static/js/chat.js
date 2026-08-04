@@ -2337,7 +2337,7 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'web_completion_failed' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -3360,6 +3360,18 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 _renderStream();
+                // A buffered evidence round can finish without user-visible
+                // prose (plan/tool markup is deliberately withheld). Remove
+                // that continuation before starting the next round so model
+                // labels never accumulate as empty assistant cards.
+                if (
+                  roundHolder
+                  && roundHolder.classList.contains('msg-continuation')
+                  && !roundText.trim()
+                ) {
+                  roundHolder.remove();
+                  roundHolder = null;
+                }
                 // Mark thread as connected to bubble below
                 const _activeThread = document.querySelector('.agent-thread.streaming');
                 if (_activeThread) {
@@ -3409,6 +3421,22 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
                 const chatBox = document.getElementById('chat-history');
                 chatBox.appendChild(budgetDiv);
 
+              } else if (json.type === 'web_completion_failed') {
+                if (_isBg) continue;
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                const guardDiv = document.createElement('div');
+                guardDiv.className = 'stopped-indicator';
+                const guardLabel = document.createElement('span');
+                guardLabel.textContent = '검색 근거를 최종 답변에 연결하지 못했습니다. 다시 시도할 수 있습니다.';
+                guardDiv.appendChild(guardLabel);
+                const targetBody = roundHolder && roundHolder.querySelector('.body');
+                if (targetBody) targetBody.appendChild(guardDiv);
+                else {
+                  const chatBox = document.getElementById('chat-history');
+                  if (chatBox) chatBox.appendChild(guardDiv);
+                }
+
               } else if (json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted') {
                 if (_isBg) continue;
                 _cancelThinkingTimer();
@@ -3416,7 +3444,7 @@ import { renderContractReviewResult } from './contractReviewRenderer.js';
                 const guardDiv = document.createElement('div');
                 guardDiv.className = 'stopped-indicator';
                 const guardLabel = document.createElement('span');
-                guardLabel.textContent = `[Agent guard: ${json.message || json.reason || 'internal stop'}]`;
+                guardLabel.textContent = '작업이 안전하게 중단되었습니다.';
                 guardDiv.appendChild(guardLabel);
                 const targetBody = roundHolder && roundHolder.querySelector('.body');
                 if (targetBody) targetBody.appendChild(guardDiv);

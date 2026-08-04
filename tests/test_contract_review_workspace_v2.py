@@ -331,6 +331,33 @@ def test_memo_only_context_reuses_and_deltas_without_requiring_a_vault_snapshot(
     assert all("path" not in item for item in delta["odysseus_note_evidence"])
 
 
+def test_inactive_vault_identity_does_not_block_memo_only_context():
+    service = ContractReviewWorkspaceService()
+    memo = {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "evidence_type": "odysseus_note",
+        "title": "고정 메모",
+        "content": "현재 활성화된 유일한 근거",
+        "stat_fingerprint": "c" * 64,
+        "verification_state": "verified",
+    }
+
+    context = service.build_turn_context(
+        owner="alice",
+        session_id="memo-after-vault-unpin",
+        snapshot_id="stale-inactive-snapshot",
+        vault_id="stale-inactive-vault",
+        selected_paths=[],
+        odysseus_note_evidence=[memo],
+        analysis_mode="general",
+    )
+
+    assert context["selected_paths"] == []
+    assert context["snapshot_id"] == ""
+    assert context["vault_id"] == ""
+    assert [item["title"] for item in context["odysseus_note_evidence"]] == ["고정 메모"]
+
+
 def test_owner_scope_and_auth_disabled_single_owner(contract_workspace):
     workspace, _vault = contract_workspace
     service = ContractReviewWorkspaceService()
@@ -452,7 +479,9 @@ class FakeMcpManager:
         self.schema_version = 1
         self.launch_identity_hash = (
             stdio_launch_identity_hash("npx", ["-y", "kordoc@4.2.5", "mcp"])
-            if kind == "kordoc" else "law-fixture"
+            if kind == "kordoc" else stdio_launch_identity_hash(
+                "npx", ["-y", "korean-law-mcp@4.9.2"]
+            )
         )
 
     def get_server_status(self, server_id):
@@ -721,6 +750,18 @@ async def test_korean_law_official_evidence_and_diagnostics():
             arguments={"tool_name": "anything", "params": {}},
         )
     assert exc.value.code == "law_tool_forbidden"
+
+    with pytest.raises(ContractReviewError) as exc:
+        await KoreanLawAdapter(
+            FakeMcpManager(kind="korean-law", delay=0.05),
+            timeout=0.001,
+        ).call(
+            owner="alice",
+            server_id="korean-law",
+            tool="search_law",
+            arguments={"query": "대한민국헌법"},
+        )
+    assert exc.value.code == "law_timeout"
 
 
 @pytest.mark.asyncio

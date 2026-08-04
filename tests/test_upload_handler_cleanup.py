@@ -24,9 +24,11 @@ from core.database import (
 from src.upload_handler import (
     UploadCleanupSafetyError,
     UploadHandler,
+    _build_upload_id,
     extract_internal_upload_ids,
     reserve_message_upload_references,
     reserve_upload_references,
+    secure_filename,
 )
 from tests.helpers.sqlite_db import make_temp_sqlite
 
@@ -602,6 +604,13 @@ def test_kordoc_hwp_formats_are_accepted_as_documents(tmp_path):
     assert handler.is_document_file("contract.hwp") is True
     assert handler.is_document_file("contract.hwpx") is True
     assert handler.is_document_file("contract.hml") is True
+
+
+def test_korean_document_filename_preserves_extension_for_kordoc_uploads():
+    safe_name = secure_filename("비식별 계약 테스트.docx")
+
+    assert safe_name == "비식별_계약_테스트.docx"
+    assert _build_upload_id(safe_name).endswith(".docx")
 
 
 def test_reservation_never_uses_admin_override(tmp_path):

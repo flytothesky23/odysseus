@@ -43,6 +43,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
+from src.korean_semantics import is_korean_contextual_followup, is_korean_web_intent
 from src.image_model_ids import looks_like_image_generation_model
 from src.chatgpt_subscription import normalize_reasoning_effort
 from src.tool_policy import (
@@ -233,9 +234,11 @@ def _ensure_current_request_is_latest_user(
         )
     else:
         logger.warning(
-            "[chat_stream] latest user context mismatch; appending current request for model call. latest=%r current=%r",
-            latest[:120],
-            current[:120],
+            "[chat_stream] latest user context mismatch; appending current request for model call. latest_hash=%s current_hash=%s latest_len=%s current_len=%s",
+            hashlib.sha256(latest.encode("utf-8")).hexdigest()[:12],
+            hashlib.sha256(current.encode("utf-8")).hexdigest()[:12],
+            len(latest),
+            len(current),
         )
     repaired = list(messages or [])
     repaired.append({"role": "user", "content": current})
@@ -291,9 +294,12 @@ def _recent_session_text(sess, limit: int = 8, max_chars: int = 2000) -> str:
 
 def _is_contextual_web_followup(message: str, sess) -> bool:
     """Treat short retry/check replies as web lookups when recent context was web."""
-    if not message or not _WEB_FOLLOWUP_RE.search(message):
+    if not message:
         return False
-    return bool(_RECENT_WEB_CONTEXT_RE.search(_recent_session_text(sess)))
+    recent = _recent_session_text(sess)
+    if _WEB_FOLLOWUP_RE.search(message):
+        return bool(_RECENT_WEB_CONTEXT_RE.search(recent))
+    return is_korean_contextual_followup(message, recent)
 
 
 def _is_contextual_browser_followup(message: str, sess) -> bool:
@@ -947,7 +953,7 @@ def setup_chat_routes(
             _explicit_web_intent = bool(re.search(
                 r"\b(search|look\s*up|lookup|google|browse|web|online|latest|current|today|news|weather|forecast|rate|exchange\s+rate)\b",
                 _msg_l,
-            ))
+            )) or is_korean_web_intent(message)
             _explicit_browser_intent = bool(re.search(
                 r"\b(browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|"
                 r"click|fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|"
@@ -967,11 +973,18 @@ def setup_chat_routes(
         # its way through a plain chat request (and fail, especially with the
         # shell disabled).
         auto_escalated = False
+        _auto_web_agent = False
         _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
         _workspace_agent_intent = False
-        if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
+        if (
+            chat_mode == "chat"
+            and _tool_intent
+            and _tool_intent.needs_tools
+            and not (compare_mode and _tool_intent.category == "web")
+        ):
             chat_mode = "agent"
             auto_escalated = True
+            _auto_web_agent = _tool_intent.category == "web"
             _workspace_agent_intent = _tool_intent.category in {"shell", "workspace"}
             if _workspace_agent_intent:
                 allow_bash = "true"
@@ -980,13 +993,15 @@ def setup_chat_routes(
                 _tool_intent.category,
                 _tool_intent.reason,
             )
-        elif chat_mode == "chat" and _search_enabled:
+        elif chat_mode == "chat" and _search_enabled and not compare_mode:
             chat_mode = "agent"
             auto_escalated = True
+            _auto_web_agent = True
             logger.info("chat→agent auto-escalation: search enabled")
-        elif chat_mode == "chat" and _explicit_web_intent:
+        elif chat_mode == "chat" and _explicit_web_intent and not compare_mode:
             chat_mode = "agent"
             auto_escalated = True
+            _auto_web_agent = True
             logger.info("chat→agent auto-escalation: explicit web intent")
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
@@ -1094,6 +1109,7 @@ def setup_chat_routes(
                 _tool_intent = ToolIntent(True, "web", "contextual web lookup follow-up")
                 chat_mode = "agent"
                 auto_escalated = True
+                _auto_web_agent = True
                 _workspace_agent_intent = False
                 logger.info(
                     "chat→agent auto-escalation: category=%s reason=%s",
@@ -1168,6 +1184,7 @@ def setup_chat_routes(
             use_web = None
             use_rag = "false"
             search_context = None
+            _auto_web_agent = False
 
         if contract_context:
             use_rag = "false"
@@ -1185,6 +1202,13 @@ def setup_chat_routes(
         )
         allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls and not legal_contract_context
 
+        # Ordinary web-enabled Chat now uses one context-aware agentic search
+        # path.  The legacy prefetch extracts a query from only the latest
+        # sentence and otherwise duplicates the agent's own web_search call.
+        # Compare mode intentionally keeps its shared one-shot prefetch so all
+        # comparison panes receive the same evidence bundle.
+        _legacy_web_prefetch = use_web if compare_mode else None
+
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
             sess, request, chat_handler, chat_processor,
@@ -1192,7 +1216,7 @@ def setup_chat_routes(
             session_id=session,
             preset_id=preset_id,
             att_ids=att_ids,
-            use_web=use_web,
+            use_web=_legacy_web_prefetch,
             use_rag=use_rag,
             time_filter=time_filter,
             incognito=incognito,
@@ -1448,7 +1472,12 @@ def setup_chat_routes(
         # turns remain ordinary chat/agent streams and saved messages.
         _effective_mode = 'research' if effective_do_research else (chat_mode or 'chat')
         if _effective_mode in ('agent', 'research', 'chat'):
-            set_session_mode(session, _effective_mode)
+            _session_mode_to_persist = (
+                'chat'
+                if _auto_web_agent and not user_requested_agent and _effective_mode == 'agent'
+                else _effective_mode
+            )
+            set_session_mode(session, _session_mode_to_persist)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
@@ -1556,7 +1585,11 @@ def setup_chat_routes(
                     _research_query = await research_handler.synthesize_query(
                         sess, message, _r_ep, _r_model, _r_headers,
                     )
-                    logger.info(f"Research query: {_research_query[:120]}")
+                    logger.info(
+                        "Research query prepared hash=%s len=%s",
+                        hashlib.sha256(_research_query.encode("utf-8")).hexdigest()[:12],
+                        len(_research_query),
+                    )
 
                     research_handler.start_research(
                         session, _research_query, _r_ep, _r_model,
@@ -1994,6 +2027,7 @@ def setup_chat_routes(
                                     "rounds_exhausted", "budget_exceeded",
                                     "loop_breaker_triggered",
                                     "intent_nudge_exhausted",
+                                    "web_completion_failed",
                                     "ask_user",
                                     "plan_update",
                                 ):

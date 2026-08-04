@@ -35,4 +35,6 @@ def test_record_query_survives_partial_file(tmp_path, monkeypatch):
     data = analytics._load_analytics()
     assert data["total_queries"] == 2
     assert data["successful_queries"] == 1
-    assert data["query_patterns"]["hello world"]["count"] == 1
+    assert "hello world" not in data["query_patterns"]
+    fingerprint = analytics.query_fingerprint("hello world")
+    assert data["query_patterns"][fingerprint]["count"] == 1

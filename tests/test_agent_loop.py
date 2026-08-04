@@ -2,6 +2,7 @@
 and _append_tool_results. Uses mock imports to avoid loading the full app stack."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 _MOCKED_IMPORTS = [
@@ -35,11 +36,21 @@ for mod in _MOCKED_IMPORTS:
 _IMPORTED_AGENT_LOOP = None
 try:
     from src.agent_loop import (
+        TOOL_SECTIONS,
         _detect_admin_intent,
         _classify_agent_request,
         _compute_final_metrics,
         _append_tool_results,
         _insert_before_latest_user,
+        _merge_web_source_ledger,
+        _legal_completion_problem,
+        _limit_strict_legal_tool_blocks,
+        _limit_strict_web_tool_blocks,
+        _prior_verified_web_sources,
+        _select_answer_web_sources,
+        _web_tool_call_limit,
+        _web_completion_problem,
+        _wants_prior_web_evidence_reuse,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -64,6 +75,95 @@ def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
 
 
+def test_strict_web_turn_gets_a_finite_default_tool_budget():
+    assert _web_tool_call_limit(0, web_completion_required=True) == 4
+    assert _web_tool_call_limit(3, web_completion_required=True) == 3
+    assert _web_tool_call_limit(0, web_completion_required=False) == 0
+
+
+def test_strict_textual_web_calls_keep_bounded_search_then_fetch_pipeline():
+    blocks = [
+        SimpleNamespace(tool_type="web_search", content="first query"),
+        SimpleNamespace(tool_type="web_search", content="second query"),
+        SimpleNamespace(tool_type="web_fetch", content="https://first.example.test"),
+        SimpleNamespace(tool_type="web_fetch", content="https://second.example.test"),
+        SimpleNamespace(tool_type="web_search", content="fifth query"),
+    ]
+
+    assert _limit_strict_web_tool_blocks(
+        blocks,
+        used_native=False,
+        web_completion_required=True,
+    ) == blocks[:4]
+    assert _limit_strict_web_tool_blocks(
+        blocks,
+        used_native=True,
+        web_completion_required=True,
+    ) == blocks
+
+
+def test_strict_textual_web_calls_drop_duplicate_queries_before_execution():
+    blocks = [
+        SimpleNamespace(tool_type="web_search", content="same query"),
+        SimpleNamespace(tool_type="web_search", content=" same query "),
+        SimpleNamespace(tool_type="web_fetch", content="https://example.test/source"),
+    ]
+
+    assert _limit_strict_web_tool_blocks(
+        blocks,
+        used_native=False,
+        web_completion_required=True,
+    ) == [blocks[0], blocks[2]]
+
+
+def test_strict_textual_korean_law_calls_execute_sequentially():
+    blocks = [
+        SimpleNamespace(tool_type="korean_law_lookup", content="first"),
+        SimpleNamespace(tool_type="korean_law_lookup", content="second"),
+    ]
+
+    assert _limit_strict_legal_tool_blocks(
+        blocks,
+        used_native=False,
+        legal_completion_required=True,
+    ) == [blocks[0]]
+    assert _limit_strict_legal_tool_blocks(
+        blocks,
+        used_native=True,
+        legal_completion_required=True,
+    ) == blocks
+
+
+def test_legal_completion_requires_verified_identity_in_final_answer():
+    assert _legal_completion_problem(
+        "대한민국헌법 제10조입니다.",
+        attempted_calls=1,
+        successful_calls=1,
+        verified_evidence=1,
+    ) == "missing_legal_citation"
+    assert _legal_completion_problem(
+        "공식 근거: law.go.kr · 대한민국헌법 · MST 61603, 제10조 본문입니다.",
+        attempted_calls=1,
+        successful_calls=1,
+        verified_evidence=1,
+    ) == ""
+
+
+def test_legal_completion_accepts_explicit_runtime_failure_only():
+    assert _legal_completion_problem(
+        "법률을 설명할 수 없습니다.",
+        attempted_calls=1,
+        successful_calls=0,
+        verified_evidence=0,
+    ) == "legal_tool_failed_without_disclosure"
+    assert _legal_completion_problem(
+        "Korean Law MCP 조회가 timeout으로 실패해 공식 원문을 확인하지 못했습니다.",
+        attempted_calls=1,
+        successful_calls=0,
+        verified_evidence=0,
+    ) == ""
+
+
 def test_polish_internet_search_request_classifies_as_web():
     intent = _classify_agent_request(
         [],
@@ -72,6 +172,181 @@ def test_polish_internet_search_request_classifies_as_web():
 
     assert intent["low_signal"] is False
     assert "web" in intent["domains"]
+
+
+def test_korean_web_followup_reuses_recent_bounded_context():
+    messages = [
+        {"role": "user", "content": "최신 Codex 릴리스를 웹에서 검색해줘"},
+        {"role": "assistant", "content": "공식 문서와 릴리스 근거를 확인했습니다."},
+        {"role": "user", "content": "그럼 이번에는 실제로 다시 검색해줘."},
+    ]
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is True
+    assert "web" in intent["domains"]
+    assert "최신 Codex 릴리스" in intent["retrieval_query"]
+
+
+def test_korean_new_topic_does_not_reuse_stale_web_context():
+    messages = [
+        {"role": "user", "content": "최신 Codex 릴리스를 웹에서 검색해줘"},
+        {"role": "assistant", "content": "공식 문서를 확인했습니다."},
+        {"role": "user", "content": "그런데 파이썬의 GIL이 무엇인지 설명해 주세요."},
+    ]
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is False
+    assert "최신 Codex 릴리스" not in intent["retrieval_query"]
+
+
+def test_web_completion_rejects_korean_plan_instead_of_answer():
+    problem = _web_completion_problem(
+        "이번에는 GitHub와 Reddit을 교차 검증해서 정리하겠습니다.",
+        attempted_calls=1,
+        successful_calls=1,
+        usable_sources=3,
+    )
+
+    assert problem == "plan_without_answer"
+
+
+def test_web_completion_accepts_grounded_korean_answer_with_citation():
+    problem = _web_completion_problem(
+        "최근 변경의 핵심은 에이전트 도구 범위 축소입니다 [1].",
+        attempted_calls=1,
+        successful_calls=1,
+        usable_sources=2,
+    )
+
+    assert problem == ""
+
+
+def test_web_completion_requires_an_actual_tool_attempt():
+    problem = _web_completion_problem(
+        "현재 검색 도구를 사용할 수 없어 확인하지 못했습니다.",
+        attempted_calls=0,
+        successful_calls=0,
+        usable_sources=0,
+    )
+
+    assert problem == "no_web_tool_attempt"
+
+
+def test_web_completion_accepts_explicit_reuse_of_verified_prior_sources():
+    problem = _web_completion_problem(
+        "격리된 worktree는 파일 변경을 분리해 충돌을 줄입니다 [1].",
+        attempted_calls=0,
+        successful_calls=0,
+        usable_sources=1,
+        reused_sources=1,
+    )
+
+    assert problem == ""
+
+
+def test_prior_web_evidence_reuse_requires_verified_metadata_and_explicit_reference():
+    messages = [
+        {"role": "user", "content": "공식 문서를 검색해줘"},
+        {
+            "role": "assistant",
+            "content": "공식 근거를 확인했습니다 [1].",
+            "metadata": {
+                "web_sources": [
+                    {
+                        "url": "https://openai.com/example",
+                        "title": "Official source",
+                        "fetched": True,
+                        "usable": True,
+                        "evidence_status": "fetched",
+                    },
+                    {
+                        "url": "https://untrusted.example/candidate",
+                        "title": "Candidate only",
+                        "fetched": False,
+                        "usable": False,
+                        "evidence_status": "candidate",
+                    },
+                ]
+            },
+        },
+        {"role": "user", "content": "방금 확인한 같은 근거만 재사용해서 설명해줘."},
+    ]
+
+    assert _wants_prior_web_evidence_reuse(messages[-1]["content"]) is True
+    assert _prior_verified_web_sources(messages) == [
+        {
+            "url": "https://openai.com/example",
+            "title": "Official source",
+            "fetched": True,
+            "usable": True,
+            "evidence_status": "fetched",
+        }
+    ]
+
+
+def test_web_source_ledger_deduplicates_and_final_answer_selects_direct_links():
+    ledger, mapping = _merge_web_source_ledger(
+        [
+            {
+                "url": "https://openai.com/first",
+                "title": "First",
+                "fetched": True,
+                "usable": True,
+            }
+        ],
+        [
+            {
+                "url": "https://openai.com/first/",
+                "title": "First duplicate",
+                "fetched": True,
+                "usable": True,
+            },
+            {
+                "url": "https://openai.com/second",
+                "title": "Second",
+                "fetched": True,
+                "usable": True,
+            },
+        ],
+    )
+
+    assert len(ledger) == 2
+    assert mapping == {1: 1, 2: 2}
+    selected = _select_answer_web_sources(
+        "근거는 [공식 페이지](https://openai.com/second)입니다 [1].",
+        ledger,
+    )
+    assert [source["url"] for source in selected] == ["https://openai.com/second"]
+
+
+def test_web_completion_accepts_honest_failure_after_tool_error():
+    problem = _web_completion_problem(
+        "웹 검색이 429 제한으로 실패하여 최신 정보를 확인하지 못했습니다.",
+        attempted_calls=1,
+        successful_calls=0,
+        usable_sources=0,
+    )
+
+    assert problem == ""
+
+
+def test_web_completion_rejects_uncited_answer_when_sources_exist():
+    problem = _web_completion_problem(
+        "최근 변경의 핵심은 에이전트 도구 범위 축소입니다.",
+        attempted_calls=1,
+        successful_calls=1,
+        usable_sources=2,
+    )
+
+    assert problem == "missing_citation"
+
+
+def test_web_tool_prompt_requires_same_turn_grounded_synthesis():
+    prompt = TOOL_SECTIONS["web_search"]
+
+    assert "same turn" in prompt.lower()
+    assert "[n]" in prompt.lower()
+    assert "methodology" in prompt.lower()
 
 
 def test_insert_before_latest_user_places_context_before_last_user_turn():

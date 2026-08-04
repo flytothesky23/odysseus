@@ -136,6 +136,24 @@ def test_table_separator_row_not_rendered_as_data(node_available):
     assert "---" not in html
 
 
+def test_table_with_inline_citations_and_code_renders_as_table(node_available):
+    html = _run_markdown_case(
+        "| 자료 | 중심 관점 | 핵심 내용 |\n"
+        "|---|---|---|\n"
+        "| **OpenAI Codex 앱 소개** | 제품 경험 | 공식 설명입니다. "
+        "[출처 1](https://openai.com/index/introducing-the-codex-app) |\n"
+        "| **GitHub `openai/codex` README** | 개발자 도구 | 로컬 CLI 안내입니다. "
+        "[출처 2](https://github.com/openai/codex/blob/main/README.md?plain=1) |"
+    )
+
+    assert html.count("<table") == 1
+    assert html.count("<tr>") == 3
+    assert "<code>openai/codex</code>" in html
+    assert 'href="https://openai.com/index/introducing-the-codex-app"' in html
+    assert 'href="https://github.com/openai/codex/blob/main/README.md?plain=1"' in html
+    assert "|---|---|---|" not in html
+
+
 def test_process_with_thinking_handles_gemma4_thought_channel(node_available):
     html = _run_markdown_case(
         "<|channel>thought\ninternal reasoning<channel|>Final answer.",

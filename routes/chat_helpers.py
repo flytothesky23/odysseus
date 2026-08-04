@@ -19,6 +19,7 @@ from src.model_context import estimate_tokens
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
 from src.attachment_refs import attachment_ref
+from src.korean_semantics import is_korean_casual_low_signal
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
@@ -41,6 +42,8 @@ _CASUAL_BLOCKLIST_RE = re.compile(
 def _is_casual_low_signal(text: str) -> bool:
     """Short greetings/slang should not pull memory, skills, RAG, or docs."""
     s = str(text or "").strip()
+    if is_korean_casual_low_signal(s):
+        return True
     m = _CASUAL_OPENING_RE.match(s)
     if not m:
         return False

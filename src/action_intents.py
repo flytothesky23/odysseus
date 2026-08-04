@@ -11,6 +11,13 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Pattern
 
+from src.korean_semantics import (
+    detect_korean_domains,
+    is_korean_explanatory_question,
+    is_korean_local_evidence_analysis,
+    is_korean_web_intent,
+)
+
 
 @dataclass(frozen=True)
 class ToolIntent:
@@ -146,8 +153,27 @@ def classify_tool_intent(text: str) -> ToolIntent:
     """Classify whether a chat message should be promoted to agent mode."""
     if not text:
         return ToolIntent(False, reason="empty message")
-    if _EXPLANATORY_PREFIX.search(text):
+    korean_domains = detect_korean_domains(text)
+    if "legal" in korean_domains:
+        return ToolIntent(True, category="legal", reason="Korean official-law evidence request")
+    if _EXPLANATORY_PREFIX.search(text) or is_korean_explanatory_question(text):
         return ToolIntent(False, reason="explanatory feature question")
+    if is_korean_web_intent(text):
+        return ToolIntent(True, category="web", reason="Korean web lookup request")
+    if is_korean_local_evidence_analysis(text):
+        return ToolIntent(False, reason="Korean local-evidence analysis request")
+    if "email" in korean_domains:
+        return ToolIntent(True, category="email", reason="Korean email action request")
+    if "notes_calendar_tasks" in korean_domains:
+        if re.search(r"(?:일정|캘린더|달력|회의|약속)", text):
+            return ToolIntent(True, category="calendar", reason="Korean calendar action request")
+        return ToolIntent(True, category="notes", reason="Korean note/task action request")
+    if "files" in korean_domains:
+        return ToolIntent(True, category="workspace", reason="Korean workspace action request")
+    if "documents" in korean_domains:
+        return ToolIntent(True, category="documents", reason="Korean document action request")
+    if "ui" in korean_domains:
+        return ToolIntent(True, category="ui", reason="Korean UI action request")
     for category, reason, pattern in _ROUTING_PATTERNS:
         if pattern.search(text):
             return ToolIntent(True, category=category, reason=reason)
@@ -158,7 +184,7 @@ def message_needs_tools(text: str, patterns: Iterable[Pattern[str]] = _TOOL_INTE
     """Return True when a plain chat message should be promoted to agent mode."""
     if not text:
         return False
-    if _EXPLANATORY_PREFIX.search(text):
+    if _EXPLANATORY_PREFIX.search(text) or is_korean_explanatory_question(text):
         return False
     if patterns is _TOOL_INTENT_PATTERNS:
         return classify_tool_intent(text).needs_tools

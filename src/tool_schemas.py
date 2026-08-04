@@ -64,12 +64,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Quick single web lookup for a fact or current event mid-task. NOT for 'research X' / 'do research on X' — those are deep-research jobs; use trigger_research instead.",
+            "description": "Search the live web, fetch a bounded set of readable pages, and return citable evidence for current facts or a contextual follow-up. Use the conversation context to form a precise Korean or English query. A tool failure means no verified web evidence was obtained; do not present a planned search as a completed result. Broad multi-stage research jobs still use trigger_research.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Optional freshness filter for news/latest/today queries"}
+                    "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Optional freshness filter for news/latest/today queries"},
+                    "max_pages": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Maximum readable pages to fetch; default 5"}
                 },
                 "required": ["query"]
             }
@@ -87,6 +88,32 @@ FUNCTION_TOOL_SCHEMAS = [
                     "full": {"type": "boolean", "description": "Raise the download budget to the hard cap for large pages/files. Use only after a result reported partial content."}
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "korean_law_lookup",
+            "description": "공식 law.go.kr 근거를 Korean Law MCP로 읽기 전용 조회합니다. 법령은 search_law의 정확한 법령명/MST 후보를 get_law_text 원문으로 재검증하고, 판례는 search_decisions 식별자를 get_decision_text로 재검증합니다. 한국어 법령·조문·판례·법적 해석 요청에 사용하며 일반 웹검색이나 임의 MCP 도구로 대체하지 마세요.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "정확한 법령명 또는 구체적인 판례 검색어"
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["law", "precedent"],
+                        "description": "법령 원문은 law, 판례는 precedent"
+                    },
+                    "article": {
+                        "type": "string",
+                        "description": "법령의 특정 조문(예: 제10조). 판례 조회에서는 생략"
+                    }
+                },
+                "required": ["query", "source_type"]
             }
         }
     },

@@ -8,11 +8,13 @@ import re
 from typing import List, Dict, Tuple
 from datetime import datetime
 
+from src.korean_semantics import semantic_tokens
+
 logger = logging.getLogger(__name__)
 
 def tokenize(text: str) -> List[str]:
-    """Simple tokenizer that splits on whitespace and removes punctuation."""
-    return [word.strip('.,!?";') for word in text.split()]
+    """Unicode tokenizer with lightweight Korean particle normalization."""
+    return semantic_tokens(text)
 
 def get_text_similarity(text1: str, text2: str) -> float:
     """Calculate Jaccard similarity between two texts."""
@@ -96,7 +98,11 @@ class MemoryManager:
             the message matches the memory command pattern
         """
         # Pattern for memory commands: "remember: X", "memorize: X", "save: X", etc.
-        pattern = r'^(?:remember|memorize|save|note|store)[:\-]?\s+(.+)$'
+        pattern = (
+            r'^(?:remember|memorize|save|note|store|'
+            r'기억(?:해|해줘|해\s*줘|해주세요)|저장(?:해|해줘|해주세요)|메모(?:해|해줘|해주세요))'
+            r'[:\-]?\s+(.+)$'
+        )
         match = re.match(pattern, message.strip(), re.IGNORECASE)
         
         if match:
@@ -294,11 +300,11 @@ class MemoryManager:
             return []
             
         # Define keyword categories for semantic matching
-        identity_words = ["name", "who", "i", "am", "called", "identity", "myself", "me", "my"]
-        contact_words = ["phone", "email", "address", "contact", "number", "where", "located", "reach"]
-        preference_words = ["like", "prefer", "favorite", "want", "love", "hate", "dislike", "enjoy", "interested"]
-        task_words = ["todo", "task", "remind", "meeting", "appointment", "schedule", "deadline"]
-        fact_words = ["what", "when", "where", "how", "why", "explain", "describe", "information", "know"]
+        identity_words = ["name", "who", "i", "am", "called", "identity", "myself", "me", "my", "이름", "누구", "정체", "나는", "내가", "저는"]
+        contact_words = ["phone", "email", "address", "contact", "number", "where", "located", "reach", "전화", "이메일", "메일", "주소", "연락처"]
+        preference_words = ["like", "prefer", "favorite", "want", "love", "hate", "dislike", "enjoy", "interested", "좋아", "선호", "싫어", "관심", "취향"]
+        task_words = ["todo", "task", "remind", "meeting", "appointment", "schedule", "deadline", "할일", "할 일", "리마인더", "회의", "약속", "일정", "마감"]
+        fact_words = ["what", "when", "where", "how", "why", "explain", "describe", "information", "know", "무엇", "뭐", "언제", "어디", "어떻게", "왜", "설명", "정보"]
         
         query_lower = query.lower()
         
@@ -325,7 +331,7 @@ class MemoryManager:
             # Check if this is an identity memory (contains name patterns or identity indicators)
             is_identity = any([
                 re.search(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', memory["text"]),
-                any(word in memory_text for word in ["name is", "i'm", "i am", "called", "my name", "named", "call me"])
+                any(word in memory_text for word in ["name is", "i'm", "i am", "called", "my name", "named", "call me", "내 이름", "제 이름", "저는", "나는"])
             ])
             if is_identity:
                 identity_memories.append(memory)
@@ -356,21 +362,21 @@ class MemoryManager:
                 # Boost memories with contact information
                 has_contact_info = any(word in memory_text for word in ["@gmail.com", "@", ".com", 
                                                                      "phone", "number", "address", 
-                                                                     "http", "www", "tel:"])
+                                                                     "http", "www", "tel:", "전화", "이메일", "메일", "주소", "연락처"])
                 if has_contact_info:
                     final_score *= 1.4  # 40% boost for contact-related memories
             
             elif query_type == "preference":
                 # Boost memories with preference indicators
                 has_preference = any(word in memory_text for word in ["like", "love", "hate", "dislike", 
-                                                                   "prefer", "favorite", "enjoy", "interested"])
+                                                                   "prefer", "favorite", "enjoy", "interested", "좋아", "선호", "싫어", "취향"])
                 if has_preference:
                     final_score *= 1.3  # 30% boost for preference-related memories
             
             elif query_type == "task":
                 # Boost memories with task indicators
                 has_task = any(word in memory_text for word in ["todo", "task", "remind", "meeting", 
-                                                              "appointment", "schedule", "deadline", "need to"])
+                                                              "appointment", "schedule", "deadline", "need to", "할일", "할 일", "리마인더", "회의", "약속", "일정", "마감"])
                 if has_task:
                     final_score *= 1.3  # 30% boost for task-related memories
             

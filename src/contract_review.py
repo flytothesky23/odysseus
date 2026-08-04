@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from src.tool_execution import vet_workspace
 from src.tool_policy import ToolPolicy, known_tool_names
-from src.mcp_manager import stdio_launch_identity_hash
+from src.mcp_identity import stdio_launch_identity_hash
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -49,6 +49,9 @@ KOREAN_LAW_READ_ONLY_TOOLS = (
 )
 KORDOC_EXTENSIONS = frozenset({".pdf", ".docx", ".xlsx", ".xls", ".hwp", ".hwpx", ".hml"})
 KORDOC_LAUNCH_IDENTITY = stdio_launch_identity_hash("npx", ["-y", "kordoc@4.2.5", "mcp"])
+KOREAN_LAW_LAUNCH_IDENTITY = stdio_launch_identity_hash(
+    "npx", ["-y", "korean-law-mcp@4.9.2"]
+)
 
 CONTRACT_REVIEW_BLOCKS = (
     "review_summary",
@@ -837,7 +840,12 @@ class ContractReviewWorkspaceService:
         note_scope: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_scope = _normalize_note_scope(note_scope)
-        has_vault_identity = bool(str(snapshot_id or "") or str(vault_id or "") or selected_paths)
+        # Snapshot identity is active only while at least one Vault path is
+        # selected. The Explorer intentionally keeps its last index identity
+        # client-side so users can re-pin a note without re-indexing; treating
+        # those inactive ids as evidence would make an unrelated pinned memo
+        # fail after the Vault chip is removed or the app restarts.
+        has_vault_identity = bool(selected_paths)
         if has_vault_identity and (not snapshot_id or not vault_id):
             raise ContractReviewError("snapshot_unavailable", "The Vault snapshot is unavailable.", 404)
         snapshot = self._snapshot(owner, snapshot_id, vault_id) if has_vault_identity else None
@@ -1342,6 +1350,12 @@ class KoreanLawAdapter:
             frozenset({"koreanlaw", "koreanlawmcp"}),
             "law_server_forbidden",
         )
+        if descriptor["launch_identity_hash"] != KOREAN_LAW_LAUNCH_IDENTITY:
+            raise ContractReviewError(
+                "law_server_forbidden",
+                "Official-law lookup requires the pinned Korean Law MCP 4.9.2 stdio profile.",
+                403,
+            )
         verification_tool = {
             "search_law": "get_law_text",
             "search_decisions": "get_decision_text",
@@ -1354,6 +1368,12 @@ class KoreanLawAdapter:
                 frozenset({"koreanlaw", "koreanlawmcp"}),
                 "law_server_forbidden",
             )
+            if verification_descriptor["launch_identity_hash"] != KOREAN_LAW_LAUNCH_IDENTITY:
+                raise ContractReviewError(
+                    "law_server_forbidden",
+                    "Official-law verification requires the pinned Korean Law MCP 4.9.2 stdio profile.",
+                    403,
+                )
         return _McpAdmission(
             str(owner or ""),
             "law",

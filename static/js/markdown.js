@@ -677,7 +677,11 @@ export function mdToHtml(src, opts) {
 
   // Handle pipe tables
   s = s.replace(/(?:^|\n)([^\n]*\|[^\n]*\|[^\n]*)(?:\n([^\n]*\|[^\n]*\|[^\n]*))*/g, (table) => {
-    if (table.includes('___CODE_BLOCK_') || table.includes('___ALLOWED_HTML_')) return table;
+    // Markdown links and images have already been converted to sanitized
+    // ___ALLOWED_HTML_* placeholders.  Those placeholders are safe table-cell
+    // content and must remain eligible for table parsing; rejecting the whole
+    // block made every citation-bearing table render as literal pipe text.
+    if (table.includes('___CODE_BLOCK_')) return table;
 
     const rows = table.trim().split('\n');
     if (rows.length < 2) return table;

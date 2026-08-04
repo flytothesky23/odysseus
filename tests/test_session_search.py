@@ -82,6 +82,32 @@ def test_session_search_uses_fts_and_returns_context():
         db.close()
 
 
+def test_session_search_matches_korean_particle_variants_with_fts_prefixes():
+    db = _db(with_fts=True)
+    try:
+        base = datetime(2026, 1, 1, 12, 0, 0)
+        _add_session(db, "s-ko", owner="alice", name="계약 검토")
+        _add_message(
+            db,
+            "s-ko",
+            "m-ko",
+            "assistant",
+            "민법상 계약서를 검토했습니다.",
+            base,
+        )
+        db.commit()
+
+        results = search_session_messages(
+            "민법 계약서의 검토",
+            owner="alice",
+            db=db,
+        )
+
+        assert [result.message_id for result in results] == ["m-ko"]
+    finally:
+        db.close()
+
+
 def test_session_search_escapes_like_wildcards_in_fallback():
     db = _db(with_fts=False)
     try:

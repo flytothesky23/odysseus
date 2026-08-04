@@ -17,14 +17,25 @@ from src.upload_limits import format_byte_limit, get_chat_upload_max_bytes
 
 
 def secure_filename(filename: str) -> str:
-    """Sanitize a filename (replaces werkzeug.utils.secure_filename)."""
+    """Sanitize a filename without discarding Korean or its extension.
+
+    Werkzeug's ASCII-oriented behaviour turns a name such as
+    ``계약서.docx`` into ``docx``.  Besides losing the user-visible name, that
+    also removes the dot before the extension, so Kordoc rejects the uploaded
+    file as an unsupported document.  NFKC plus the Unicode-aware ``\\w`` class
+    keeps letters and numbers while the explicit separator/control filtering
+    preserves the original path-safety boundary.
+    """
     import unicodedata
-    filename = unicodedata.normalize("NFKD", filename)
-    filename = filename.encode("ascii", "ignore").decode("ascii")
+    filename = unicodedata.normalize("NFKC", str(filename or ""))
     # Replace path separators with underscores
     for sep in (os.sep, os.altsep or "", "/", "\\"):
         if sep:
             filename = filename.replace(sep, "_")
+    filename = "".join(
+        char for char in filename
+        if not unicodedata.category(char).startswith("C")
+    )
     # Keep only safe characters
     filename = re.sub(r"[^\w\s\-.]", "", filename).strip()
     filename = re.sub(r"[\s]+", "_", filename)

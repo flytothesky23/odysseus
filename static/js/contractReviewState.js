@@ -106,12 +106,13 @@ export function reconcileMcpRuntimeState(value, runtimeId) {
 
 export function buildContractReviewChatContext(value) {
   const state = sanitizePersistedState(value);
+  const vaultActive = state.vault_active && state.selected_paths.length > 0;
   return {
     mode: state.mode,
-    snapshot_id: state.snapshot_id,
-    vault_id: state.vault_id,
+    snapshot_id: vaultActive ? state.snapshot_id : '',
+    vault_id: vaultActive ? state.vault_id : '',
     note_scope: state.note_scope,
-    selected_paths: state.vault_active ? state.selected_paths : [],
+    selected_paths: vaultActive ? state.selected_paths : [],
     note_ids: state.note_ids,
     kordoc_job_ids: state.kordoc_job_ids,
     law_job_ids: state.law_job_ids,

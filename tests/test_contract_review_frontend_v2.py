@@ -55,6 +55,8 @@ def test_vault_candidates_do_not_enter_chat_until_the_user_pins_them():
     """)
     assert data["candidate"]["active"] is False
     assert data["candidateContext"]["selected_paths"] == []
+    assert data["candidateContext"]["snapshot_id"] == ""
+    assert data["candidateContext"]["vault_id"] == ""
     assert data["pinnedContext"]["selected_paths"] == ["Agreement.md"]
 
 

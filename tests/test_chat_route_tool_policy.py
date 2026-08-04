@@ -88,6 +88,21 @@ def test_browser_form_followups_include_approval_and_send_phrases():
     assert "submit(?:\\s+it)?" in source
 
 
+def test_web_chat_uses_agent_tools_without_legacy_prefetch():
+    """Ordinary web-enabled Chat must not search twice in one request."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert "_legacy_web_prefetch" in source
+    assert "use_web=_legacy_web_prefetch" in source
+    assert "_legacy_web_prefetch = use_web if compare_mode else None" in source
+
+
+def test_quiet_web_agent_preserves_the_user_selected_chat_mode():
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert "_auto_web_agent" in source
+    assert "_session_mode_to_persist" in source
+    assert "set_session_mode(session, _session_mode_to_persist)" in source
+
+
 def test_agent_loop_expands_browser_mcp_tools_from_connected_server():
     """Browser intent must not depend on stale hardcoded Playwright tool names."""
     source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
@@ -125,6 +140,12 @@ def test_workspace_auto_escalation_keeps_shell_tools():
     assert '_workspace_agent_intent = _tool_intent.category in {"shell", "workspace"}' in source
     assert "allow_bash = \"true\"" in source
     assert "if auto_escalated and not _workspace_agent_intent:" in source
+
+
+def test_korean_legal_intent_auto_escalates_plain_chat():
+    intent = classify_tool_intent("대한민국헌법 제10조 공식 원문을 확인해줘")
+    assert intent.needs_tools
+    assert intent.category == "legal"
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

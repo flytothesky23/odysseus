@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from urllib.parse import urlparse
 
+from src.korean_semantics import contains_hangul, semantic_tokens
+
 logger = logging.getLogger(__name__)
 
 _AGE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
@@ -45,7 +47,7 @@ def recency_score(age_str: Optional[str], now: Optional[datetime] = None) -> flo
     return (30 - days_old) / 23
 
 
-_NEWS_HINTS = {"news", "nyheter", "headlines", "breaking", "latest", "today", "idag"}
+_NEWS_HINTS = {"news", "nyheter", "headlines", "breaking", "latest", "today", "idag", "뉴스", "속보", "최신", "오늘", "현재", "실시간"}
 _SPORTS_HINTS = {
     "sport", "sports", "soccer", "football", "hockey", "nba", "nfl", "mlb",
     "fifa", "world cup", "championship", "quarterfinal", "eliminates",
@@ -86,12 +88,14 @@ def _has_word(text: str, term: str) -> bool:
     checks to word boundaries; the snippet and subject-term checks below use
     the same helper so the whole file stays consistent.
     """
+    if contains_hangul(term):
+        return term in set(semantic_tokens(text))
     return re.search(rf"\b{re.escape(term)}\b", text) is not None
 
 
 def rank_search_results(query: str, results: List[dict]) -> List[dict]:
     """Rank search results by title relevance, snippet quality, domain authority, and recency."""
-    query_terms = [t.lower() for t in re.findall(r"\b\w+\b", query)]
+    query_terms = semantic_tokens(query)
     query_lc = query.lower()
     is_news_query = any(term in _NEWS_HINTS for term in query_terms)
     is_sports_query = bool(_SPORTS_HINT_RE.search(query_lc))

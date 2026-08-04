@@ -5,6 +5,12 @@ import logging
 from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
+try:
+    from .analytics import query_fingerprint
+except ImportError:  # direct-file regression tests / standalone diagnostics
+    from services.search.analytics import query_fingerprint
+from src.korean_semantics import contains_hangul, semantic_tokens
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,6 +22,17 @@ def _detect_question_type(query: str) -> Optional[str]:
     if not isinstance(query, str):
         return None
     q = query.strip().lower()
+    korean_questions = (
+        (("누가", "누구"), "who"),
+        (("무엇", "뭐", "어떤"), "what"),
+        (("언제",), "when"),
+        (("어디",), "where"),
+        (("왜",), "why"),
+        (("어떻게",), "how"),
+    )
+    for prefixes, canonical in korean_questions:
+        if any(q.startswith(prefix) for prefix in prefixes):
+            return canonical
     for word in ("who", "what", "when", "where", "why", "how"):
         # Require a whole-word match: a bare prefix mis-flags ordinary queries
         # like "whatsapp pricing" (-> what) or "however ..." (-> how), which
@@ -57,7 +74,7 @@ def _split_multi_part(query: str) -> List[str]:
     """Split a query into sub-queries on common conjunctions."""
     if not isinstance(query, str):
         return []
-    parts = re.split(r"\s+and\s+|\s+or\s+|;", query, flags=re.I)
+    parts = re.split(r"\s+and\s+|\s+or\s+|\s+그리고\s+|\s+또는\s+|;", query, flags=re.I)
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -94,16 +111,17 @@ def enhance_query(original_query: str) -> Tuple[str, Optional[str]]:
     for sub in sub_queries:
         qtype = _detect_question_type(sub)
         boost_keywords = []
+        korean = contains_hangul(sub)
         if qtype == "who":
-            boost_keywords.append("person")
+            boost_keywords.append("인물" if korean else "person")
         elif qtype == "when":
-            boost_keywords.append("date")
+            boost_keywords.append("날짜" if korean else "date")
         elif qtype == "where":
-            boost_keywords.append("location")
+            boost_keywords.append("장소" if korean else "location")
         elif qtype == "why":
-            boost_keywords.append("reason")
+            boost_keywords.append("이유" if korean else "reason")
         elif qtype == "how":
-            boost_keywords.append("method")
+            boost_keywords.append("방법" if korean else "method")
         entities = _extract_entities(sub)
         boosted = _boost_entities_in_query(sub, entities)
         if boost_keywords:
@@ -126,7 +144,12 @@ def build_enhanced_query(query: str, time_filter: str = None) -> str:
             enhanced_query = f"{enhanced_query} after:{time_map[time_filter]}"
             logger.info(f"Added time filter '{time_filter}' to query")
 
-    logger.info(f"Enhanced query: '{query}' -> '{enhanced_query}'")
+    logger.info(
+        "Enhanced search query input=%s input_len=%s output_len=%s",
+        query_fingerprint(query),
+        len(str(query or "")),
+        len(str(enhanced_query or "")),
+    )
     return enhanced_query
 
 
@@ -135,10 +158,10 @@ def build_enhanced_query(query: str, time_filter: str = None) -> str:
 # ----------------------------------------------------------------------
 def _is_news_query(query: str) -> bool:
     """Lightweight heuristic to decide if a query is news-oriented."""
-    news_terms = {"news", "latest", "breaking", "today", "today's", "current", "updates", "happening"}
+    news_terms = {"news", "latest", "breaking", "today", "today's", "current", "updates", "happening", "뉴스", "최신", "속보", "오늘", "현재", "업데이트", "실시간"}
     if not isinstance(query, str):
         return False
-    tokens = set(re.findall(r"\b\w+\b", query.lower()))
+    tokens = set(semantic_tokens(query))
     return bool(tokens & news_terms)
 
 

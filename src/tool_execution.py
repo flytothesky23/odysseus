@@ -965,6 +965,15 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
 
 
+    elif tool == "korean_law_lookup":
+        desc = "korean_law_lookup"
+        result = await _direct_fallback(
+            tool,
+            content,
+            session_id=session_id,
+            owner=owner,
+            progress_cb=progress_cb,
+        ) or {"error": "korean_law_lookup: execution failed", "exit_code": 1}
     elif tool in dynamic_handlers:
         first_line = content.split(chr(10))[0][:80]
         desc = f"registry: {tool} {first_line}".strip()
@@ -1006,7 +1015,7 @@ def format_tool_result(description: str, result: Dict) -> str:
     if "stdout" in result:
         if result["stdout"]:
             parts.append(f"**stdout:**\n```\n{result['stdout']}\n```")
-        if result["stderr"]:
+        if result.get("stderr"):
             parts.append(f"**stderr:**\n```\n{result['stderr']}\n```")
         parts.append(f"**exit_code:** {result.get('exit_code', 'unknown')}")
     elif "output" in result:
