@@ -9,6 +9,7 @@ from src.korean_semantics import (
     is_korean_contextual_followup,
     is_korean_explicit_continuation,
     is_korean_explanatory_question,
+    is_korean_repair_followup,
     is_korean_web_intent,
     looks_like_korean_action_promise,
 )
@@ -101,3 +102,29 @@ def test_generic_korean_continuation_is_available_to_non_web_agent_domains():
     assert not is_korean_explicit_continuation(
         "그런데 파이썬의 GIL이 무엇인지 설명해 주세요."
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "제대로 피드백을 못하신듯 마지막 질문에 대한",
+        "위의 맥락이 이상한데 질문에 답이 아닌듯",
+        "직전 답변이 제 질문을 놓쳤습니다.",
+        "방금 요청을 웹검색을 사용해 실제로 다시 시도해 주세요.",
+    ],
+)
+def test_korean_repair_turns_are_explicit_continuations(text):
+    assert is_korean_repair_followup(text)
+    assert is_korean_explicit_continuation(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "그렇다면 중복 문서는 어떻게 처리하나요?",
+        "그중 검토 큐는 왜 필요한가요?",
+        "이 경우 기존 근거는 유지되나요?",
+    ],
+)
+def test_korean_contextual_questions_continue_the_current_topic(text):
+    assert is_korean_explicit_continuation(text)

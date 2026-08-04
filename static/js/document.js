@@ -8859,7 +8859,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   /** Exit diff mode and apply resolved changes */
-  function exitDiffMode(discard) {
+  function exitDiffMode(discard, persist = true) {
     if (!_diffModeActive) return;
     _diffModeActive = false;
     const acceptedAnyDiffChunk = !discard && _diffChunks.some(chunk => chunk && chunk.resolved && chunk.accepted);
@@ -8925,7 +8925,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     syncHighlighting();
     updateLineNumbers(textarea ? textarea.value : '');
-    saveDocument({ silent: true });
+    if (persist) saveDocument({ silent: true });
     if (acceptedAnyDiffChunk) {
       const lang = ((docs.get(activeDocId)?.language) || document.getElementById('doc-language-select')?.value || '').toLowerCase();
       if (lang === 'markdown') {
@@ -9409,8 +9409,56 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   /** Save manual edits */
+  async function _recoverStaleDocumentSave(docId, localContent) {
+    const latestRes = await fetch(`${API_BASE}/api/document/${docId}`, {
+      credentials: 'same-origin',
+    });
+    if (!latestRes.ok) {
+      throw new Error(`Document conflict refresh failed: HTTP ${latestRes.status}`);
+    }
+    const latest = await latestRes.json();
+    const latestContent = latest.current_content || '';
+
+    // The user may have switched tabs while the refresh was in flight. Keep
+    // the stale local body in the existing tab in that case, rather than
+    // replacing it off-screen with a server snapshot the user did not review.
+    if (activeDocId !== docId) return false;
+
+    const tracked = docs.get(docId);
+    if (tracked) {
+      tracked.content = latestContent;
+      tracked.version = latest.version_count || tracked.version || 1;
+      if (latest.title) tracked.title = latest.title;
+      if (latest.language) tracked.language = latest.language;
+    } else {
+      addDocToTabs(latest, latest.session_id);
+    }
+
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (textarea) textarea.value = latestContent;
+    populateEditor(docs.get(docId) || latest);
+    renderTabs();
+
+    if (latestContent !== localContent) {
+      // The server snapshot is the authoritative base. The user's unsaved
+      // body remains the proposed change and can be accepted/rejected using
+      // the same review UI as an AI edit. A later accepted save therefore
+      // carries the freshly-bound expected_version above.
+      enterDiffMode(latestContent, localContent);
+    }
+    if (uiModule) {
+      uiModule.showError('문서가 다른 작업에서 갱신되었습니다. 최신 버전과 로컬 편집을 비교 검토하세요.');
+    }
+    return true;
+  }
+
   export async function saveDocument({ silent = false, forceVersion = false } = {}) {
     if (!activeDocId) return;
+    // An authoritative AI update is already committed server-side before its
+    // review diff opens.  The textarea intentionally still shows the previous
+    // version until Accept/Reject; autosaving it here would create a stale
+    // manual version and overwrite the authoritative document.
+    if (_diffModeActive) return;
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
     const savingDocId = activeDocId;
@@ -9426,6 +9474,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         body: JSON.stringify({
           content: contentToSave,
           force_version: !!forceVersion,
+          expected_version: localDoc?.version ?? null,
           summary: forceVersion ? 'Saved version' : undefined,
         }),
       });
@@ -9444,6 +9493,24 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         _syncDocIndicator();
         if (!silent && uiModule) uiModule.showError('Document no longer exists');
         return;
+      }
+      if (res.status === 409) {
+        let detail = null;
+        try {
+          const payload = await res.json();
+          detail = payload && payload.detail;
+        } catch (_) {}
+        if (detail && detail.code === 'stale_document_version') {
+          try {
+            await _recoverStaleDocumentSave(savingDocId, contentToSave);
+          } catch (refreshError) {
+            console.error('Failed to refresh stale document:', refreshError);
+            if (uiModule) {
+              uiModule.showError('문서 충돌을 확인했지만 최신 버전을 불러오지 못했습니다. 로컬 편집은 그대로 유지됩니다.');
+            }
+          }
+          return;
+        }
       }
       if (!res.ok) throw new Error(`Document save failed: HTTP ${res.status}`);
       const doc = await res.json();
@@ -10314,9 +10381,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // open on the current one, streamDocOpen reassigns activeDocId below; if the
     // stale diff isn't cleared first, a later exitDiffMode applies the old doc's
     // content to the new one and overwrites it (issue #2467). activeDocId still
-    // points at the previously-active doc here, so exitDiffMode(true) restores
-    // and saves THAT doc — same guard handleDocUpdate/switchToDoc use.
-    if (_diffModeActive) exitDiffMode(true);
+    // points at the previously-active doc here. The server is authoritative, so
+    // discard the stale review UI without PUT-ing its old body over the newer
+    // AI version.
+    if (_diffModeActive) exitDiffMode(true, false);
     // If already streaming a doc, reuse it (don't create a second temp doc)
     if (_streamDocId && docs.has(_streamDocId)) {
       const existing = docs.get(_streamDocId);
@@ -10587,10 +10655,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // opened; if we switch documents without clearing it, a later tab switch or
     // Accept/Reject-All flushes the stale diff's content into the now-active
     // doc and silently overwrites it (issue #2467). activeDocId still points at
-    // the previously-active doc here, so exitDiffMode(true) restores and saves
-    // THAT doc before we reassign activeDocId below — mirroring switchToDoc()
-    // and enterDiffMode().
-    if (_diffModeActive) exitDiffMode(true);
+    // the previously-active doc here. The DB already contains data.version, so
+    // persisting the discarded editor body would race and overwrite that newer
+    // AI version.
+    if (_diffModeActive) exitDiffMode(true, false);
     let docId = data.doc_id;
     let newContent = data.content || '';
 
@@ -10660,8 +10728,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (reuseId) docId = reuseId;
     }
 
-    // Capture old content before updating the map
-    const textarea = document.getElementById('doc-editor-textarea');
+    // Capture old content before updating the map. The pane can still be
+    // closed at this point, so this reference may need rebinding below.
+    let textarea = document.getElementById('doc-editor-textarea');
     const oldContent = (docId === activeDocId && textarea) ? textarea.value : '';
     const isExistingDoc = docs.has(docId);
     if (isExistingDoc) {
@@ -10718,6 +10787,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!data.title) autoTitleFromContent(newContent, docId);
 
     if (!isOpen) openPanel();
+    // openPanel() creates the editor when this SSE update arrived while the
+    // document pane was closed. Without rebinding, the tab appears blank and
+    // the next chat send's preflight save overwrites the saved AI artifact.
+    textarea = document.getElementById('doc-editor-textarea');
 
     // Force doc button visible (overrides appearance settings & toolbar collapse)
     const toggleBtn = document.getElementById('overflow-doc-btn');

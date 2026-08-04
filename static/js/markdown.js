@@ -689,7 +689,11 @@ export function mdToHtml(src, opts) {
     let html = '<table style="border-collapse: collapse; width: 100%; margin: 10px 0;">';
 
     rows.forEach((row, idx) => {
-      if (idx === 1 && /^[\s|:\-]+$/.test(row)) {
+      // Be tolerant of the visual dash glyphs Korean/English models sometimes
+      // emit for a table divider (—, –, ─, ━).  Only a whole row made of
+      // whitespace, pipes, colons and divider glyphs is accepted, so prose is
+      // never discarded as a separator.
+      if (idx === 1 && /^[\s|:\-\u2013\u2014\u2500\u2501]+$/.test(row)) {
         html += '<tbody>';
         return;
       }

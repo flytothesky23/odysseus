@@ -51,3 +51,19 @@ def test_doc_update_refreshes_preview_instead_of_hidden_editor_animation():
     assert refresh in body
     assert body.index(refresh) < body.index(animate)
     assert "_refreshMarkdownPreviewIfVisible(docId, newContent);" in body
+
+
+def test_doc_update_rebinds_editor_after_opening_a_closed_panel():
+    body = _function_body("handleDocUpdate")
+
+    capture = "let textarea = document.getElementById('doc-editor-textarea');"
+    open_panel = "if (!isOpen) openPanel();"
+    rebind = "textarea = document.getElementById('doc-editor-textarea');"
+    apply_content = "textarea.value = newContent;"
+
+    assert capture in body
+    open_at = body.index(open_panel)
+    rebind_at = body.find(rebind, open_at)
+    assert rebind_at >= 0
+    assert body.index(capture) < open_at < rebind_at
+    assert rebind_at < body.index(apply_content)

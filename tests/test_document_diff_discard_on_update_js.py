@@ -22,8 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC_JS = (ROOT / "static/js/document.js").read_text()
+DOC_CACHE_KEY = "20260804webcontext2"
 
-GUARD = "if (_diffModeActive) exitDiffMode(true);"
+AUTHORITATIVE_UPDATE_GUARD = "if (_diffModeActive) exitDiffMode(true, false);"
 
 
 def _function_body(src: str, signature: str) -> str:
@@ -44,19 +45,23 @@ def _function_body(src: str, signature: str) -> str:
 
 HANDLE_DOC_UPDATE = _function_body(DOC_JS, "export function handleDocUpdate(data)")
 STREAM_DOC_OPEN = _function_body(DOC_JS, "export function streamDocOpen(title, language)")
+_SAVE_DOCUMENT_START = DOC_JS.index("export async function saveDocument(")
+_SAVE_DOCUMENT_END = DOC_JS.index("\n  /**", _SAVE_DOCUMENT_START + 1)
+SAVE_DOCUMENT = DOC_JS[_SAVE_DOCUMENT_START:_SAVE_DOCUMENT_END]
+STALE_SAVE_RECOVERY = _function_body(DOC_JS, "async function _recoverStaleDocumentSave(docId, localContent)")
 
 
 def test_handle_doc_update_discards_pending_diff():
     # A new AI update on a different document must not leave a stale diff bound
     # to the old doc, or a later tab switch / Accept-All overwrites the wrong doc.
-    assert GUARD in HANDLE_DOC_UPDATE
+    assert AUTHORITATIVE_UPDATE_GUARD in HANDLE_DOC_UPDATE
 
 
 def test_diff_discard_runs_before_active_doc_is_switched():
     # The discard must run while activeDocId still points at the previously
-    # active doc, so exitDiffMode(true) restores and saves THAT doc — not the new
-    # one. Any activeDocId reassignment inside handleDocUpdate must come after it.
-    guard_at = HANDLE_DOC_UPDATE.index(GUARD)
+    # active doc, and it must not persist the stale body. Any activeDocId
+    # reassignment inside handleDocUpdate must come after it.
+    guard_at = HANDLE_DOC_UPDATE.index(AUTHORITATIVE_UPDATE_GUARD)
     reassign_at = HANDLE_DOC_UPDATE.index("activeDocId = docId;")
     assert guard_at < reassign_at
 
@@ -66,12 +71,55 @@ def test_stream_doc_open_discards_pending_diff_before_switching():
     # streamDocOpen (before any doc_update reaches handleDocUpdate), so the guard
     # must be here too — and before streamDocOpen reassigns activeDocId, or the
     # streamed new doc gets overwritten by the stale diff (the issue's own repro).
-    assert GUARD in STREAM_DOC_OPEN
-    assert STREAM_DOC_OPEN.index(GUARD) < STREAM_DOC_OPEN.index("activeDocId = docId;")
+    assert AUTHORITATIVE_UPDATE_GUARD in STREAM_DOC_OPEN
+    assert STREAM_DOC_OPEN.index(AUTHORITATIVE_UPDATE_GUARD) < STREAM_DOC_OPEN.index("activeDocId = docId;")
 
 
-def test_diff_discard_reuses_the_existing_idiom():
-    # Sanity: this exact guard is the established pattern (switchToDoc,
-    # enterDiffMode, handleDocUpdate, streamDocOpen, …) — the fix reuses it
-    # rather than inventing a new mechanism.
-    assert DOC_JS.count(GUARD) >= 5
+def test_authoritative_update_discard_never_persists_the_stale_editor_body():
+    exit_body = _function_body(DOC_JS, "function exitDiffMode(discard, persist = true)")
+
+    assert "if (persist) saveDocument({ silent: true });" in exit_body
+    assert DOC_JS.count(AUTHORITATIVE_UPDATE_GUARD) >= 2
+
+
+def test_autosave_does_not_persist_unresolved_ai_diff_body():
+    guard = "if (_diffModeActive) return;"
+
+    assert guard in SAVE_DOCUMENT
+    assert SAVE_DOCUMENT.index(guard) < SAVE_DOCUMENT.index("saveCurrentToMap();")
+
+
+def test_stale_manual_save_refreshes_latest_version_and_preserves_local_body_for_review():
+    assert "res.status === 409" in SAVE_DOCUMENT
+    assert "detail.code === 'stale_document_version'" in SAVE_DOCUMENT
+    assert "await _recoverStaleDocumentSave(savingDocId, contentToSave);" in SAVE_DOCUMENT
+
+    assert "credentials: 'same-origin'" in STALE_SAVE_RECOVERY
+    assert "tracked.version = latest.version_count" in STALE_SAVE_RECOVERY
+    assert "enterDiffMode(latestContent, localContent);" in STALE_SAVE_RECOVERY
+    assert STALE_SAVE_RECOVERY.index("tracked.version = latest.version_count") < STALE_SAVE_RECOVERY.index(
+        "enterDiffMode(latestContent, localContent);"
+    )
+
+
+def test_stale_save_tab_switch_does_not_replace_unreviewed_local_content_offscreen():
+    guard = "if (activeDocId !== docId) return false;"
+
+    assert guard in STALE_SAVE_RECOVERY
+    assert STALE_SAVE_RECOVERY.index(guard) < STALE_SAVE_RECOVERY.index("tracked.content = latestContent;")
+
+
+def test_document_module_cache_key_is_bumped_consistently():
+    references = [
+        ROOT / "static/index.html",
+        ROOT / "static/app.js",
+        ROOT / "static/js/chat.js",
+        ROOT / "static/js/chatStream.js",
+        ROOT / "static/js/slashCommands.js",
+        ROOT / "static/js/chatRenderer.js",
+        ROOT / "static/js/emailLibrary.js",
+    ]
+
+    for path in references:
+        source = path.read_text()
+        assert f"document.js?v={DOC_CACHE_KEY}" in source, path

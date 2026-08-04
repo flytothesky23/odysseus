@@ -22,9 +22,9 @@ clear_fake_database_modules()
 
 import core.database as cdb
 import routes.document_routes as droutes
-from core.database import Document
+from core.database import Document, DocumentVersion
 from core.database import Session as DbSession
-from routes.document_helpers import DocumentPatch
+from routes.document_helpers import DocumentPatch, DocumentUpdate
 from routes.document_helpers import _owner_session_filter
 
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -153,6 +153,52 @@ def test_owner_session_filter_noops_for_auth_disabled_single_user(monkeypatch):
         try:
             q = db.query(Document).filter(Document.id == alice_doc)
             assert _owner_session_filter(q, None).first().id == alice_doc
+        finally:
+            db.close()
+    finally:
+        droutes.SessionLocal = previous_session_local
+
+
+@pytest.mark.asyncio
+async def test_update_document_rejects_stale_editor_version_without_overwriting_ai_update():
+    previous_session_local = _bind_test_db()
+    try:
+        update_document = _endpoint("PUT", "/api/document/{doc_id}")
+        _alice_session, _bob_session, alice_doc, _bob_doc, _legacy_doc = _seed()
+        db = _TS()
+        try:
+            doc = db.query(Document).filter(Document.id == alice_doc).one()
+            doc.current_content = "authoritative AI update"
+            doc.version_count = 2
+            db.add(DocumentVersion(
+                id=str(uuid.uuid4()),
+                document_id=alice_doc,
+                version_number=2,
+                content=doc.current_content,
+                summary="AI update",
+                source="ai",
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        with pytest.raises(HTTPException) as exc:
+            await update_document(
+                _req("alice"),
+                alice_doc,
+                DocumentUpdate(content="stale editor body", expected_version=1),
+            )
+
+        assert exc.value.status_code == 409
+        db = _TS()
+        try:
+            doc = db.query(Document).filter(Document.id == alice_doc).one()
+            versions = db.query(DocumentVersion).filter(
+                DocumentVersion.document_id == alice_doc
+            ).order_by(DocumentVersion.version_number).all()
+            assert doc.current_content == "authoritative AI update"
+            assert doc.version_count == 2
+            assert [(v.version_number, v.source) for v in versions] == [(2, "ai")]
         finally:
             db.close()
     finally:

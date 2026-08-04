@@ -136,6 +136,31 @@ def test_table_separator_row_not_rendered_as_data(node_available):
     assert "---" not in html
 
 
+@pytest.mark.parametrize("separator", ["—", "–", "─", "━"])
+def test_korean_comparison_table_accepts_model_unicode_separator(
+    node_available, separator
+):
+    """Models sometimes emit a visual dash glyph instead of ASCII ``---``.
+
+    That output is unambiguous when every separator cell contains only dash
+    glyphs, so the settled browser renderer should still produce a real table
+    rather than exposing the separator as a data row or literal pipe text.
+    """
+
+    rule = separator * 3
+    html = _run_markdown_case(
+        "| 자료 | 중심 관점 | 핵심 내용 |\n"
+        f"| {rule} | {rule} | {rule} |\n"
+        "| 공식 문서 | 제품 경험 | 한국어 비교 결과 |"
+    )
+
+    assert html.count("<table") == 1
+    assert html.count("<tr>") == 2
+    assert "<th" in html
+    assert "<td" in html
+    assert rule not in html
+
+
 def test_table_with_inline_citations_and_code_renders_as_table(node_available):
     html = _run_markdown_case(
         "| 자료 | 중심 관점 | 핵심 내용 |\n"

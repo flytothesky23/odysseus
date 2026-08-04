@@ -47,9 +47,12 @@ try:
         _limit_strict_legal_tool_blocks,
         _limit_strict_web_tool_blocks,
         _prior_verified_web_sources,
+        _prior_verified_web_evidence,
+        _recent_context_for_retrieval,
         _select_answer_web_sources,
         _web_tool_call_limit,
         _web_completion_problem,
+        _wants_web_delta_retrieval,
         _wants_prior_web_evidence_reuse,
         _MCP_KEYWORDS,
     )
@@ -199,6 +202,40 @@ def test_korean_new_topic_does_not_reuse_stale_web_context():
     assert "최신 Codex 릴리스" not in intent["retrieval_query"]
 
 
+def test_korean_repair_turn_resolves_to_last_substantive_question():
+    substantive = (
+        "현재 Vault와 정리된 LLM Wiki Vault를 분리해 운영하는 세부 방안을 "
+        "웹 근거와 함께 안내해줘."
+    )
+    messages = [
+        {"role": "user", "content": "이전에는 계약서 보존 방식을 물었습니다."},
+        {"role": "assistant", "content": "이전 주제에 답했습니다."},
+        {"role": "user", "content": substantive},
+        {"role": "assistant", "content": "웹 근거를 답변에 연결하지 못했습니다."},
+        {"role": "user", "content": "제대로 피드백을 못하신듯 마지막 질문에 대한"},
+        {"role": "assistant", "content": "다시 시도해 주세요."},
+        {"role": "user", "content": "위의 맥락이 이상한데 질문에 답이 아닌듯"},
+    ]
+
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is True
+    assert intent["retrieval_query"] == substantive
+    assert _recent_context_for_retrieval(messages) == substantive
+    assert _wants_prior_web_evidence_reuse(messages[-1]["content"])
+
+
+def test_fresh_followup_requests_delta_retrieval_not_plain_reuse():
+    text = "방금 답변의 기존 근거는 유지하고 최신 사례를 추가로 웹에서 찾아 보완해줘."
+
+    assert _wants_web_delta_retrieval(text)
+    assert not _wants_web_delta_retrieval("방금 확인한 같은 근거만 다시 설명해줘.")
+    assert not _wants_web_delta_retrieval(
+        "방금 확인한 같은 두 공식 근거만 재사용해서, 두 기능 중 비개발자에게 "
+        "더 직접적인 기능을 한 문장으로 설명해 주세요. 새 웹검색은 하지 마세요."
+    )
+
+
 def test_web_completion_rejects_korean_plan_instead_of_answer():
     problem = _web_completion_problem(
         "이번에는 GitHub와 Reddit을 교차 검증해서 정리하겠습니다.",
@@ -266,7 +303,16 @@ def test_prior_web_evidence_reuse_requires_verified_metadata_and_explicit_refere
                         "usable": False,
                         "evidence_status": "candidate",
                     },
-                ]
+                ],
+                "tool_events": [{
+                    "tool": "web_fetch",
+                    "command": "https://openai.com/example",
+                    "output": (
+                        "PRIOR_FETCHED_BODY_SENTINEL\n"
+                        "Source: https://openai.com/example"
+                    ),
+                    "exit_code": 0,
+                }],
             },
         },
         {"role": "user", "content": "방금 확인한 같은 근거만 재사용해서 설명해줘."},
@@ -282,6 +328,119 @@ def test_prior_web_evidence_reuse_requires_verified_metadata_and_explicit_refere
             "evidence_status": "fetched",
         }
     ]
+    assert "PRIOR_FETCHED_BODY_SENTINEL" in _prior_verified_web_evidence(messages)
+
+
+def test_prior_web_evidence_body_is_not_inferred_from_source_metadata_only():
+    messages = [{
+        "role": "assistant",
+        "content": "요약 [1].",
+        "metadata": {
+            "web_sources": [{
+                "url": "https://example.test/source",
+                "title": "Source",
+                "fetched": True,
+                "usable": True,
+                "evidence_status": "fetched",
+            }],
+        },
+    }]
+
+    assert _prior_verified_web_sources(messages)
+    assert _prior_verified_web_evidence(messages) == ""
+
+
+def test_prior_web_evidence_excludes_successful_events_outside_verified_manifest():
+    verified_url = "https://official.example/guide"
+    messages = [{
+        "role": "assistant",
+        "content": "검증된 답변 [1].",
+        "metadata": {
+            "web_sources": [{
+                "url": verified_url,
+                "title": "Official guide",
+                "fetched": True,
+                "usable": True,
+                "evidence_status": "fetched",
+            }],
+            "tool_events": [
+                {
+                    "tool": "web_search",
+                    "command": "unrelated repair complaint",
+                    "output": (
+                        "UNRELATED_BODY_MUST_NOT_BE_REUSED\n"
+                        "https://unrelated.example/post"
+                    ),
+                    "exit_code": 0,
+                },
+                {
+                    "tool": "web_fetch",
+                    "command": verified_url,
+                    "output": f"VERIFIED_BODY_MUST_BE_REUSED\nSource: {verified_url}",
+                    "exit_code": 0,
+                },
+            ],
+        },
+    }]
+
+    evidence = _prior_verified_web_evidence(messages)
+
+    assert "VERIFIED_BODY_MUST_BE_REUSED" in evidence
+    assert "UNRELATED_BODY_MUST_NOT_BE_REUSED" not in evidence
+
+
+def test_prior_web_evidence_extracts_only_verified_fetched_blocks_from_search_output():
+    official_one = "https://openai.com/index/introducing-the-codex-app"
+    official_two = "https://github.com/openai/codex/blob/main/README.md?plain=1"
+    candidate = "https://untrusted.example/candidate"
+    messages = [{
+        "role": "assistant",
+        "content": "공식 자료 두 건을 비교했습니다 [1][2].",
+        "metadata": {
+            "web_sources": [
+                {
+                    "url": official_one,
+                    "title": "Introducing the Codex app",
+                    "fetched": True,
+                    "usable": True,
+                    "evidence_status": "fetched",
+                },
+                {
+                    "url": official_two,
+                    "title": "openai/codex README",
+                    "fetched": True,
+                    "usable": True,
+                    "evidence_status": "fetched",
+                },
+            ],
+            "tool_events": [{
+                "tool": "web_search",
+                "command": '{"query":"Codex official comparison"}',
+                "output": (
+                    "DISCOVERED CANDIDATES (not citable unless also fetched below):\n"
+                    f"[CANDIDATE 1] Untrusted\n    URL: {candidate}\n\n"
+                    "FETCHED PAGE CONTENT:\n"
+                    f"[CONTENT 1] From: {official_one}\n"
+                    "Title: Introducing the Codex app\n"
+                    "------------------------------\n"
+                    "OPENAI_OFFICIAL_BODY_SENTINEL\n\n"
+                    f"[CONTENT 2] From: {official_two}\n"
+                    "Title: openai/codex README\n"
+                    "------------------------------\n"
+                    "GITHUB_OFFICIAL_BODY_SENTINEL\n\n"
+                    "======================================================================\n"
+                    "END OF WEB SEARCH RESULTS\n"
+                ),
+                "exit_code": 0,
+            }],
+        },
+    }]
+
+    evidence = _prior_verified_web_evidence(messages)
+
+    assert "OPENAI_OFFICIAL_BODY_SENTINEL" in evidence
+    assert "GITHUB_OFFICIAL_BODY_SENTINEL" in evidence
+    assert candidate not in evidence
 
 
 def test_web_source_ledger_deduplicates_and_final_answer_selects_direct_links():
@@ -317,6 +476,35 @@ def test_web_source_ledger_deduplicates_and_final_answer_selects_direct_links():
         ledger,
     )
     assert [source["url"] for source in selected] == ["https://openai.com/second"]
+
+
+def test_web_source_ledger_keeps_prior_github_readme_identity_for_repo_root_alias():
+    """A delta search must not replace the verified README with its repo landing URL."""
+
+    readme_url = "https://github.com/openai/codex/blob/main/README.md?plain=1"
+    ledger, mapping = _merge_web_source_ledger(
+        [{
+            "url": readme_url,
+            "title": "openai/codex README",
+            "fetched": True,
+            "usable": True,
+        }],
+        [{
+            "url": "https://github.com/openai/codex",
+            "title": "openai/codex",
+            "fetched": True,
+            "usable": True,
+        }],
+    )
+
+    assert len(ledger) == 1
+    assert ledger[0]["url"] == readme_url
+    assert mapping == {1: 1}
+    selected = _select_answer_web_sources(
+        "공식 저장소 설명입니다 [GitHub](https://github.com/openai/codex).",
+        ledger,
+    )
+    assert [source["url"] for source in selected] == [readme_url]
 
 
 def test_web_completion_accepts_honest_failure_after_tool_error():

@@ -1,11 +1,325 @@
 from typing import Any, Dict, List, Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import logging
 import re
+from urllib.parse import urlparse
 from src.constants import MAX_READ_CHARS
 from src.tool_utils import _parse_tool_args, get_upload_handler
 from src.upload_handler import reserve_upload_references
 
 logger = logging.getLogger(__name__)
+
+_WEB_KNOWLEDGE_MARKER = "odysseus_artifact: web-knowledge"
+
+
+def _artifact_source_identity(url: str) -> str:
+    value = str(url or "").strip().rstrip(".,;:!?\"'")
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return value
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return value
+    host = parsed.netloc.casefold()
+    parts = [part for part in parsed.path.split("/") if part]
+    if host == "github.com" and len(parts) >= 2:
+        if len(parts) == 2 or (
+            len(parts) == 5
+            and parts[2].casefold() == "blob"
+            and parts[4].casefold() == "readme.md"
+        ):
+            return f"https://github.com/{parts[0].casefold()}/{parts[1].casefold()}"
+    path = parsed.path.rstrip("/") or "/"
+    return f"{parsed.scheme.lower()}://{host}{path}" + (
+        f"?{parsed.query}" if parsed.query else ""
+    )
+
+
+def _kst_now_iso() -> str:
+    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds")
+
+
+def _verified_artifact_sources(sources: Any) -> List[Dict[str, str]]:
+    verified: List[Dict[str, str]] = []
+    seen = set()
+    for source in sources or []:
+        if not isinstance(source, dict):
+            continue
+        url = str(source.get("url") or "").strip()
+        if (
+            not url.startswith(("https://", "http://"))
+            or source.get("fetched") is not True
+            or source.get("usable") is not True
+            or str(source.get("evidence_status") or "fetched") != "fetched"
+            or url in seen
+        ):
+            continue
+        seen.add(url)
+        verified.append({
+            "url": url,
+            "title": str(source.get("title") or url).strip() or url,
+        })
+    return verified
+
+
+def _web_artifact_title(query: str) -> str:
+    topic = re.sub(r"\s+", " ", str(query or "")).strip()
+    topic = re.sub(r"^WEB-E2E-[A-Z0-9-]+:\s*", "", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"https?://\S+", "", topic, flags=re.IGNORECASE)
+    topic = re.sub(r"\s+", " ", topic).strip()
+    topic = re.sub(
+        r"(?:웹에서|인터넷에서)?\s*(?:검색|조사|확인|분석|정리)(?:해|해서|하여)?"
+        r"(?:줘|주세요|해줘|해주세요)?[.!?\s]*$",
+        "",
+        topic,
+    ).strip()
+    if len(topic) > 64:
+        topic = topic[:61].rstrip() + "…"
+    return f"웹 지식 · {topic or '검증된 검색 정리'}"
+
+
+def _artifact_source_lines(sources: List[Dict[str, str]]) -> str:
+    def _label(value: str) -> str:
+        return str(value or "").replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+    def _url(value: str) -> str:
+        return str(value or "").replace("(", "%28").replace(")", "%29")
+
+    return "\n".join(
+        f"- [{_label(source['title'])}]({_url(source['url'])})"
+        for source in sources
+    )
+
+
+def _build_initial_web_artifact(
+    *, title: str, answer: str, sources: List[Dict[str, str]], updated_at: str
+) -> str:
+    return (
+        "---\n"
+        f"{_WEB_KNOWLEDGE_MARKER}\n"
+        "artifact_status: evolving\n"
+        f"updated_at: {updated_at}\n"
+        f"source_count: {len(sources)}\n"
+        "---\n\n"
+        f"# {title.removeprefix('웹 지식 · ')}\n\n"
+        "## 핵심 정리\n\n"
+        f"{answer.strip()}\n\n"
+        "## 검증 근거\n\n"
+        f"{_artifact_source_lines(sources)}\n\n"
+        "## 업데이트 기록\n\n"
+        f"- {updated_at} · 최초 웹 근거 정리"
+    )
+
+
+def _append_web_artifact_update(
+    existing: str,
+    *,
+    answer: str,
+    sources: List[Dict[str, str]],
+    updated_at: str,
+    delta: bool,
+    repair: bool,
+) -> str:
+    # Only Markdown links in the artifact are verified evidence references.
+    # A raw URL can also appear in the original query heading (and may be
+    # truncated with an ellipsis); counting that display text inflated the
+    # stored source_count on a same-evidence follow-up.
+    existing_urls = set(
+        re.findall(r"\]\((https?://[^)\s]+)\)", existing or "", re.IGNORECASE)
+    )
+    existing_identities = {_artifact_source_identity(url) for url in existing_urls}
+    new_sources = [
+        source for source in sources
+        if _artifact_source_identity(source["url"]) not in existing_identities
+    ]
+    if new_sources:
+        evidence = _artifact_source_lines(new_sources)
+    else:
+        evidence = "- 기존 문서의 검증 근거를 재사용했습니다."
+    reason = "증분 웹 근거 보완" if delta else "맥락 복구·답변 보완" if repair else "후속 답변 반영"
+    unique_identities = existing_identities | {
+        _artifact_source_identity(source["url"]) for source in sources
+    }
+    frontmatter = re.match(r"\A---\r?\n(.*?)\r?\n---(?=\r?\n|\Z)", existing, re.DOTALL)
+    if frontmatter:
+        fields = []
+        insert_at = 0
+        for line in frontmatter.group(1).splitlines():
+            if re.match(r"^(?:updated_at|source_count):\s*", line):
+                continue
+            fields.append(line)
+            if line.startswith("artifact_status:"):
+                insert_at = len(fields)
+        fields[insert_at:insert_at] = [
+            f"updated_at: {updated_at}",
+            f"source_count: {len(unique_identities)}",
+        ]
+        normalized = "---\n" + "\n".join(fields) + "\n---"
+        updated = normalized + existing[frontmatter.end():]
+    else:
+        updated = existing
+    return (
+        updated.rstrip()
+        + "\n\n---\n\n"
+        + f"## 후속 보완 · {updated_at}\n\n"
+        + answer.strip()
+        + "\n\n### 이번 보완의 검증 근거\n\n"
+        + evidence
+        + "\n\n### 변경 기록\n\n"
+        + f"- {updated_at} · {reason}"
+    )
+
+
+async def upsert_web_knowledge_artifact(
+    *,
+    session_id: str,
+    owner: Optional[str],
+    query: str,
+    answer: str,
+    sources: Any,
+    continuation: bool,
+    delta: bool,
+    repair: bool,
+) -> Dict[str, Any]:
+    """Create or version a verified web-synthesis document.
+
+    Only accepted final answers reach this helper.  Initial lightweight lookups
+    stay in chat; complex or multi-source synthesis becomes one evolving
+    Documents artifact.  Follow-ups update that same artifact and its immutable
+    version history instead of creating unrelated ``Code (markdown)`` files.
+    """
+
+    import uuid
+    from core.database import SessionLocal, Document, DocumentVersion, Session as DbSession
+
+    verified_sources = _verified_artifact_sources(sources)
+    if not session_id or not verified_sources or not str(answer or "").strip():
+        return {"action": "skip", "reason": "no_verified_web_synthesis"}
+
+    db = SessionLocal()
+    try:
+        chat_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if not chat_session:
+            return {"error": "Chat session not found"}
+        if owner is not None and chat_session.owner != owner:
+            return {
+                "error": "Cannot write a knowledge artifact in another user's session"
+            }
+        artifact_owner = chat_session.owner
+
+        artifact_query = db.query(Document).filter(
+            Document.session_id == session_id,
+            Document.owner == artifact_owner,
+            Document.current_content.like(f"%{_WEB_KNOWLEDGE_MARKER}%"),
+        )
+        existing = (
+            artifact_query.order_by(Document.updated_at.desc()).first()
+            if continuation or delta or repair
+            else None
+        )
+
+        is_complex = (
+            len(str(answer or "")) >= 500
+            or len(verified_sources) >= 2
+            or len(re.findall(r"(?m)^#{1,3}\s+", str(answer or ""))) >= 2
+        )
+        if existing is None and not is_complex:
+            return {"action": "skip", "reason": "lightweight_web_answer"}
+
+        updated_at = _kst_now_iso()
+        missing_id = _missing_document_upload(artifact_owner, answer)
+        if missing_id:
+            return {
+                "error": f"Referenced upload is no longer available: {missing_id}",
+                "exit_code": 1,
+            }
+
+        if existing is not None:
+            content = _append_web_artifact_update(
+                existing.current_content or "",
+                answer=answer,
+                sources=verified_sources,
+                updated_at=updated_at,
+                delta=delta,
+                repair=repair,
+            )
+            version = int(existing.version_count or 0) + 1
+            db.add(DocumentVersion(
+                id=str(uuid.uuid4()),
+                document_id=existing.id,
+                version_number=version,
+                content=content,
+                summary=f"Web knowledge follow-up · {updated_at}",
+                source="ai",
+            ))
+            existing.current_content = content
+            existing.version_count = version
+            existing.is_active = True
+            db.commit()
+            set_active_document(existing.id)
+            result = {
+                "action": "update",
+                "doc_id": existing.id,
+                "title": existing.title,
+                "language": "markdown",
+                "content": content,
+                "version": version,
+            }
+        else:
+            # Keep only the current web-knowledge artifact open in the chat.
+            # Manual Documents and unrelated artifacts are never touched.
+            for prior in artifact_query.filter(Document.is_active == True).all():
+                prior.is_active = False
+            title = _web_artifact_title(query)
+            content = _build_initial_web_artifact(
+                title=title,
+                answer=answer,
+                sources=verified_sources,
+                updated_at=updated_at,
+            )
+            doc_id = str(uuid.uuid4())
+            db.add(Document(
+                id=doc_id,
+                session_id=session_id,
+                title=title,
+                language="markdown",
+                current_content=content,
+                version_count=1,
+                is_active=True,
+                owner=artifact_owner,
+            ))
+            db.add(DocumentVersion(
+                id=str(uuid.uuid4()),
+                document_id=doc_id,
+                version_number=1,
+                content=content,
+                summary=f"Web knowledge created · {updated_at}",
+                source="ai",
+            ))
+            db.commit()
+            set_active_document(doc_id)
+            result = {
+                "action": "create",
+                "doc_id": doc_id,
+                "title": title,
+                "language": "markdown",
+                "content": content,
+                "version": 1,
+            }
+
+        try:
+            from src.event_bus import fire_event
+            fire_event("document_created", artifact_owner)
+        except Exception:
+            logger.debug("web knowledge artifact event dispatch failed", exc_info=True)
+        return result
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Failed to upsert web knowledge artifact")
+        return {"error": f"Failed to upsert web knowledge artifact: {exc}"}
+    finally:
+        db.close()
 
 
 def _missing_document_upload(owner: Optional[str], content: Any) -> Optional[str]:

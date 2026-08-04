@@ -646,6 +646,18 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             if doc.current_content == incoming_content and not req.force_version:
                 return _doc_to_dict(doc)
 
+            if (
+                req.expected_version is not None
+                and int(doc.version_count or 0) != int(req.expected_version)
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "stale_document_version",
+                        "current_version": int(doc.version_count or 0),
+                    },
+                )
+
             _reserve_document_uploads(user, incoming_content)
             _assert_pdf_marker_upload_owned(request, incoming_content, user, upload_handler)
 

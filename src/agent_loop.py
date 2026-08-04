@@ -31,6 +31,7 @@ from src.korean_semantics import (
     detect_korean_domains,
     is_korean_casual_low_signal,
     is_korean_explicit_continuation,
+    is_korean_repair_followup,
     looks_like_korean_action_promise,
 )
 from src.agent_tools import (
@@ -40,6 +41,7 @@ from src.agent_tools import (
     format_tool_result,
     set_active_document,
     set_active_model,
+    upsert_web_knowledge_artifact,
     function_call_to_tool_block,
     FUNCTION_TOOL_SCHEMAS,
     TOOL_TAGS,
@@ -212,12 +214,46 @@ _PRIOR_WEB_REUSE_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_WEB_DELTA_RE = re.compile(
+    r"(?:"
+    r"(?:최신|새로운|추가|더|증분|업데이트).{0,40}"
+    r"(?:검색|찾아|조회|근거|출처|자료|사례)|"
+    r"(?:검색|찾아|조회).{0,40}(?:최신|새로운|추가|더|증분|보완)|"
+    r"(?:fresh|new|latest|additional|delta).{0,40}"
+    r"(?:search|source|evidence|example|case)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_WEB_RETRIEVAL_NEGATION_RE = re.compile(
+    r"(?:"
+    r"(?:새(?:로운)?|추가|별도)?\s*(?:웹\s*)?(?:검색|조회).{0,16}"
+    r"(?:하지\s*마|하지\s*말|말아|없이|불필요|금지)|"
+    r"(?:검색|조회).{0,12}(?:하지\s*마|하지\s*말|말아)|"
+    r"(?:no|without)\s+(?:a\s+)?(?:new|additional|fresh)?\s*"
+    r"(?:web\s+)?(?:search|lookup)|"
+    r"do\s+not\s+(?:search|browse)(?:\s+again)?"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _wants_prior_web_evidence_reuse(text: str) -> bool:
     """Return whether the user explicitly asks to reuse the prior web evidence."""
 
-    return bool(_PRIOR_WEB_REUSE_RE.search(str(text or "")))
+    value = str(text or "")
+    return bool(_PRIOR_WEB_REUSE_RE.search(value) or is_korean_repair_followup(value))
+
+
+def _wants_web_delta_retrieval(text: str) -> bool:
+    """Whether a follow-up explicitly asks to add fresh web evidence."""
+
+    value = str(text or "")
+    if (
+        _WEB_RETRIEVAL_NEGATION_RE.search(value)
+        and _wants_prior_web_evidence_reuse(value)
+    ):
+        return False
+    return bool(_WEB_DELTA_RE.search(value))
 
 
 def _normalise_web_source_url(url: str) -> str:
@@ -240,6 +276,34 @@ def _normalise_web_source_url(url: str) -> str:
     return f"{parsed.scheme.lower()}://{host}{path}" + (
         f"?{parsed.query}" if parsed.query else ""
     )
+
+
+def _web_source_identity_key(url: str) -> str:
+    """Return the logical identity used by the stable evidence ledger.
+
+    GitHub exposes a repository's root README both at the repository landing
+    URL and at ``/blob/<branch>/README.md?plain=1``. Delta lookup results can
+    alternate between those representations even though they identify the same
+    repository-level source. Preserve the first verified URL instead of double
+    counting or silently replacing an already-pinned source.
+    """
+
+    normalized = _normalise_web_source_url(url)
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    if parsed.netloc.casefold() != "github.com":
+        return normalized
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) == 2:
+        return f"https://github.com/{parts[0].casefold()}/{parts[1].casefold()}"
+    if (
+        len(parts) == 5
+        and parts[2].casefold() == "blob"
+        and parts[4].casefold() == "readme.md"
+    ):
+        return f"https://github.com/{parts[0].casefold()}/{parts[1].casefold()}"
+    return normalized
 
 
 def _verified_web_source(source: Any) -> Optional[Dict[str, Any]]:
@@ -288,6 +352,121 @@ def _prior_verified_web_sources(messages: List[Dict]) -> List[Dict[str, Any]]:
     return []
 
 
+def _prior_verified_web_evidence(
+    messages: List[Dict], max_chars: int = 12_000
+) -> str:
+    """Return bounded fetched bodies paired with the latest source manifest.
+
+    A URL/title manifest proves identity but is not enough evidence for a new
+    synthesis.  Reuse only persisted successful web tool output from the same
+    assistant message, and wrap it as untrusted context before sending it to a
+    model.  Older rows without body-bearing tool events must be re-fetched.
+    """
+
+    for message in reversed(list(messages or [])):
+        if str(message.get("role") or "") != "assistant":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        sources = metadata.get("web_sources")
+        verified_sources = [
+            checked
+            for checked in (
+                _verified_web_source(source) for source in (sources or [])
+            )
+            if checked is not None
+        ]
+        if not isinstance(sources, list) or not verified_sources:
+            continue
+        verified_keys = {
+            _web_source_identity_key(source["url"])
+            for source in verified_sources
+        }
+        events = metadata.get("tool_events")
+        if not isinstance(events, list):
+            return ""
+        bodies_by_key: Dict[str, str] = {}
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            tool = str(event.get("tool") or event.get("desc") or "").strip()
+            if tool not in WEB_TOOL_NAMES or event.get("exit_code") not in (0, None):
+                continue
+            output = str(event.get("output") or "").strip()
+            if not output:
+                continue
+            command = str(event.get("command") or "").strip()
+            command_url = command
+            if command.startswith("{"):
+                try:
+                    parsed_command = json.loads(command)
+                    if isinstance(parsed_command, dict):
+                        command_url = str(parsed_command.get("url") or "")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    command_url = ""
+            command_key = _web_source_identity_key(command_url)
+            if tool == "web_fetch":
+                # A fetch is one page: its requested URL must be one of the
+                # final fetched/cited identities for this assistant message.
+                if command_key not in verified_keys:
+                    continue
+                bodies_by_key[command_key] = output
+            elif tool == "web_search":
+                # Search output also contains discovered-but-unread candidates.
+                # Extract only explicit FETCHED PAGE CONTENT blocks whose URL
+                # survived into the final verified manifest.  A blanket URL
+                # subset check rejected real successful turns because candidate
+                # URLs legitimately coexist with fetched bodies in one result.
+                matched_block = False
+                for match in re.finditer(
+                    r"(?ms)^\[CONTENT\s+\d+\]\s+From:\s+"
+                    r"(https?://[^\s]+)\s*\n(.*?)"
+                    r"(?=^\[CONTENT\s+\d+\]\s+From:\s+https?://|"
+                    r"^={10,}\s*\nEND OF WEB SEARCH RESULTS|\Z)",
+                    output,
+                ):
+                    block_url = match.group(1).rstrip(".,;:!?)\"]}")
+                    block_key = _web_source_identity_key(block_url)
+                    if block_key not in verified_keys:
+                        continue
+                    matched_block = True
+                    bodies_by_key[block_key] = (
+                        f"[FETCHED SOURCE] {block_url}\n{match.group(2).strip()}"
+                    )
+                if matched_block:
+                    continue
+
+                # Backward compatibility for compact deterministic outputs
+                # that contain only verified URLs and no CONTENT delimiters.
+                output_keys = {
+                    key
+                    for key in (
+                        _web_source_identity_key(url)
+                        for url in re.findall(r"https?://[^\s)\]>]+", output)
+                    )
+                    if key
+                }
+                if output_keys and output_keys.issubset(verified_keys):
+                    for output_key in output_keys:
+                        bodies_by_key[output_key] = output
+        if not bodies_by_key:
+            return ""
+        per_source_chars = max(1_200, max_chars // max(1, len(verified_sources)))
+        excerpts: List[str] = []
+        for source in verified_sources:
+            key = _web_source_identity_key(source["url"])
+            body = bodies_by_key.get(key)
+            if not body:
+                continue
+            excerpts.append(
+                f"[VERIFIED FETCHED SOURCE] {source.get('title') or source['url']}\n"
+                f"URL: {source['url']}\n{body[:per_source_chars]}"
+            )
+        return "\n\n".join(excerpts)[:max_chars]
+    return ""
+
+
 def _merge_web_source_ledger(
     existing: List[Dict[str, Any]],
     incoming: List[Dict[str, Any]],
@@ -300,7 +479,7 @@ def _merge_web_source_ledger(
         if checked is not None
     ]
     index_by_url = {
-        _normalise_web_source_url(source["url"]): index
+        _web_source_identity_key(source["url"]): index
         for index, source in enumerate(ledger, 1)
     }
     local_to_global: Dict[int, int] = {}
@@ -308,7 +487,7 @@ def _merge_web_source_ledger(
         checked = _verified_web_source(item)
         if checked is None:
             continue
-        key = _normalise_web_source_url(checked["url"])
+        key = _web_source_identity_key(checked["url"])
         global_index = index_by_url.get(key)
         if global_index is None:
             ledger.append(checked)
@@ -348,7 +527,7 @@ def _answer_web_urls(text: str) -> List[str]:
     seen = set()
     for raw in re.findall(r"https?://[^\s\])}>]+", str(text or ""), re.IGNORECASE):
         url = raw.rstrip(".,;:!?\"'")
-        key = _normalise_web_source_url(url)
+        key = _web_source_identity_key(url)
         if key and key not in seen:
             seen.add(key)
             urls.append(url)
@@ -366,13 +545,13 @@ def _select_answer_web_sources(
     """
 
     by_url = {
-        _normalise_web_source_url(source.get("url")): source
+        _web_source_identity_key(source.get("url")): source
         for source in ledger or []
-        if _normalise_web_source_url(source.get("url"))
+        if _web_source_identity_key(source.get("url"))
     }
     direct = []
     for url in _answer_web_urls(text):
-        source = by_url.get(_normalise_web_source_url(url))
+        source = by_url.get(_web_source_identity_key(url))
         if source is not None and source not in direct:
             direct.append(source)
     if direct:
@@ -404,16 +583,16 @@ def _canonicalize_web_citations(
 
     value = str(text or "")
     selected_by_url = {
-        _normalise_web_source_url(source.get("url")): (display_index, source)
+        _web_source_identity_key(source.get("url")): (display_index, source)
         for display_index, source in enumerate(selected_sources or [], 1)
-        if _normalise_web_source_url(source.get("url"))
+        if _web_source_identity_key(source.get("url"))
     }
     global_by_index = {
         index: source for index, source in enumerate(ledger or [], 1)
     }
 
     def _link_for_url(url: str) -> Optional[str]:
-        entry = selected_by_url.get(_normalise_web_source_url(url))
+        entry = selected_by_url.get(_web_source_identity_key(url))
         if entry is None:
             return None
         display_index, source = entry
@@ -424,6 +603,13 @@ def _canonicalize_web_citations(
 
     value = re.sub(
         r"\[[^\]\n]*\[\[(\d+)\]\]\((https?://[^)\s]+)\)\]",
+        _replace_nested,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    value = re.sub(
+        r"\[[^\]\n]*\[(\d+)\]\]\((https?://[^)\s]+)\)",
         _replace_nested,
         value,
         flags=re.IGNORECASE,
@@ -445,7 +631,23 @@ def _canonicalize_web_citations(
             return match.group(0)
         return _link_for_url(str(source.get("url") or "")) or match.group(0)
 
-    return re.sub(r"(?<!\[)\[(\d+)\](?!\])", _replace_number, value)
+    value = re.sub(r"(?<!\[)\[(\d+)\](?!\])", _replace_number, value)
+    # A model can emit both an explicit URL citation and a numeric citation for
+    # the same sentence.  Both normalize to the same trusted link; collapse
+    # only immediately adjacent copies so deliberate citations elsewhere in
+    # the answer remain intact.
+    citation_pattern = r"\[출처 \d+\]\(https?://[^)\s]+\)"
+    value = re.sub(
+        rf"\*\*(?P<citation>{citation_pattern})\*\*",
+        r"\g<citation>",
+        value,
+    )
+    return re.sub(
+        rf"(?:\(\s*)?(?P<citation>{citation_pattern})(?:\s*\))?"
+        rf"(?:[ \t]+(?:\(\s*)?(?P=citation)(?:\s*\))?)+",
+        r"\g<citation>",
+        value,
+    )
 
 
 def _web_evidence_manifest(ledger: List[Dict[str, Any]]) -> str:
@@ -492,6 +694,82 @@ def _strict_web_retrieval_contract() -> str:
     )
 
 
+def _required_named_web_fetch_urls(text: str) -> List[str]:
+    """Resolve exact primary URLs that the user explicitly identifies.
+
+    The strict retrieval prompt tells the model to cover every named source,
+    but subscription models can still emit two near-identical discovery
+    searches and omit the second document.  Resolve only identities that are
+    unambiguous enough to fetch without guessing: literal URLs, a GitHub
+    ``owner/repo README`` reference, and the canonical OpenAI Codex app
+    introduction used by the product's official comparison journey.
+    """
+
+    value = str(text or "")
+    urls: List[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str) -> None:
+        cleaned = str(url or "").strip().rstrip(".,;:!?)\"]}")
+        key = _web_source_identity_key(cleaned)
+        if cleaned and key and key not in seen:
+            seen.add(key)
+            urls.append(cleaned)
+
+    for raw_url in re.findall(r"https?://[^\s)\]>]+", value, re.IGNORECASE):
+        _add(raw_url)
+
+    lowered = value.casefold()
+    if (
+        "openai" in lowered
+        and "codex" in lowered
+        and re.search(r"(?:앱\s*소개|app\s+(?:intro|introduction)|introducing\s+the\s+codex\s+app)", lowered)
+    ):
+        _add("https://openai.com/index/introducing-the-codex-app")
+
+    if "github" in lowered and "readme" in lowered:
+        for owner, repo in re.findall(
+            r"(?<![\w.-])([a-z0-9_.-]+)/([a-z0-9_.-]+)(?![\w.-])",
+            lowered,
+            re.IGNORECASE,
+        ):
+            _add(f"https://github.com/{owner}/{repo}/blob/main/README.md?plain=1")
+
+    return urls
+
+
+def _web_synthesis_continuation_request(
+    original_request: str,
+    ledger: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Make the original task the last conversational input after tool data.
+
+    ChatGPT Subscription's Responses endpoint receives MCP/textual tool output
+    as a user-role untrusted data item.  Without a following task item, a real
+    Codex round can treat that data as a new context-free turn and answer with
+    a greeting.  This server-authored bridge is deliberately compact: fetched
+    bodies remain in the preceding untrusted item, while the original request
+    and stable evidence IDs are re-anchored as the next action.
+    """
+
+    source_ids = ", ".join(
+        f"[{index}]"
+        for index, _source in enumerate(ledger or [], 1)
+    ) or "none yet"
+    return {
+        "role": "user",
+        "content": (
+            "WEB SYNTHESIS CONTINUATION REQUEST (server-authored):\n"
+            "Continue the same task below; this is not a new conversation.\n"
+            f"Original user request:\n{str(original_request or '').strip()}\n"
+            f"Currently fetched stable evidence IDs: {source_ids}.\n"
+            "If an explicitly named source is still being fetched, wait for that tool result. "
+            "Otherwise answer the original request now in the user's language, using only "
+            "the fetched bodies and citing factual claims with their stable [n] IDs."
+        ),
+    }
+
+
 def _web_tool_call_limit(requested_limit: int, *, web_completion_required: bool) -> int:
     """Return a finite tool budget for strict web turns.
 
@@ -507,11 +785,119 @@ def _web_tool_call_limit(requested_limit: int, *, web_completion_required: bool)
     return 4 if web_completion_required else requested_limit
 
 
+def _web_fallback_query(
+    last_user: str,
+    retrieval_query: str,
+    *,
+    web_delta_required: bool,
+) -> str:
+    """Choose the deterministic discovery query for a strict web turn.
+
+    Context resolution intentionally combines prior turns for vague repair
+    requests.  A delta request is already explicit, however; concatenating the
+    prior prompts turns a focused "latest update" lookup into a noisy compound
+    query and can rank the old sources ahead of the requested new evidence.
+    """
+
+    query = str(
+        last_user
+        if web_delta_required
+        else (retrieval_query or last_user)
+        or ""
+    ).strip()
+
+    if not web_delta_required:
+        return query
+
+    # E2E markers are correlation labels for deterministic cleanup, not search
+    # intent.  Letting them reach the provider lowers recall and can dominate a
+    # short follow-up query.
+    query = re.sub(r"^WEB-E2E-[A-Z0-9-]+:\s*", "", query, flags=re.IGNORECASE)
+
+    normalized = query.casefold()
+    asks_for_latest = any(
+        signal in normalized
+        for signal in ("최신", "가장 최근", "최근 업데이트", "latest", "newest")
+    )
+    asks_for_update = any(
+        signal in normalized
+        for signal in ("업데이트", "출시", "릴리스", "update", "release")
+    )
+    asks_for_official = "공식" in normalized or "official" in normalized
+    if (
+        "openai" in normalized
+        and "codex" in normalized
+        and asks_for_latest
+        and asks_for_update
+        and asks_for_official
+    ):
+        return (
+            f"site:openai.com/index/ Codex Product {time.strftime('%Y')} "
+            "official OpenAI latest update release"
+        )
+
+    return query
+
+
+def _rewrite_delta_web_search_blocks(
+    tool_blocks: List[ToolBlock],
+    compact_query: str,
+) -> List[ToolBlock]:
+    """Bind model-emitted delta discovery to the current compact intent.
+
+    The fallback path already uses ``_web_fallback_query``, but a model can
+    emit its own long Korean ``web_search`` block first.  Rewriting at the
+    execution boundary keeps prior-chat prose and overly narrow recency
+    filters out of the provider request while preserving direct fetches.
+    """
+
+    query = str(compact_query or "").strip()
+    if not query:
+        return list(tool_blocks or [])
+    rewritten: List[ToolBlock] = []
+    for block in tool_blocks or []:
+        if block.tool_type == "web_search":
+            rewritten.append(ToolBlock(
+                "web_search",
+                json.dumps(
+                    {"query": query[:2000]},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ))
+        else:
+            rewritten.append(block)
+    return rewritten
+
+
+def _delta_query_was_compacted(last_user: str, compact_query: str) -> bool:
+    """Return whether the deterministic delta query materially changed intent text.
+
+    Model-authored reformulations are often better than a vague follow-up such
+    as "find one more example".  Only bind execution to the deterministic query
+    when the fallback policy actually produced a specialized compact query;
+    removing an E2E correlation marker alone is not a reason to discard the
+    model's useful reformulation.
+    """
+
+    raw_query = re.sub(
+        r"^WEB-E2E-[A-Z0-9-]+:\s*",
+        "",
+        str(last_user or "").strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    return bool(
+        compact_query
+        and str(compact_query).strip().casefold() != raw_query.casefold()
+    )
+
+
 def _limit_strict_web_tool_blocks(
     tool_blocks: List[ToolBlock],
     *,
     used_native: bool,
     web_completion_required: bool,
+    web_delta_required: bool = False,
 ) -> List[ToolBlock]:
     """Run at most four distinct textual web calls in one bounded batch.
 
@@ -531,9 +917,14 @@ def _limit_strict_web_tool_blocks(
         return blocks
     selected: List[ToolBlock] = []
     seen = set()
+    selected_searches = 0
     for block in blocks:
         if block.tool_type not in WEB_TOOL_NAMES:
             continue
+        if block.tool_type == "web_search":
+            if web_delta_required and selected_searches >= 1:
+                continue
+            selected_searches += 1
         raw = str(block.content or "").strip()
         canonical = raw
         if raw.startswith("{"):
@@ -2558,6 +2949,7 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
     user turns lets the follow-up inherit the topic so just-used tools stay
     surfaced. Newest-first, so the latest turn survives the length cap."""
     collected = []
+    resolving_repair_chain = False
     for msg in reversed(messages):
         if msg.get("role") != "user":
             continue
@@ -2571,7 +2963,17 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
         meta = msg.get("metadata") or {}
         if not content or meta.get("trusted") is False or content.startswith("[Tool execution results]"):
             continue
+        # A repair complaint ("마지막 질문에 답이 아니다", "위의 맥락이
+        # 이상하다") points backward but carries no retrieval subject.  Using
+        # it as a query produced unrelated search results and severed the
+        # original conversation.  Resolve past every repair-only turn to the
+        # last substantive human request.
+        if is_korean_repair_followup(content):
+            resolving_repair_chain = True
+            continue
         collected.append(content)
+        if resolving_repair_chain:
+            break
         if len(collected) >= max_user:
             break
     return "\n".join(collected)[:max_chars]
@@ -3698,14 +4100,29 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    _repair_followup = is_korean_repair_followup(_last_user)
+    _web_delta_required = _wants_web_delta_retrieval(_last_user)
+    _resolved_substantive_request = (
+        _recent_context_for_retrieval(messages)
+        if _repair_followup
+        else ""
+    )
     _web_reuse_requested = bool(
         forced_tools
         and (set(forced_tools) & WEB_TOOL_NAMES)
-        and _wants_prior_web_evidence_reuse(_last_user)
+        and (
+            _wants_prior_web_evidence_reuse(_last_user)
+            or _web_delta_required
+        )
+    )
+    _reused_web_evidence = (
+        _prior_verified_web_evidence(messages)
+        if _web_reuse_requested
+        else ""
     )
     _reused_web_sources = (
         _prior_verified_web_sources(messages)
-        if _web_reuse_requested
+        if _web_reuse_requested and _reused_web_evidence
         else []
     )
     if _reused_web_sources:
@@ -3718,14 +4135,40 @@ async def stream_agent_loop(
                 f"    {_source.get('url')}"
             )
         _reuse_lines.append(
-            "Answer from this bounded manifest without a new web call unless the "
-            "user asks for fresh/delta evidence or the manifest is insufficient. "
-            "Cite it as [n] and do not treat assistant prose outside this manifest "
-            "as verified evidence."
+            (
+                "DELTA WEB RETRIEVAL REQUIRED: Keep this prior evidence ledger, but "
+                "perform one focused new search/fetch for the fresh evidence the user "
+                "requested. Merge only successfully fetched usable sources, then cite "
+                "the combined stable ledger as [n]."
+                if _web_delta_required
+                else
+                "Answer from this bounded manifest without a new web call unless the "
+                "manifest is insufficient. Cite it as [n] and do not treat assistant "
+                "prose outside this manifest as verified evidence."
+            )
         )
         messages = _insert_before_latest_user(messages, {
             "role": "system",
             "content": "\n".join(_reuse_lines),
+            "_protected": True,
+        })
+        messages = _insert_before_latest_user(
+            messages,
+            untrusted_context_message(
+                "prior fetched web evidence for bounded reuse",
+                _reused_web_evidence,
+            ),
+        )
+    if _repair_followup and _resolved_substantive_request:
+        messages = _insert_before_latest_user(messages, {
+            "role": "system",
+            "content": (
+                "RESOLVED SUBSTANTIVE USER REQUEST (Korean repair turn):\n"
+                + _resolved_substantive_request
+                + "\nThe latest user message reports a missed answer or broken context. "
+                "Answer the resolved request above directly. Never use the repair wording "
+                "itself as a search query, document topic, or source claim."
+            ),
             "_protected": True,
         })
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
@@ -4476,6 +4919,7 @@ async def stream_agent_loop(
     _web_reused_sources = len(_reused_web_sources)
     _web_usable_sources = len(_web_source_ledger)
     _web_failure_codes: list[str] = []
+    _pending_web_fetch_urls: list[str] = _required_named_web_fetch_urls(_last_user)
     _web_completion_nudges = 0
     _MAX_WEB_COMPLETION_NUDGES = 2
     _legal_attempted_calls = 0
@@ -4869,18 +5313,79 @@ async def stream_agent_loop(
                 tool_blocks,
                 used_native=used_native,
                 web_completion_required=_web_completion_required,
+                web_delta_required=_web_delta_required,
             )
             tool_blocks = _limit_strict_legal_tool_blocks(
                 tool_blocks,
                 used_native=used_native,
                 legal_completion_required=_legal_completion_required,
             )
+        if _web_delta_required and not used_native:
+            _delta_query = _web_fallback_query(
+                _last_user,
+                _retrieval_query,
+                web_delta_required=True,
+            )
+            _before_delta_rewrite = [
+                block.content for block in tool_blocks
+                if block.tool_type == "web_search"
+            ]
+            if _delta_query_was_compacted(_last_user, _delta_query):
+                tool_blocks = _rewrite_delta_web_search_blocks(
+                    tool_blocks,
+                    _delta_query,
+                )
+            if (
+                _before_delta_rewrite
+                and _delta_query_was_compacted(_last_user, _delta_query)
+            ):
+                logger.info(
+                    "[agent-web] rebound delta search to current compact intent query=%s",
+                    _private_text_trace(_delta_query),
+                )
         if len(tool_blocks) < _pre_evidence_limit_count:
             logger.info(
                 "[agent-evidence] executing bounded textual evidence batch kept=%s dropped=%s",
                 len(tool_blocks),
                 _pre_evidence_limit_count - len(tool_blocks),
             )
+        if _pending_web_fetch_urls and _web_source_ledger:
+            _already_fetched_keys = {
+                _web_source_identity_key(source.get("url"))
+                for source in _web_source_ledger
+            }
+            _pending_web_fetch_urls = [
+                url for url in _pending_web_fetch_urls
+                if _web_source_identity_key(url) not in _already_fetched_keys
+            ]
+        if (
+            _web_completion_required
+            and not used_native
+            and not tool_blocks
+            and _pending_web_fetch_urls
+            and not _force_answer
+        ):
+            # A subscription/Codex response may acknowledge the direct-fetch
+            # nudge but omit textual web_fetch fences.  The model already named
+            # these URLs in its draft; execute the same bounded, policy-checked
+            # fetches deterministically so retrieval cannot stall in prose.
+            _remaining_fetch_budget = (
+                len(_pending_web_fetch_urls)
+                if max_tool_calls <= 0
+                else max(0, max_tool_calls - total_tool_calls)
+            )
+            _fetch_count = min(2, _remaining_fetch_budget, len(_pending_web_fetch_urls))
+            if _fetch_count:
+                _fetch_targets = _pending_web_fetch_urls[:_fetch_count]
+                del _pending_web_fetch_urls[:_fetch_count]
+                tool_blocks = [
+                    ToolBlock("web_fetch", target)
+                    for target in _fetch_targets
+                ]
+                logger.info(
+                    "[agent-web] inserted %s deterministic primary fetch(es)",
+                    len(tool_blocks),
+                )
         if (
             _web_completion_required
             and not used_native
@@ -4895,7 +5400,11 @@ async def stream_agent_loop(
             # focused search from the already context-resolved retrieval query,
             # then feed its fetched bodies back through the normal tool-result
             # and citation-manifest path.
-            _fallback_query = str(_retrieval_query or _last_user or "").strip()
+            _fallback_query = _web_fallback_query(
+                _last_user,
+                _retrieval_query,
+                web_delta_required=_web_delta_required,
+            )
             if _fallback_query:
                 tool_blocks = [ToolBlock(
                     "web_search",
@@ -5040,7 +5549,12 @@ async def stream_agent_loop(
             tc.get("name") in ("create_document", "update_document")
             for tc in native_tool_calls
         )
-        if not has_doc_tool and session_id and "create_document" not in (disabled_tools or set()):
+        if (
+            not _evidence_completion_required
+            and not has_doc_tool
+            and session_id
+            and "create_document" not in (disabled_tools or set())
+        ):
             _code_block_re = re.compile(r'```(\w*)\n([\s\S]*?)```')
             for m in _code_block_re.finditer(round_response):
                 lang_tag = m.group(1).lower()
@@ -5086,7 +5600,9 @@ async def stream_agent_loop(
                     attempted_calls=_web_attempted_calls,
                     successful_calls=_web_successful_calls,
                     usable_sources=_web_usable_sources,
-                    reused_sources=_web_reused_sources,
+                    reused_sources=(
+                        0 if _web_delta_required else _web_reused_sources
+                    ),
                 )
                 if not _web_problem:
                     if _invalid_web_citation_numbers(
@@ -5095,12 +5611,12 @@ async def stream_agent_loop(
                     ):
                         _web_problem = "unverified_citation"
                     _verified_urls = {
-                        _normalise_web_source_url(source.get("url"))
+                        _web_source_identity_key(source.get("url"))
                         for source in _web_source_ledger
                     }
                     _unverified_answer_urls = [
                         url for url in _answer_web_urls(_intent_text)
-                        if _normalise_web_source_url(url) not in _verified_urls
+                        if _web_source_identity_key(url) not in _verified_urls
                     ]
                     if _unverified_answer_urls:
                         _web_problem = "unverified_citation"
@@ -5140,6 +5656,9 @@ async def stream_agent_loop(
                                 _targets = "\n".join(
                                     f"- {url}" for url in _unverified_answer_urls[:2]
                                 )
+                                _pending_web_fetch_urls = list(dict.fromkeys(
+                                    _unverified_answer_urls[:2]
+                                ))
                                 _web_instruction = (
                                     "The draft cited primary URL(s) whose bodies were not fetched. "
                                     "Call web_fetch for the URL(s) below now, then synthesize from "
@@ -5451,6 +5970,46 @@ async def stream_agent_loop(
                         round_texts[-1] = _intent_text
                         full_response = full_response[:_round_full_start] + _intent_text
                         yield f'data: {json.dumps({"type": "web_sources", "data": _final_web_sources})}\n\n'
+                        if session_id:
+                            _artifact_result = await upsert_web_knowledge_artifact(
+                                session_id=session_id,
+                                owner=owner,
+                                query=str(_intent.get("retrieval_query") or _last_user),
+                                answer=_intent_text,
+                                sources=_final_web_sources,
+                                continuation=bool(_intent.get("continuation")),
+                                delta=_web_delta_required,
+                                repair=_repair_followup,
+                            )
+                            if _artifact_result.get("doc_id"):
+                                yield (
+                                    "data: "
+                                    + json.dumps({
+                                        "type": "doc_update",
+                                        "doc_id": _artifact_result["doc_id"],
+                                        "title": _artifact_result.get("title", ""),
+                                        "language": _artifact_result.get("language", "markdown"),
+                                        "content": _artifact_result.get("content", ""),
+                                        "version": _artifact_result.get("version", 1),
+                                        "artifact_type": "web-knowledge",
+                                    })
+                                    + "\n\n"
+                                )
+                                tool_events.append({
+                                    "round": round_num,
+                                    "tool": "web_knowledge_artifact",
+                                    "desc": "Verified web synthesis artifact",
+                                    "command": _artifact_result.get("action", "update"),
+                                    "output": _artifact_result.get("title", ""),
+                                    "exit_code": 0,
+                                    "doc_id": _artifact_result["doc_id"],
+                                    "doc_title": _artifact_result.get("title", ""),
+                                })
+                            elif _artifact_result.get("error"):
+                                logger.warning(
+                                    "[agent-web] knowledge artifact skipped after error: %s",
+                                    _artifact_result["error"],
+                                )
                 yield f'data: {json.dumps({"delta": _intent_text})}\n\n'
             break  # no tools — done
 
@@ -6218,6 +6777,14 @@ async def stream_agent_loop(
                         "korean_law_lookup again. Gather the still-required web evidence next."
                     ),
                 })
+
+        if (
+            _web_completion_required
+            and any(block.tool_type in WEB_TOOL_NAMES for block in tool_blocks)
+        ):
+            messages.append(
+                _web_synthesis_continuation_request(_last_user, _web_source_ledger)
+            )
 
         # Emit agent_step event
         yield (

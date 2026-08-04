@@ -52,11 +52,29 @@ _CONTINUATION_EXACT_RE = re.compile(
     r"\s*[.!?~]*\s*$"
 )
 _CONTEXT_REFERENCE_RE = re.compile(
-    r"(?:그렇다면|그러면|그럼|그런데\s*이번에는|이번에는|방금|위\s*(?:질문|내용)|"
-    r"앞서|이어서|그\s*(?:근거|결과|내용|질문|지시)|동일한?\s*근거|그대로|그렇게)"
+    r"(?:그렇다면|그러면|그럼|그런데\s*이번에는|이번에는|방금|"
+    r"위(?:의)?\s*(?:맥락|질문|내용|답변)|(?:마지막|직전|앞선|이전)\s*(?:질문|답변)|"
+    r"앞서|이어서|그중|이\s*경우|그\s*부분|이를?|"
+    r"그\s*(?:근거|결과|내용|질문|지시)|동일한?\s*근거|그대로|그렇게)"
+)
+_REPAIR_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"(?:마지막|직전|앞선|이전)\s*(?:질문|답변)|"
+    r"위(?:의)?\s*(?:맥락|질문|내용|답변)|"
+    r"(?:방금|앞선|이전).{0,24}(?:요청|질문|내용).{0,48}"
+    r"(?:다시\s*시도|재시도|다시\s*해)|"
+    r"(?:맥락|답변|피드백).{0,28}(?:이상|아니|못|누락|놓쳤|끊)|"
+    r"(?:질문).{0,20}(?:답|응답).{0,20}(?:아니|못|누락|놓쳤)"
+    r")",
+    re.DOTALL,
 )
 _TOPIC_SWITCH_RE = re.compile(r"(?:새\s*주제로|주제를\s*바꿔|다른\s*주제|그런데\s+[가-힣A-Za-z0-9_-]{2,})")
 _KOREAN_QUESTION_END_RE = re.compile(r"(?:인가요|뭔가요|무엇인가요|알려\s*주세요|설명해\s*주세요)[?\s]*$")
+_CONTEXTUAL_QUESTION_RE = re.compile(
+    r"(?:어떻게|왜|무엇|뭐|어떤|어디|언제|누가).{0,60}"
+    r"(?:나요|가요|까요|인가요|한가요|되나요)|"
+    r"(?:나요|까요|인가요|한가요|되나요|맞나요|유지되나요)[?\s]*$"
+)
 
 _PROMISE_RE = re.compile(
     r"(?:검색|확인|검증|조회|찾아보|살펴보|조사|실행|열어보|저장)"
@@ -201,18 +219,36 @@ def is_korean_contextual_followup(text: str, recent_context: str) -> bool:
     value = str(text or "").strip()
     if not value or not is_korean_web_context(recent_context):
         return False
+    if is_korean_repair_followup(value):
+        return True
     if _TOPIC_SWITCH_RE.search(value) and not re.search(r"이번에는|방금|위\s*(?:질문|내용)", value):
         return False
     if _CONTINUATION_EXACT_RE.fullmatch(value):
         return True
     if not _CONTEXT_REFERENCE_RE.search(value):
         return False
-    if is_korean_explanatory_question(value) and not re.search(r"할\s*수\s*있", value):
+    if (
+        is_korean_explanatory_question(value)
+        and not _CONTEXTUAL_QUESTION_RE.search(value)
+        and not re.search(r"할\s*수\s*있", value)
+    ):
         return False
     return bool(
         _ACTION_END_RE.search(value)
+        or _CONTEXTUAL_QUESTION_RE.search(value)
         or re.search(r"(?:잘\s*할\s*수\s*있|가능할까요|되나요|해줄래)", value)
     )
+
+
+def is_korean_repair_followup(text: str) -> bool:
+    """Whether a Korean turn repairs a missed or context-broken answer.
+
+    These short turns must never become literal retrieval queries.  They refer
+    to the last substantive user request even when they omit an action verb.
+    """
+
+    value = str(text or "").strip()
+    return bool(value and contains_hangul(value) and _REPAIR_FOLLOWUP_RE.search(value))
 
 
 def is_korean_explicit_continuation(text: str) -> bool:
@@ -221,6 +257,8 @@ def is_korean_explicit_continuation(text: str) -> bool:
     value = str(text or "").strip()
     if not value or not contains_hangul(value):
         return False
+    if is_korean_repair_followup(value):
+        return True
     if _TOPIC_SWITCH_RE.search(value) and not re.search(r"이번에는|방금|위\s*(?:질문|내용)", value):
         return False
     if _CONTINUATION_EXACT_RE.fullmatch(value):
@@ -229,6 +267,7 @@ def is_korean_explicit_continuation(text: str) -> bool:
         _CONTEXT_REFERENCE_RE.search(value)
         and (
             _ACTION_END_RE.search(value)
+            or _CONTEXTUAL_QUESTION_RE.search(value)
             or re.search(r"(?:잘\s*할\s*수\s*있|가능할까요|되나요|해줄래)", value)
         )
     )
